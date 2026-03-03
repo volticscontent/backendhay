@@ -43,25 +43,27 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         const base64FromBody = body.data?.base64;
         const message = await parseIncomingMessage(msgData, base64FromBody);
 
-        // Identify the user phone — priorizar campos com número real, rejeitar LIDs
+        // Identify the user phone — priorizar número real, aceitar LID como fallback
         const candidatos = [
             body.senderpn,
             body.data?.senderpn,
             body.senderPhone,
             body.data?.senderPhone,
-            body.data?.key?.participant,     // Em grupos, participant tem o número real
+            body.data?.key?.participant,
             body.data?.participant,
-            body.data?.key?.remoteJid,       // Último recurso — pode ser LID
+            body.data?.key?.remoteJid,
         ].filter(Boolean);
 
-        // Pegar o primeiro que NÃO seja LID nem grupo
+        // Pegar o primeiro que NÃO seja grupo, preferindo não-LID
         let sender = candidatos.find(s => !s.includes('@lid') && !s.includes('@g.us'));
 
-        // Se só sobrou LID, logar e descartar
-        if (!sender && candidatos.length > 0) {
-            console.log('[Webhook] ⚠️ Todos os candidatos são LID/grupo, ignorando:', candidatos);
-            console.log('[Webhook] Body keys:', JSON.stringify(Object.keys(body)));
-            console.log('[Webhook] Data keys:', JSON.stringify(Object.keys(body.data || {})));
+        // Se não achou número real, aceitar LID como fallback (funciona com a Evolution API)
+        if (!sender) {
+            sender = candidatos.find(s => !s.includes('@g.us'));
+            if (sender?.includes('@lid')) {
+                console.log('[Webhook] ⚠️ Usando LID como sender (número real não disponível):', sender);
+                console.log('[Webhook] Body keys:', JSON.stringify(Object.keys(body)));
+            }
         }
 
         const fromMe = body.data?.key?.fromMe;
