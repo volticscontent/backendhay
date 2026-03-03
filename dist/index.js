@@ -6,12 +6,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
+const http_1 = require("http");
 const webhook_1 = __importDefault(require("./routes/webhook"));
 const message_queue_1 = require("./queues/message-queue");
 const cron_1 = require("./cron");
+const socket_server_1 = require("./lib/socket-server");
 const db_1 = __importDefault(require("./lib/db"));
 const redis_1 = __importDefault(require("./lib/redis"));
 const app = (0, express_1.default)();
+const httpServer = (0, http_1.createServer)(app);
 const PORT = parseInt(process.env.PORT || '3001', 10);
 // ==================== Middlewares ====================
 app.use((0, cors_1.default)());
@@ -49,10 +52,14 @@ async function bootstrap() {
     // 2. CRON Jobs
     console.log('\n[Boot] Registrando CRON Jobs...');
     (0, cron_1.registerCronJobs)();
-    // 3. Express Server
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`\n[Boot] ✅ Servidor HTTP rodando em http://0.0.0.0:${PORT}`);
+    // 3. Socket.io Server
+    console.log('\n[Boot] Iniciando Socket.io Server...');
+    (0, socket_server_1.initSocketServer)(httpServer);
+    // 4. Express + Socket Server
+    httpServer.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n[Boot] ✅ Servidor HTTP + WebSocket rodando em http://0.0.0.0:${PORT}`);
         console.log(`[Boot] 📡 Webhook endpoint: http://0.0.0.0:${PORT}/api/webhook/whatsapp`);
+        console.log(`[Boot] 🔌 Socket.io: ws://0.0.0.0:${PORT}`);
         console.log(`[Boot] 🏥 Health check: http://0.0.0.0:${PORT}/api/health`);
         console.log('\n[Boot] 🚀 Bot Backend pronto para receber mensagens!\n');
     });

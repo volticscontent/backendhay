@@ -1,13 +1,16 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import { createServer } from 'http';
 import webhookRoutes from './routes/webhook';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { registerCronJobs } from './cron';
+import { initSocketServer } from './lib/socket-server';
 import pool from './lib/db';
 import redis from './lib/redis';
 
 const app = express();
+const httpServer = createServer(app);
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
 // ==================== Middlewares ====================
@@ -52,10 +55,15 @@ async function bootstrap() {
     console.log('\n[Boot] Registrando CRON Jobs...');
     registerCronJobs();
 
-    // 3. Express Server
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`\n[Boot] ✅ Servidor HTTP rodando em http://0.0.0.0:${PORT}`);
+    // 3. Socket.io Server
+    console.log('\n[Boot] Iniciando Socket.io Server...');
+    initSocketServer(httpServer);
+
+    // 4. Express + Socket Server
+    httpServer.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n[Boot] ✅ Servidor HTTP + WebSocket rodando em http://0.0.0.0:${PORT}`);
         console.log(`[Boot] 📡 Webhook endpoint: http://0.0.0.0:${PORT}/api/webhook/whatsapp`);
+        console.log(`[Boot] 🔌 Socket.io: ws://0.0.0.0:${PORT}`);
         console.log(`[Boot] 🏥 Health check: http://0.0.0.0:${PORT}/api/health`);
         console.log('\n[Boot] 🚀 Bot Backend pronto para receber mensagens!\n');
     });

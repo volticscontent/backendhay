@@ -40,13 +40,26 @@ router.post('/webhook/whatsapp', async (req, res) => {
         const msgData = body.data?.message;
         const base64FromBody = body.data?.base64;
         const message = await (0, message_parser_1.parseIncomingMessage)(msgData, base64FromBody);
-        // Identify the user phone
-        const sender = body.senderpn || body.data?.senderpn || body.senderPhone || body.data?.senderPhone || body.data?.key?.remoteJid;
+        // Identify the user phone — priorizar campos com número real, rejeitar LIDs
+        const candidatos = [
+            body.senderpn,
+            body.data?.senderpn,
+            body.senderPhone,
+            body.data?.senderPhone,
+            body.data?.key?.participant, // Em grupos, participant tem o número real
+            body.data?.participant,
+            body.data?.key?.remoteJid, // Último recurso — pode ser LID
+        ].filter(Boolean);
+        // Pegar o primeiro que NÃO seja LID nem grupo
+        let sender = candidatos.find(s => !s.includes('@lid') && !s.includes('@g.us'));
+        // Se só sobrou LID, logar e descartar
+        if (!sender && candidatos.length > 0) {
+            console.log('[Webhook] ⚠️ Todos os candidatos são LID/grupo, ignorando:', candidatos);
+            console.log('[Webhook] Body keys:', JSON.stringify(Object.keys(body)));
+            console.log('[Webhook] Data keys:', JSON.stringify(Object.keys(body.data || {})));
+        }
         const fromMe = body.data?.key?.fromMe;
         const pushName = body.data?.pushName;
-        if (sender && sender.includes('@lid')) {
-            console.log('[Webhook] Received LID. Dumping keys:', Object.keys(body));
-        }
         if (fromMe) {
             res.json({ status: 'ignored_from_me' });
             return;

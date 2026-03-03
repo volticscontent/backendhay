@@ -65,10 +65,19 @@ export function registerCronJobs(): void {
 
             for (const lead of res.rows) {
                 try {
+                    // Limpar telefone: remover @lid, @s.whatsapp.net etc
+                    const rawPhone = lead.telefone || '';
+                    const phone = rawPhone.split('@')[0].replace(/\D/g, '');
+
+                    if (!phone || phone.length < 10) {
+                        console.log(`[CRON] Follow-up - Telefone inválido, pulando: ${rawPhone}`);
+                        continue;
+                    }
+
                     const nome = lead.nome_completo || 'Cliente';
 
                     await enqueueMessages({
-                        phone: lead.telefone,
+                        phone,
                         messages: [{ content: `Olá ${nome}! 😊 Vi que você se interessou pelos nossos serviços. Posso te ajudar com alguma dúvida?`, type: 'text', delay: 0 }],
                         context: 'cron-follow-up'
                     });
@@ -79,7 +88,7 @@ export function registerCronJobs(): void {
             WHERE lead_id = (SELECT id FROM leads WHERE telefone = $1)
           `, [lead.telefone]);
 
-                    console.log(`[CRON] Follow-up enviado para ${lead.telefone}`);
+                    console.log(`[CRON] Follow-up enviado para ${phone}`);
 
                     // Rate limit: esperar 2s entre envios
                     await new Promise(resolve => setTimeout(resolve, 2000));
