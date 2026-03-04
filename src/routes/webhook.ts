@@ -44,6 +44,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         const message = await parseIncomingMessage(msgData, base64FromBody);
 
         // Identify the user phone — priorizar número real, aceitar LID como fallback
+        // ATENÇÃO: body.sender é o número da INSTÂNCIA, NÃO do usuário!
         const candidatos = [
             body.data?.key?.senderPn,        // Evolution API v2: número real quando remoteJid é LID
             body.senderpn,
@@ -52,7 +53,6 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
             body.data?.senderPhone,
             body.data?.key?.participant,
             body.data?.participant,
-            body.sender,                     // Campo raiz do payload da Evolution
             body.data?.key?.remoteJid,       // Último recurso — pode ser LID
         ].filter(Boolean);
 
