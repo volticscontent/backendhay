@@ -9,256 +9,315 @@ import { addToHistory, getChatHistory } from '../lib/chat-history';
 import { enqueueMessages } from './message-queue';
 
 // ==================== Constantes ====================
-const DEBOUNCE_DELAY_MS = 2000; // 2 segundos de debounce
+
+const DEBOUNCE_DELAY_MS = 4000;
 const BUFFER_KEY_PREFIX = 'msg_buffer:';
 const META_KEY_PREFIX = 'msg_meta:';
-const BUFFER_TTL = 60; // 60 segundos de TTL para segurança
+const LOCK_KEY_PREFIX = 'msg_lock:';
+const BUFFER_TTL = 120;
+const LOCK_TTL = 60;
+const MAX_BUFFER_SIZE = 20;
+const STALE_JOB_STATES = new Set(['completed', 'failed', 'unknown']);
 
-// ==================== Fila de Debounce ====================
+// ==================== Fila ====================
+
 export const debounceQueue = new Queue('message-debounce', {
     connection: redis as any,
     defaultJobOptions: {
         attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
-        removeOnComplete: { age: 3600 },
-        removeOnFail: { age: 3600 * 24 },
+        backoff: { type: 'exponential', delay: 3000 },
+        removeOnComplete: true,
+        removeOnFail: true,
     },
 });
 
-// ==================== Interface ====================
+// ==================== Types ====================
+
 interface DebounceMetadata {
     sender: string;
     pushName?: string;
     userPhone: string;
 }
 
-// ==================== Funções Públicas ====================
+type UserState = 'lead' | 'qualified' | 'customer';
+
+type AgentRunner = (message: string, context: AgentContext) => Promise<string>;
+
+const AGENT_MAP: Record<UserState, { runner: AgentRunner; label: string }> = {
+    qualified: { runner: runVendedorAgent, label: 'VENDEDOR (Icaro)' },
+    customer: { runner: runAtendenteAgent, label: 'ATENDENTE (Apolo Customer)' },
+    lead: { runner: runApoloAgent, label: 'APOLO (SDR)' },
+};
+
+// ==================== Helpers Redis (atômico via pipeline) ====================
+
+/** Acumula mensagem + metadados de forma atômica para evitar estado inconsistente */
+async function atomicBufferPush(
+    userPhone: string,
+    serialized: string,
+    metadata: DebounceMetadata,
+): Promise<number> {
+    const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
+    const metaKey = `${META_KEY_PREFIX}${userPhone}`;
+
+    const pipeline = redis.pipeline();
+    pipeline.rpush(bufferKey, serialized);
+    pipeline.expire(bufferKey, BUFFER_TTL);
+    pipeline.set(metaKey, JSON.stringify(metadata), 'EX', BUFFER_TTL);
+    pipeline.llen(bufferKey);
+
+    const results = await pipeline.exec();
+    // llen é o 4° comando (index 3), resultado em [err, value]
+    const bufferLen = (results?.[3]?.[1] as number) ?? 0;
+    return bufferLen;
+}
+
+/** Lê buffer + meta e limpa tudo atomicamente (pop atômico) */
+async function atomicBufferFlush(userPhone: string): Promise<{ messages: string[]; metadata: DebounceMetadata | null }> {
+    const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
+    const metaKey = `${META_KEY_PREFIX}${userPhone}`;
+
+    // Leitura
+    const [rawMessages, metaRaw] = await Promise.all([
+        redis.lrange(bufferKey, 0, -1),
+        redis.get(metaKey),
+    ]);
+
+    // Limpeza atômica
+    const pipeline = redis.pipeline();
+    pipeline.del(bufferKey);
+    pipeline.del(metaKey);
+    await pipeline.exec();
+
+    const metadata = metaRaw ? JSON.parse(metaRaw) as DebounceMetadata : null;
+    return { messages: rawMessages ?? [], metadata };
+}
+
+/** Lock distribuído simples para evitar processamento duplo do mesmo usuário */
+async function acquireLock(userPhone: string): Promise<boolean> {
+    const lockKey = `${LOCK_KEY_PREFIX}${userPhone}`;
+    const result = await redis.set(lockKey, '1', 'EX', LOCK_TTL, 'NX');
+    return result === 'OK';
+}
+
+async function releaseLock(userPhone: string): Promise<void> {
+    await redis.del(`${LOCK_KEY_PREFIX}${userPhone}`);
+}
+
+// ==================== Helpers de Negócio ====================
+
+/** Remove job anterior (qualquer estado exceto active) para liberar o jobId */
+async function clearPreviousJob(jobId: string, userPhone: string): Promise<'cleared' | 'active' | 'none'> {
+    try {
+        const existing = await debounceQueue.getJob(jobId);
+        if (!existing) return 'none';
+
+        const state = await existing.getState();
+
+        if (state === 'active') {
+            console.log(`[Debounce] Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+            return 'active';
+        }
+
+        // delayed, waiting, completed, failed — tudo removível
+        await existing.remove();
+        const label = state === 'delayed' || state === 'waiting' ? 'Timer resetado' : `Job antigo (${state}) removido`;
+        console.log(`[Debounce] ${label} para ${userPhone}`);
+        return 'cleared';
+    } catch {
+        return 'none';
+    }
+}
+
+/** Concatena mensagens do buffer, tratando multimodal como texto */
+function combineMessages(rawMessages: string[]): string {
+    return rawMessages.map(raw => {
+        try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                return parsed.map((item: any) => item.text || '[media]').join(' ');
+            }
+            return raw;
+        } catch {
+            return raw;
+        }
+    }).join('\n');
+}
+
+/** Resolve o estado do usuário a partir do DB */
+async function resolveUserState(userPhone: string, pushName?: string): Promise<UserState> {
+    const userJson = await getUser(userPhone);
+    let user: Record<string, unknown> | null = null;
+
+    try {
+        if (userJson) {
+            const parsed = JSON.parse(userJson);
+            if (parsed.status !== 'error' && parsed.status !== 'not_found') user = parsed;
+        }
+    } catch (e) {
+        console.error('[Debounce] Erro ao parsear usuario:', e);
+    }
+
+    if (!user) {
+        console.log(`[Debounce] Novo usuário (${userPhone}). Criando registro...`);
+        try {
+            const result = JSON.parse(await createUser({ telefone: userPhone, nome_completo: pushName || 'Desconhecido' }));
+            if (result.status !== 'error') {
+                await updateUser({ telefone: userPhone, situacao: 'nao_respondido' });
+            }
+        } catch (err) {
+            console.error(`[Debounce] Erro ao criar usuário:`, err);
+        }
+        return 'lead';
+    }
+
+    // Atualizar nome se necessário
+    const currentName = user.nome_completo as string;
+    const shouldUpdateName = pushName && (!currentName || currentName === 'Desconhecido' || currentName.trim() === '');
+    await updateUser({
+        telefone: userPhone,
+        ...(shouldUpdateName ? { nome_completo: pushName } : {}),
+    });
+
+    // Verificar override de roteamento
+    const override = await getAgentRouting(userPhone);
+    if (override === 'vendedor') {
+        console.log(`[Debounce] Override ativo → Vendas`);
+        return 'qualified';
+    }
+
+    if (user.situacao === 'cliente') return 'customer';
+    if (user.qualificacao) return 'qualified';
+    return 'lead';
+}
+
+/** Envia resposta do agente via BullMQ */
+async function sendAgentResponse(responseText: string, sender: string, userPhone: string): Promise<void> {
+    if (!responseText) return;
+
+    await addToHistory(userPhone, 'assistant', responseText);
+
+    const messages = responseText.split('|||').map(m => m.trim()).filter(m => m.length > 0);
+    if (messages.length === 0) return;
+
+    const segments = messages.map((msg, i) => ({
+        content: msg,
+        type: 'text' as const,
+        delay: i === 0 ? 0 : 1500,
+    }));
+
+    await enqueueMessages({ phone: sender, messages: segments, context: 'agent-response' });
+}
+
+/** Envia mensagem de fallback quando AI falha */
+async function sendFallback(sender: string, userPhone: string): Promise<void> {
+    try {
+        await enqueueMessages({
+            phone: sender,
+            messages: [{
+                content: 'Tivemos uma instabilidade rápida no sistema. Nossa equipe já foi notificada. Um atendente humano responderá em breve.',
+                type: 'text',
+                delay: 0,
+            }],
+            context: 'fallback-error',
+        });
+        await updateUser({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro no bot, encaminhado para humano' });
+    } catch (err) {
+        console.error('[Debounce] Falha crítica no fallback:', err);
+    }
+}
+
+// ==================== API Pública ====================
 
 /**
- * Acumula uma mensagem no buffer Redis e agenda (ou re-agenda) o processamento.
- * Se já existe um job de debounce para esse telefone, ele é removido e um novo é criado,
- * efetivamente resetando o timer de debounce.
+ * Acumula mensagem no buffer Redis e (re)agenda o processamento com debounce.
+ * Operações Redis são atômicas via pipeline. Protege contra buffer overflow.
  */
 export async function bufferAndDebounce(
     userPhone: string,
     message: string | Array<{ type: string; text?: string; image_url?: { url: string } }>,
-    metadata: DebounceMetadata
+    metadata: DebounceMetadata,
 ): Promise<void> {
-    const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
-    const metaKey = `${META_KEY_PREFIX}${userPhone}`;
-
-    // Serializar a mensagem para armazenar no Redis
     const serialized = typeof message === 'string' ? message : JSON.stringify(message);
 
-    // Acumular mensagem no buffer (lista Redis)
-    await redis.rpush(bufferKey, serialized);
-    await redis.expire(bufferKey, BUFFER_TTL);
+    // 1. Push atômico no buffer
+    const bufferLen = await atomicBufferPush(userPhone, serialized, metadata);
+    console.log(`[Debounce] +1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
 
-    // Salvar/atualizar metadados (sempre sobrescreve com os mais recentes)
-    await redis.set(metaKey, JSON.stringify(metadata), 'EX', BUFFER_TTL);
-
-    // Contar mensagens no buffer
-    const bufferLen = await redis.llen(bufferKey);
-    console.log(`[Debounce] Mensagem acumulada para ${userPhone} (total no buffer: ${bufferLen})`);
-
-    // Remover job de debounce anterior (se existir) e criar um novo
-    const jobId = `debounce-${userPhone}`;
-
-    try {
-        // Tenta remover o job existente (pode estar delayed)
-        const existingJob = await debounceQueue.getJob(jobId);
-        if (existingJob) {
-            const state = await existingJob.getState();
-            // Só remove se estiver em espera (delayed/waiting), não se estiver ativo
-            if (state === 'delayed' || state === 'waiting') {
-                await existingJob.remove();
-                console.log(`[Debounce] Timer resetado para ${userPhone}`);
-            } else if (state === 'active') {
-                // Job já está sendo processado, esta mensagem nova será tratada em um próximo ciclo
-                console.log(`[Debounce] Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
-                return;
-            }
-        }
-    } catch (err) {
-        // Job pode não existir, tudo bem
-        console.log(`[Debounce] Nenhum job anterior encontrado para ${userPhone}`);
+    // 2. Proteção contra flood — se buffer muito grande, forçar processamento
+    if (bufferLen >= MAX_BUFFER_SIZE) {
+        console.warn(`[Debounce] ⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
+        const jobId = `debounce-${userPhone}`;
+        await clearPreviousJob(jobId, userPhone);
+        await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: 0 });
+        return;
     }
 
-    // Criar novo job com delay (debounce)
-    await debounceQueue.add('process-buffered', { userPhone }, {
-        jobId,
-        delay: DEBOUNCE_DELAY_MS,
-    });
+    // 3. Limpar job anterior e criar novo com delay (reseta o timer)
+    const jobId = `debounce-${userPhone}`;
+    const status = await clearPreviousJob(jobId, userPhone);
 
-    console.log(`[Debounce] Timer de ${DEBOUNCE_DELAY_MS}ms iniciado para ${userPhone}`);
+    if (status === 'active') return; // Job já processando, mensagem fica no buffer pro próximo ciclo
+
+    await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
+    console.log(`[Debounce] Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
 }
 
 // ==================== Worker ====================
 
-/**
- * Worker que processa mensagens acumuladas após o debounce expirar.
- * Lê o buffer Redis, concatena as mensagens e as envia para o agente AI.
- */
 export function startDebounceWorker(): Worker {
     const worker = new Worker('message-debounce', async (job: Job) => {
-        const { userPhone } = job.data;
-        const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
-        const metaKey = `${META_KEY_PREFIX}${userPhone}`;
+        const { userPhone } = job.data as { userPhone: string };
 
-        console.log(`[Debounce] Timer expirou para ${userPhone}. Processando mensagens acumuladas...`);
-
-        // 1. Ler todas as mensagens do buffer
-        const rawMessages = await redis.lrange(bufferKey, 0, -1);
-
-        if (!rawMessages || rawMessages.length === 0) {
-            console.log(`[Debounce] Buffer vazio para ${userPhone}, nada a processar.`);
-            return;
+        // 1. Lock distribuído — evita processamento duplo
+        const locked = await acquireLock(userPhone);
+        if (!locked) {
+            console.warn(`[Debounce] Lock ocupado para ${userPhone}. Re-enfileirando...`);
+            throw new Error('Lock occupied — will retry');
         }
-
-        // 2. Ler metadados
-        const metaRaw = await redis.get(metaKey);
-        if (!metaRaw) {
-            console.error(`[Debounce] Metadados não encontrados para ${userPhone}. Abortando.`);
-            return;
-        }
-
-        const metadata: DebounceMetadata = JSON.parse(metaRaw);
-
-        // 3. Limpar buffer e meta ANTES de processar (evita duplicação se outra msg chegar)
-        await redis.del(bufferKey);
-        await redis.del(metaKey);
-
-        // 4. Concatenar mensagens
-        // Tentamos preservar multimodal como texto para simplificar
-        const combinedMessages: string[] = rawMessages.map(raw => {
-            try {
-                const parsed = JSON.parse(raw);
-                if (Array.isArray(parsed)) {
-                    // Multimodal — extrair textos
-                    return parsed.map((item: any) => item.text || '[media]').join(' ');
-                }
-                return raw;
-            } catch {
-                // É uma string simples
-                return raw;
-            }
-        });
-
-        const combinedMessage = combinedMessages.join('\n');
-        console.log(`[Debounce] Processando ${rawMessages.length} mensagem(ns) combinada(s) para ${userPhone}: "${combinedMessage.substring(0, 100)}..."`);
-
-        // 5. Determinar Estado do Usuário (Routing Logic) — movido do webhook
-        let userState: 'lead' | 'qualified' | 'customer' = 'lead';
-        const userJson = await getUser(userPhone);
-        let user: Record<string, unknown> | null = null;
 
         try {
-            if (userJson) {
-                const parsed = JSON.parse(userJson);
-                if (parsed.status !== 'error' && parsed.status !== 'not_found') user = parsed;
-            }
-        } catch (e) { console.error('Erro ao parsear usuario:', e); }
+            console.log(`[Debounce] Processando mensagens acumuladas de ${userPhone}...`);
 
-        if (!user) {
-            console.log(`[Debounce] Novo usuário detectado (${userPhone}). Criando registro...`);
-            try {
-                const createResult = await createUser({ telefone: userPhone, nome_completo: metadata.pushName || 'Desconhecido' });
-                const parsedResult = JSON.parse(createResult);
-                if (parsedResult.status === 'error') {
-                    console.error(`[Debounce] Falha ao criar usuário: ${parsedResult.message}`);
-                } else {
-                    await updateUser({ telefone: userPhone, situacao: 'nao_respondido' });
-                }
-            } catch (createError) {
-                console.error(`[Debounce] Exceção crítica ao criar usuário:`, createError);
-            }
-            userState = 'lead';
-        } else {
-            const currentName = user.nome_completo as string;
-            const shouldUpdateName = metadata.pushName && (!currentName || currentName === 'Desconhecido' || currentName.trim() === '');
-            if (shouldUpdateName) {
-                await updateUser({ telefone: userPhone, nome_completo: metadata.pushName });
-                user.nome_completo = metadata.pushName;
-            } else {
-                await updateUser({ telefone: userPhone });
+            // 2. Flush atômico do buffer
+            const { messages: rawMessages, metadata } = await atomicBufferFlush(userPhone);
+
+            if (rawMessages.length === 0 || !metadata) {
+                console.log(`[Debounce] Buffer/meta vazio para ${userPhone}, nada a processar.`);
+                return;
             }
 
-            if (user.situacao === 'cliente') { userState = 'customer'; }
-            else if (user.qualificacao) { userState = 'qualified'; }
-            else { userState = 'lead'; }
-        }
+            // 3. Concatenar mensagens
+            const combinedMessage = combineMessages(rawMessages);
+            console.log(`[Debounce] ${rawMessages.length} msg(s) de ${userPhone}: "${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`);
 
-        // 5.5 Verificar Override de Roteamento
-        const routingOverride = await getAgentRouting(userPhone);
-        if (routingOverride === 'vendedor') {
-            console.log(`[Debounce] Override ativo: Redirecionando para Vendas.`);
-            userState = 'qualified';
-        }
+            // 4. Resolver estado + roteamento
+            const userState = await resolveUserState(userPhone, metadata.pushName);
+            const { runner, label } = AGENT_MAP[userState];
+            console.log(`[Debounce] → ${label}`);
 
-        // 6. Construir contexto
-        const history = await getChatHistory(userPhone);
-        const context: AgentContext = {
-            userId: metadata.sender,
-            userName: metadata.pushName,
-            userPhone: userPhone,
-            history: history,
-        };
-
-        let responseText = '';
-
-        try {
-            // 7. Despachar para o Agente Correto
-            switch (userState) {
-                case 'qualified':
-                    console.log(`[Debounce] Direcionando para VENDEDOR (Icaro)`);
-                    responseText = await runVendedorAgent(combinedMessage, context);
-                    break;
-                case 'customer':
-                    console.log(`[Debounce] Direcionando para ATENDENTE (Apolo Customer)`);
-                    responseText = await runAtendenteAgent(combinedMessage, context);
-                    break;
-                case 'lead':
-                default:
-                    console.log(`[Debounce] Direcionando para APOLO (SDR)`);
-                    responseText = await runApoloAgent(combinedMessage, context);
-                    break;
-            }
-
-            // 8. Salvar resposta e Enviar via BullMQ
-            if (responseText) {
-                await addToHistory(userPhone, 'assistant', responseText);
-            }
-
-            const messages = responseText.split('|||').map((m: string) => m.trim()).filter((m: string) => m.length > 0);
-            if (messages.length > 0) {
-                const segments = messages.map((msg, index) => ({
-                    content: msg,
-                    type: 'text' as const,
-                    delay: index === 0 ? 0 : 1500,
-                }));
-
-                await enqueueMessages({
-                    phone: metadata.sender,
-                    messages: segments,
-                    context: 'agent-response',
-                });
-            }
-        } catch (routingError) {
-            console.error(`[Debounce] Exceção na LLM ou Roteamento do cliente ${userPhone}:`, routingError);
+            // 5. Chamar AI
+            const history = await getChatHistory(userPhone);
+            const context: AgentContext = {
+                userId: metadata.sender,
+                userName: metadata.pushName,
+                userPhone,
+                history,
+            };
 
             try {
-                await enqueueMessages({
-                    phone: metadata.sender,
-                    messages: [{ content: 'Tivemos uma instabilidade rápida no sistema. Nossa equipe já foi notificada. Um atendente humano responderá em breve.', type: 'text', delay: 0 }],
-                    context: 'fallback-error'
-                });
-                await updateUser({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro na requisição do bot, encaminhado para humano' });
-            } catch (fallbackErr) {
-                console.error('[Debounce] Falha crítica ao tentar enviar mensagem de fallback', fallbackErr);
+                const response = await runner(combinedMessage, context);
+                await sendAgentResponse(response, metadata.sender, userPhone);
+            } catch (aiError) {
+                console.error(`[Debounce] Erro AI para ${userPhone}:`, aiError);
+                await sendFallback(metadata.sender, userPhone);
             }
-        }
 
-        console.log(`[Debounce] ✅ Processamento concluído para ${userPhone} (${rawMessages.length} mensagem(ns))`);
+            console.log(`[Debounce] ✅ Concluído para ${userPhone} (${rawMessages.length} msg(s))`);
+        } finally {
+            // SEMPRE libera o lock, mesmo em caso de erro
+            await releaseLock(userPhone);
+        }
     }, {
         connection: redis as any,
         concurrency: 5,
