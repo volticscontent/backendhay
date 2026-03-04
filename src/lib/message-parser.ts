@@ -5,8 +5,42 @@ import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import logger from './logger';
+import { evolutionGetBase64FromMedia } from './evolution';
 
 const log = logger.child('MessageParser');
+
+/**
+ * Tenta obter o base64 da mídia:
+ * 1. Primeiro tenta do body (inline)
+ * 2. Se não tiver, tenta baixar via Evolution API
+ */
+async function resolveBase64(
+    inlineBase64: string | undefined,
+    messageId: string | undefined,
+    mediaType: string,
+    convertToMp4: boolean = false,
+): Promise<string | undefined> {
+    if (inlineBase64) {
+        log.debug(`${mediaType}: base64 inline disponível`);
+        return inlineBase64;
+    }
+
+    if (messageId) {
+        log.info(`${mediaType}: base64 não inline, baixando via Evolution API (msgId: ${messageId})...`);
+        const timer = log.timer(`Download ${mediaType}`);
+        const result = await evolutionGetBase64FromMedia(messageId, convertToMp4);
+        if (result?.base64) {
+            timer.end();
+            return result.base64;
+        }
+        timer.end('FALHOU');
+        log.warn(`${mediaType}: falha ao baixar mídia via Evolution API`);
+    } else {
+        log.warn(`${mediaType}: sem base64 e sem messageId — impossível processar`);
+    }
+
+    return undefined;
+}
 
 /**
  * Extrai o conteúdo da mensagem do payload da Evolution API.
@@ -15,7 +49,8 @@ const log = logger.child('MessageParser');
  */
 export async function parseIncomingMessage(
     msgData: Record<string, unknown> | undefined,
-    base64FromBody?: string
+    base64FromBody?: string,
+    messageId?: string,
 ): Promise<AgentMessage | null> {
     if (!msgData) return null;
 
@@ -32,15 +67,19 @@ export async function parseIncomingMessage(
     const imageMsg = msgData.imageMessage as Record<string, unknown> | undefined;
     if (imageMsg) {
         const caption = (imageMsg.caption as string) || '';
-        const base64 = (base64FromBody || imageMsg.base64) as string | undefined;
+        const rawBase64 = (base64FromBody || imageMsg.base64) as string | undefined;
         const mimetype = (imageMsg.mimetype as string) || 'image/jpeg';
+
+        const base64 = await resolveBase64(rawBase64, messageId, 'Imagem');
+
         if (base64) {
+            log.info(`📷 Imagem processada (${(base64.length / 1024).toFixed(0)}KB)`);
             return [
-                { type: 'text', text: caption || 'Analise esta imagem.' },
+                { type: 'text', text: caption || 'Analise esta imagem enviada pelo cliente.' },
                 { type: 'image_url', image_url: { url: `data:${mimetype};base64,${base64}` } },
             ];
         }
-        return caption || null;
+        return caption || '[Imagem recebida, mas não foi possível processar]';
     }
 
     // 3. Document extraction (PDF)
@@ -48,14 +87,18 @@ export async function parseIncomingMessage(
     if (docMsg) {
         const caption = (docMsg.caption as string) || '';
         const fileName = (docMsg.fileName as string) || 'documento.pdf';
-        const base64 = (base64FromBody || docMsg.base64) as string | undefined;
+        const rawBase64 = (base64FromBody || docMsg.base64) as string | undefined;
         const mimetype = (docMsg.mimetype as string) || 'application/pdf';
+
+        const base64 = await resolveBase64(rawBase64, messageId, 'PDF');
+
         if (base64 && mimetype === 'application/pdf') {
             try {
                 // eslint-disable-next-line @typescript-eslint/no-require-imports
                 const pdfParse = require('pdf-parse');
                 const pdfBuffer = Buffer.from(base64, 'base64');
                 const pdfData = await pdfParse(pdfBuffer);
+                log.info(`📄 PDF extraído: ${fileName} (${pdfData.text.length} chars)`);
                 return `${caption} [Conteúdo do PDF ${fileName} extraído com sucesso]:\n\n${pdfData.text}`;
             } catch (err) {
                 log.error('Erro ao extrair PDF:', err);
@@ -68,7 +111,10 @@ export async function parseIncomingMessage(
     // 4. Audio extraction (Whisper)
     const audioMsg = msgData.audioMessage as Record<string, unknown> | undefined;
     if (audioMsg) {
-        const base64 = (base64FromBody || audioMsg.base64) as string | undefined;
+        const rawBase64 = (base64FromBody || audioMsg.base64) as string | undefined;
+
+        const base64 = await resolveBase64(rawBase64, messageId, 'Áudio');
+
         if (base64) {
             try {
                 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -76,10 +122,13 @@ export async function parseIncomingMessage(
                 fs.writeFileSync(tempFilePath, Buffer.from(base64, 'base64'));
 
                 try {
+                    const timer = log.timer('Whisper transcrição');
                     const transcription = await openai.audio.transcriptions.create({
                         file: fs.createReadStream(tempFilePath),
                         model: 'whisper-1',
                     });
+                    timer.end();
+                    log.info(`🎙️ Áudio transcrito: "${transcription.text.substring(0, 80)}${transcription.text.length > 80 ? '...' : ''}"`);
                     return `[ÁUDIO TRANSCRITO DO CLIENTE]: "${transcription.text}"`;
                 } finally {
                     if (fs.existsSync(tempFilePath)) {
@@ -91,7 +140,7 @@ export async function parseIncomingMessage(
                 return '[Áudio recebido] (Falha na transcrição)';
             }
         }
-        return '[Áudio recebido] (Sem base64)';
+        return '[Áudio recebido] (Não foi possível baixar o áudio)';
     }
 
     // 5. Sticker / Video / Contact / Location

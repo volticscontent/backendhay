@@ -77,3 +77,27 @@ export async function evolutionGetProfilePic(jid: string): Promise<unknown> {
         number: jid,
     });
 }
+
+/**
+ * Baixa a mídia de uma mensagem em base64 usando o endpoint getBase64FromMediaMessage.
+ * Útil quando o webhook não envia o base64 inline.
+ */
+export async function evolutionGetBase64FromMedia(
+    messageId: string,
+    convertToMp4: boolean = false,
+): Promise<{ base64: string; mimetype: string } | null> {
+    try {
+        const result = await evolutionRequest(
+            `/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE_NAME}`,
+            'POST',
+            { message: { key: { id: messageId } }, convertToMp4 },
+        ) as { base64?: string; mimetype?: string };
+
+        if (result?.base64) {
+            return { base64: result.base64, mimetype: result.mimetype || 'application/octet-stream' };
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}

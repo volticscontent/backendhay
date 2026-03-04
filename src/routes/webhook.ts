@@ -47,7 +47,8 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // Extrai a mensagem do payload usando o parser dedicado
         const msgData = body.data?.message;
         const base64FromBody = body.data?.base64;
-        const message = await parseIncomingMessage(msgData, base64FromBody);
+        const messageId = body.data?.key?.id as string | undefined;
+        const message = await parseIncomingMessage(msgData, base64FromBody, messageId);
 
         // Identify the user phone — priorizar número real, aceitar LID como fallback
         // ATENÇÃO: body.sender é o número da INSTÂNCIA, NÃO do usuário!

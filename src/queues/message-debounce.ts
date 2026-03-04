@@ -3,7 +3,7 @@ import redis from '../lib/redis';
 import { runApoloAgent } from '../ai/agents/apolo';
 import { runVendedorAgent } from '../ai/agents/vendedor';
 import { runAtendenteAgent } from '../ai/agents/atendente';
-import { AgentContext } from '../ai/types';
+import { AgentContext, AgentMessage } from '../ai/types';
 import { getUser, updateUser, createUser, getAgentRouting } from '../ai/server-tools';
 import { addToHistory, getChatHistory } from '../lib/chat-history';
 import { enqueueMessages } from './message-queue';
@@ -42,7 +42,7 @@ interface DebounceMetadata {
 
 type UserState = 'lead' | 'qualified' | 'customer';
 
-type AgentRunner = (message: string, context: AgentContext) => Promise<string>;
+type AgentRunner = (message: AgentMessage, context: AgentContext) => Promise<string>;
 
 const AGENT_MAP: Record<UserState, { runner: AgentRunner; label: string }> = {
     qualified: { runner: runVendedorAgent, label: 'VENDEDOR (Icaro)' },
@@ -130,19 +130,46 @@ async function clearPreviousJob(jobId: string, userPhone: string): Promise<'clea
     }
 }
 
-/** Concatena mensagens do buffer, tratando multimodal como texto */
-function combineMessages(rawMessages: string[]): string {
-    return rawMessages.map(raw => {
+/** Concatena mensagens do buffer, preservando conteúdo multimodal (imagens) */
+function combineMessages(rawMessages: string[]): AgentMessage {
+    const textParts: string[] = [];
+    let lastMultimodal: AgentMessage | null = null;
+
+    for (const raw of rawMessages) {
         try {
             const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-                return parsed.map((item: any) => item.text || '[media]').join(' ');
+            if (Array.isArray(parsed) && parsed.some((item: any) => item.type === 'image_url')) {
+                // É conteúdo multimodal (imagem) — guardar o mais recente
+                lastMultimodal = parsed;
+                // Extrair texto da parte multimodal
+                const texts = parsed
+                    .filter((item: any) => item.type === 'text' && item.text)
+                    .map((item: any) => item.text);
+                if (texts.length > 0) textParts.push(texts.join(' '));
+            } else if (Array.isArray(parsed)) {
+                // Array sem imagem — extrair texto
+                textParts.push(parsed.map((item: any) => item.text || '').filter(Boolean).join(' '));
+            } else {
+                textParts.push(raw);
             }
-            return raw;
         } catch {
-            return raw;
+            textParts.push(raw);
         }
-    }).join('\n');
+    }
+
+    // Se tem conteúdo multimodal, montar resposta com todo o texto + a imagem
+    if (lastMultimodal && Array.isArray(lastMultimodal)) {
+        const allText = textParts.join('\n').trim();
+        const imageItem = lastMultimodal.find((item: any) => item.type === 'image_url');
+        if (imageItem) {
+            return [
+                { type: 'text', text: allText || 'Analise esta imagem enviada pelo cliente.' },
+                imageItem,
+            ];
+        }
+    }
+
+    return textParts.join('\n');
 }
 
 /** Resolve o estado do usuário a partir do DB */
@@ -224,7 +251,7 @@ async function sendFallback(sender: string, userPhone: string): Promise<void> {
         });
         await updateUser({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro no bot, encaminhado para humano' });
     } catch (err) {
-        console.error('[Debounce] Falha crítica no fallback:', err);
+        debounceLogger.error('Falha crítica no fallback:', err);
     }
 }
 
@@ -292,7 +319,10 @@ export function startDebounceWorker(): Worker {
 
             // 3. Concatenar mensagens
             const combinedMessage = combineMessages(rawMessages);
-            log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: "${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`);
+            const logMsg = typeof combinedMessage === 'string'
+                ? `"${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`
+                : `[Multimodal: ${rawMessages.length} parte(s)]`;
+            log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: ${logMsg}`);
 
             // 4. Resolver estado + roteamento
             const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
