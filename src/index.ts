@@ -4,6 +4,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import webhookRoutes from './routes/webhook';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
+import { startDebounceWorker } from './queues/message-debounce';
 import { registerCronJobs } from './cron';
 import { initSocketServer } from './lib/socket-server';
 import pool from './lib/db';
@@ -32,6 +33,7 @@ app.get('/', (_req, res) => {
         queues: {
             messageWorker: 'active',
             followUpWorker: 'active',
+            debounceWorker: 'active',
         },
         cron: 'registered',
     });
@@ -49,7 +51,8 @@ async function bootstrap() {
     console.log('\n[Boot] Iniciando workers BullMQ...');
     const messageWorker = startMessageWorker();
     const followUpWorker = startFollowUpWorker();
-    console.log('[Boot] ✅ Workers iniciados (message-sending, follow-up)');
+    const debounceWorker = startDebounceWorker();
+    console.log('[Boot] ✅ Workers iniciados (message-sending, follow-up, debounce)');
 
     // 2. CRON Jobs
     console.log('\n[Boot] Registrando CRON Jobs...');
@@ -76,6 +79,7 @@ async function bootstrap() {
             // Esperar workers terminarem jobs em andamento
             await messageWorker.close();
             await followUpWorker.close();
+            await debounceWorker.close();
             console.log('[Shutdown] Workers encerrados');
 
             await pool.end();
