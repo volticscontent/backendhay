@@ -7,10 +7,11 @@ import { AgentContext } from '../ai/types';
 import { getUser, updateUser, createUser, getAgentRouting } from '../ai/server-tools';
 import { addToHistory, getChatHistory } from '../lib/chat-history';
 import { enqueueMessages } from './message-queue';
+import { debounceLogger } from '../lib/logger';
 
 // ==================== Constantes ====================
 
-const DEBOUNCE_DELAY_MS = 4000;
+const DEBOUNCE_DELAY_MS = 1500;
 const BUFFER_KEY_PREFIX = 'msg_buffer:';
 const META_KEY_PREFIX = 'msg_meta:';
 const LOCK_KEY_PREFIX = 'msg_lock:';
@@ -115,14 +116,14 @@ async function clearPreviousJob(jobId: string, userPhone: string): Promise<'clea
         const state = await existing.getState();
 
         if (state === 'active') {
-            console.log(`[Debounce] Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+            debounceLogger.info(`Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
             return 'active';
         }
 
         // delayed, waiting, completed, failed — tudo removível
         await existing.remove();
         const label = state === 'delayed' || state === 'waiting' ? 'Timer resetado' : `Job antigo (${state}) removido`;
-        console.log(`[Debounce] ${label} para ${userPhone}`);
+        debounceLogger.debug(`${label} para ${userPhone}`);
         return 'cleared';
     } catch {
         return 'none';
@@ -155,18 +156,18 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
             if (parsed.status !== 'error' && parsed.status !== 'not_found') user = parsed;
         }
     } catch (e) {
-        console.error('[Debounce] Erro ao parsear usuario:', e);
+        debounceLogger.error('Erro ao parsear usuario:', e);
     }
 
     if (!user) {
-        console.log(`[Debounce] Novo usuário (${userPhone}). Criando registro...`);
+        debounceLogger.info(`🆕 Novo usuário (${userPhone}). Criando registro...`);
         try {
             const result = JSON.parse(await createUser({ telefone: userPhone, nome_completo: pushName || 'Desconhecido' }));
             if (result.status !== 'error') {
                 await updateUser({ telefone: userPhone, situacao: 'nao_respondido' });
             }
         } catch (err) {
-            console.error(`[Debounce] Erro ao criar usuário:`, err);
+            debounceLogger.error(`Erro ao criar usuário ${userPhone}:`, err);
         }
         return 'lead';
     }
@@ -182,7 +183,7 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
     // Verificar override de roteamento
     const override = await getAgentRouting(userPhone);
     if (override === 'vendedor') {
-        console.log(`[Debounce] Override ativo → Vendas`);
+        debounceLogger.info(`🔀 Override ativo → Vendas (${userPhone})`);
         return 'qualified';
     }
 
@@ -242,11 +243,11 @@ export async function bufferAndDebounce(
 
     // 1. Push atômico no buffer
     const bufferLen = await atomicBufferPush(userPhone, serialized, metadata);
-    console.log(`[Debounce] +1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
+    debounceLogger.info(`+1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
 
     // 2. Proteção contra flood — se buffer muito grande, forçar processamento
     if (bufferLen >= MAX_BUFFER_SIZE) {
-        console.warn(`[Debounce] ⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
+        debounceLogger.warn(`⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
         const jobId = `debounce-${userPhone}`;
         await clearPreviousJob(jobId, userPhone);
         await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: 0 });
@@ -260,7 +261,7 @@ export async function bufferAndDebounce(
     if (status === 'active') return; // Job já processando, mensagem fica no buffer pro próximo ciclo
 
     await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
-    console.log(`[Debounce] Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
+    debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
 }
 
 // ==================== Worker ====================
@@ -268,36 +269,38 @@ export async function bufferAndDebounce(
 export function startDebounceWorker(): Worker {
     const worker = new Worker('message-debounce', async (job: Job) => {
         const { userPhone } = job.data as { userPhone: string };
+        const log = debounceLogger.withTrace(`db-${userPhone.slice(-4)}-${Date.now().toString(36)}`);
+        const totalTimer = log.timer('Pipeline total');
 
         // 1. Lock distribuído — evita processamento duplo
-        const locked = await acquireLock(userPhone);
+        const locked = await log.timed('acquireLock', () => acquireLock(userPhone));
         if (!locked) {
-            console.warn(`[Debounce] Lock ocupado para ${userPhone}. Re-enfileirando...`);
+            log.warn(`🔒 Lock ocupado para ${userPhone}. Re-enfileirando...`);
             throw new Error('Lock occupied — will retry');
         }
 
         try {
-            console.log(`[Debounce] Processando mensagens acumuladas de ${userPhone}...`);
+            log.info(`🔄 Processando mensagens de ${userPhone}...`);
 
             // 2. Flush atômico do buffer
-            const { messages: rawMessages, metadata } = await atomicBufferFlush(userPhone);
+            const { messages: rawMessages, metadata } = await log.timed('bufferFlush', () => atomicBufferFlush(userPhone));
 
             if (rawMessages.length === 0 || !metadata) {
-                console.log(`[Debounce] Buffer/meta vazio para ${userPhone}, nada a processar.`);
+                log.info(`Buffer vazio para ${userPhone}, nada a processar.`);
                 return;
             }
 
             // 3. Concatenar mensagens
             const combinedMessage = combineMessages(rawMessages);
-            console.log(`[Debounce] ${rawMessages.length} msg(s) de ${userPhone}: "${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`);
+            log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: "${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`);
 
             // 4. Resolver estado + roteamento
-            const userState = await resolveUserState(userPhone, metadata.pushName);
+            const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
             const { runner, label } = AGENT_MAP[userState];
-            console.log(`[Debounce] → ${label}`);
+            log.info(`🤖 → ${label}`);
 
             // 5. Chamar AI
-            const history = await getChatHistory(userPhone);
+            const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
             const context: AgentContext = {
                 userId: metadata.sender,
                 userName: metadata.pushName,
@@ -306,14 +309,15 @@ export function startDebounceWorker(): Worker {
             };
 
             try {
-                const response = await runner(combinedMessage, context);
-                await sendAgentResponse(response, metadata.sender, userPhone);
+                const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
+                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
             } catch (aiError) {
-                console.error(`[Debounce] Erro AI para ${userPhone}:`, aiError);
+                log.error(`❌ Erro AI para ${userPhone}:`, aiError);
                 await sendFallback(metadata.sender, userPhone);
             }
 
-            console.log(`[Debounce] ✅ Concluído para ${userPhone} (${rawMessages.length} msg(s))`);
+            totalTimer.end(`${rawMessages.length} msg(s) de ${userPhone}`);
+            log.info(`✅ Concluído para ${userPhone}`);
         } finally {
             // SEMPRE libera o lock, mesmo em caso de erro
             await releaseLock(userPhone);
@@ -324,11 +328,11 @@ export function startDebounceWorker(): Worker {
     });
 
     worker.on('completed', (job) => {
-        console.log(`[Debounce] Job ${job.id} concluído`);
+        debounceLogger.debug(`Job ${job.id} concluído`);
     });
 
     worker.on('failed', (job, err) => {
-        console.error(`[Debounce] Job ${job?.id} falhou:`, err.message);
+        debounceLogger.error(`❌ Job ${job?.id} falhou: ${err.message}`);
     });
 
     return worker;

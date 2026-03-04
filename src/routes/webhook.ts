@@ -5,6 +5,12 @@ import { notifySocketServer } from '../lib/socket';
 import { cancelPendingFollowUps } from '../queues/message-queue';
 import { bufferAndDebounce } from '../queues/message-debounce';
 import { parseIncomingMessage } from '../lib/message-parser';
+import { webhookLogger } from '../lib/logger';
+
+let requestCounter = 0;
+function nextTraceId(): string {
+    return `wh-${(++requestCounter).toString(36)}-${Date.now().toString(36)}`;
+}
 
 const router = Router();
 
@@ -17,19 +23,23 @@ router.get('/webhook/whatsapp', (_req: Request, res: Response) => {
 });
 
 router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
+    const traceId = nextTraceId();
+    const log = webhookLogger.withTrace(traceId);
+    const totalTimer = log.timer('Webhook total');
+
     try {
         const apiKeyHeader = req.headers['apikey'] as string || (req.headers['authorization'] as string)?.replace('Bearer ', '');
         if (process.env.EVOLUTION_API_KEY && apiKeyHeader !== process.env.EVOLUTION_API_KEY) {
-            console.warn('[Webhook] Unauthorized access attempt.');
+            log.warn('🚫 Tentativa de acesso não autorizado');
             res.status(401).json({ status: 'unauthorized', error: 'Invalid API Key' });
             return;
         }
 
         const body = req.body;
-        console.log('[Webhook] Body recebido:', JSON.stringify(body, null, 2));
+        log.debug('Body recebido:', body);
 
         if (body.event !== 'messages.upsert') {
-            console.log(`[Webhook] Ignorando evento não-mensagem: ${body.event}`);
+            log.debug(`Ignorando evento: ${body.event}`);
             res.json({ status: 'ignored_event_type' });
             return;
         }
@@ -59,8 +69,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         if (!sender) {
             sender = candidatos.find(s => !s.includes('@g.us'));
             if (sender?.includes('@lid')) {
-                console.log('[Webhook] ⚠️ Usando LID como sender (número real não disponível):', sender);
-                console.log('[Webhook] Body keys:', JSON.stringify(Object.keys(body)));
+                log.warn(`⚠️ Usando LID como sender (número real não disponível): ${sender}`);
             }
         }
 
@@ -79,11 +88,11 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 
         const userPhone = sender.replace('@s.whatsapp.net', '');
         const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
-        console.log(`[Webhook] Mensagem de ${userPhone}: ${logMsg}`);
+        log.info(`📩 Mensagem de ${userPhone}: ${logMsg}`);
 
         // 0. Cancelar follow-ups pendentes (cliente respondeu)
         cancelPendingFollowUps(userPhone).catch(err =>
-            console.error('[Webhook] Failed to cancel follow-ups:', err)
+            log.error('Erro ao cancelar follow-ups:', err)
         );
 
         // Registrar atividade no Redis
@@ -95,12 +104,12 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // 2. Publish INCOMING message to Redis for Real-time
         const incomingSocketMsg = { chatId: sender, ...body.data };
         notifySocketServer('chat-updates', incomingSocketMsg).catch(err =>
-            console.error('[Webhook] Socket notification failed:', err)
+            log.error('Socket notification failed:', err)
         );
 
         // 3. Adicionar à fila de sincronização de contexto
         redis.zadd('context_sync_queue', Date.now(), userPhone).catch(err =>
-            console.error('[Webhook] Erro ao adicionar à fila de contexto:', err)
+            log.error('Erro ao adicionar à fila de contexto:', err)
         );
         redis.del(`context_nudge_sent:${userPhone}`).catch(() => { });
 
@@ -114,9 +123,10 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
             userPhone,
         });
 
+        totalTimer.end();
         res.json({ status: 'buffered' });
     } catch (error: unknown) {
-        console.error('Erro no Webhook:', error);
+        log.error('❌ Erro no Webhook:', error);
         res.status(500).json({
             error: 'Internal Server Error',
             details: error instanceof Error ? error.message : String(error),

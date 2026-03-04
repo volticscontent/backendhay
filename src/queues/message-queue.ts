@@ -3,6 +3,7 @@ import redis from '../lib/redis';
 import { evolutionSendTextMessage, evolutionSendMediaMessage } from '../lib/evolution';
 import { toWhatsAppJid } from '../lib/utils';
 import { notifySocketServer } from '../lib/socket';
+import { queueLogger, workerLogger, followUpLogger } from '../lib/logger';
 
 // ==================== Filas ====================
 
@@ -58,10 +59,10 @@ export async function enqueueMessages(payload: MessageJobData): Promise<string> 
     try {
         const jobId = `msg-${payload.phone}-${Date.now()}`;
         await messageQueue.add('send-messages', payload, { jobId });
-        console.log(`[Queue] ${payload.messages.length} mensagens enfileiradas para ${payload.phone} (Job: ${jobId})`);
+        queueLogger.info(`${payload.messages.length} mensagens enfileiradas para ${payload.phone} (Job: ${jobId})`);
         return jobId;
     } catch (error) {
-        console.error('[Queue] Erro ao enfileirar mensagens:', error);
+        queueLogger.error('Erro ao enfileirar mensagens:', error);
         throw error;
     }
 }
@@ -82,10 +83,10 @@ export async function scheduleFollowUp(
             jobId,
             delay: delayMs,
         });
-        console.log(`[Queue] Follow-up agendado para ${phone} em ${delayMs}ms (Job: ${jobId})`);
+        queueLogger.info(`Follow-up agendado para ${phone} em ${delayMs}ms (Job: ${jobId})`);
         return jobId;
     } catch (error) {
-        console.error('[Queue] Erro ao agendar follow-up:', error);
+        queueLogger.error('Erro ao agendar follow-up:', error);
         throw error;
     }
 }
@@ -103,14 +104,14 @@ export async function cancelPendingFollowUps(phone: string): Promise<void> {
 
         for (const job of pending) {
             await job.remove();
-            console.log(`[Queue] Follow-up cancelado: ${job.id} para ${phone}`);
+            queueLogger.debug(`Follow-up cancelado: ${job.id} para ${phone}`);
         }
 
         if (pending.length > 0) {
-            console.log(`[Queue] ${pending.length} follow-ups cancelados para ${phone}`);
+            queueLogger.info(`${pending.length} follow-ups cancelados para ${phone}`);
         }
     } catch (error) {
-        console.error('[Queue] Erro ao cancelar follow-ups:', error);
+        queueLogger.error('Erro ao cancelar follow-ups:', error);
     }
 }
 
@@ -123,7 +124,7 @@ export async function cancelPendingFollowUps(phone: string): Promise<void> {
 export function startMessageWorker(): Worker {
     const worker = new Worker<MessageJobData>('message-sending', async (job: Job<MessageJobData>) => {
         const { phone, messages, context } = job.data;
-        console.log(`[Worker] Processando ${messages.length} mensagens para ${phone} (Context: ${context})`);
+        workerLogger.info(`Processando ${messages.length} mensagens para ${phone} (Context: ${context})`);
 
         const jid = toWhatsAppJid(phone);
 
@@ -168,12 +169,12 @@ export function startMessageWorker(): Worker {
                 // Atualizar progresso do job
                 await job.updateProgress((i + 1) / messages.length * 100);
             } catch (sendError) {
-                console.error(`[Worker] Erro ao enviar mensagem ${i + 1}/${messages.length} para ${phone}:`, sendError);
+                workerLogger.error(`Erro ao enviar mensagem ${i + 1}/${messages.length} para ${phone}:`, sendError);
                 // Continua tentando as próximas mensagens
             }
         }
 
-        console.log(`[Worker] ✅ Todas as ${messages.length} mensagens enviadas para ${phone}`);
+        workerLogger.info(`✅ Todas as ${messages.length} mensagens enviadas para ${phone}`);
     }, {
         connection: redis as any,
         concurrency: 5, // Processa 5 jobs simultaneamente
@@ -184,11 +185,11 @@ export function startMessageWorker(): Worker {
     });
 
     worker.on('completed', (job) => {
-        console.log(`[Worker] Job ${job.id} concluído`);
+        workerLogger.debug(`Job ${job.id} concluído`);
     });
 
     worker.on('failed', (job, err) => {
-        console.error(`[Worker] Job ${job?.id} falhou:`, err.message);
+        workerLogger.error(`Job ${job?.id} falhou: ${err.message}`);
     });
 
     return worker;
@@ -200,7 +201,7 @@ export function startMessageWorker(): Worker {
 export function startFollowUpWorker(): Worker {
     const worker = new Worker<FollowUpJobData>('follow-up', async (job: Job<FollowUpJobData>) => {
         const { phone, message, type } = job.data;
-        console.log(`[FollowUp] Enviando ${type} para ${phone}`);
+        followUpLogger.info(`Enviando ${type} para ${phone}`);
 
         // Verificar se o cliente respondeu recentemente (evitar follow-up indesejado)
         const jid = toWhatsAppJid(phone);
@@ -212,24 +213,24 @@ export function startFollowUpWorker(): Worker {
 
             // Se o cliente respondeu nos últimos 5 minutos, cancela este follow-up
             if (timeSinceLastActivity < 5 * 60 * 1000 && type === 'nudge') {
-                console.log(`[FollowUp] Cliente respondeu recentemente. Cancelando nudge para ${phone}`);
+                followUpLogger.info(`Cliente respondeu recentemente. Cancelando nudge para ${phone}`);
                 return;
             }
         }
 
         await evolutionSendTextMessage(jid, message);
-        console.log(`[FollowUp] ✅ ${type} enviado para ${phone}`);
+        followUpLogger.info(`✅ ${type} enviado para ${phone}`);
     }, {
         connection: redis as any,
         concurrency: 3,
     });
 
     worker.on('completed', (job) => {
-        console.log(`[FollowUp] Job ${job.id} concluído`);
+        followUpLogger.debug(`Job ${job.id} concluído`);
     });
 
     worker.on('failed', (job, err) => {
-        console.error(`[FollowUp] Job ${job?.id} falhou:`, err.message);
+        followUpLogger.error(`Job ${job?.id} falhou: ${err.message}`);
     });
 
     return worker;

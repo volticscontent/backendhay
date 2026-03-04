@@ -1,5 +1,6 @@
 import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
+import { agentLogger } from '../../lib/logger';
 import {
     tryScheduleMeeting, callAttendant, updateUser, searchServices,
     getUser, contextRetrieve, interpreter, sendMedia, getAvailableMedia,
@@ -73,7 +74,7 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
 
     let mediaList = "Nenhuma mídia disponível.";
     let dynamicContext = "";
-    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { console.warn("Error:", e); }
+    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error:", e); }
 
     const systemPrompt = VENDEDOR_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)

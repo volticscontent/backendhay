@@ -1,4 +1,5 @@
 import pool from './db';
+import { dbLogger } from './logger';
 
 export async function saveConsultation(cnpj: string, service: string, result: unknown, status: number, source: string = 'bot') {
     try {
@@ -9,8 +10,8 @@ export async function saveConsultation(cnpj: string, service: string, result: un
       RETURNING id
     `;
         const res = await pool.query(query, [cleanCnpj, service, result, status, source]);
-        console.log(`[DB] Consulta Serpro salva. ID: ${res.rows[0].id}`);
+        dbLogger.debug(`Consulta Serpro salva. ID: ${res.rows[0].id}`);
     } catch (error) {
-        console.error('[DB] Erro ao salvar consulta Serpro:', error);
+        dbLogger.error('Erro ao salvar consulta Serpro:', error);
     }
 }

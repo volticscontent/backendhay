@@ -1,6 +1,9 @@
 import pool from '../lib/db';
 import { listFilesFromR2 } from '../lib/r2';
 import redis from '../lib/redis';
+import logger from '../lib/logger';
+
+const log = logger.child('KnowledgeBase');
 
 /**
  * Busca e formata a lista de serviços do banco de dados para injetar no contexto da IA.
@@ -25,7 +28,7 @@ export async function getServicesContext(): Promise<string> {
             client.release();
         }
     } catch (error) {
-        console.error('[KnowledgeBase] Erro ao buscar serviços:', error);
+        log.error('Erro ao buscar serviços:', error);
         return 'Erro ao carregar lista de serviços.';
     }
 }
@@ -53,7 +56,7 @@ export async function getAssetsContext(): Promise<string> {
 
         return `## ASSETS E MATERIAIS DE APOIO (R2):\nEstes são os arquivos que você pode enviar aos clientes. Use a ferramenta 'enviar_midia' com a chave (key) ou URL.\n${assetsList}`;
     } catch (error) {
-        console.error('[KnowledgeBase] Erro ao buscar assets:', error);
+        log.error('Erro ao buscar assets:', error);
         return 'Erro ao carregar lista de assets.';
     }
 }
@@ -71,7 +74,7 @@ export async function getDynamicContext(): Promise<string> {
             return cachedContext;
         }
     } catch (err) {
-        console.warn('[KnowledgeBase] Erro ao ler do cache Redis:', err);
+        log.warn('Erro ao ler do cache Redis:', err);
     }
 
     // 2. Se não tem no cache, busca na fonte original (DB + R2)
@@ -86,7 +89,7 @@ export async function getDynamicContext(): Promise<string> {
         // 3. Salva no cache por 10 minutos (600 segundos)
         await redis.setex(CACHE_KEY, 600, result);
     } catch (err) {
-        console.warn('[KnowledgeBase] Erro ao salvar no cache Redis:', err);
+        log.warn('Erro ao salvar no cache Redis:', err);
     }
 
     return result;

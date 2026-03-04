@@ -3,6 +3,7 @@ import querystring from 'node:querystring';
 import fs from 'node:fs';
 import path from 'node:path';
 import { SERVICE_CONFIG, ServiceConfigItem } from './serpro-config';
+import { serproLogger } from './logger';
 
 export { SERVICE_CONFIG };
 
@@ -19,9 +20,9 @@ const getCertContent = (contentEnv: string | undefined, pathEnv: string | undefi
             if (fs.existsSync(certPath)) {
                 return fs.readFileSync(certPath, 'utf8');
             }
-            console.warn(`[Serpro] Certificado não encontrado no caminho: ${certPath}`);
+            serproLogger.warn(`Certificado não encontrado no caminho: ${certPath}`);
         } catch (error) {
-            console.error(`[Serpro] Erro ao ler certificado do caminho ${pathEnv}:`, error);
+            serproLogger.error(`Erro ao ler certificado do caminho ${pathEnv}:`, error);
         }
     }
     return undefined;
@@ -226,7 +227,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         },
     };
 
-    console.log(`[SERPRO] Consultando ${nomeServico} para CNPJ ${cnpjNumero}`);
+    serproLogger.info(`Consultando ${nomeServico} para CNPJ ${cnpjNumero}`);
 
     const serviceType = config.tipo as keyof typeof INTEGRA_BASE_URLS;
     const baseUrl = INTEGRA_BASE_URLS[serviceType] || INTEGRA_BASE_URLS['Consultar'];

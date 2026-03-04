@@ -1,4 +1,5 @@
 import { Pool, QueryResult, PoolClient } from 'pg';
+import { dbLogger } from './logger';
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -8,7 +9,7 @@ const pool = new Pool({
 });
 
 pool.on('error', (err) => {
-    console.error('[DB] Pool error:', err);
+    dbLogger.error('Pool error:', err);
 });
 
 /**

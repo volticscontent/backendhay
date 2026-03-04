@@ -1,6 +1,7 @@
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import Redis from 'ioredis';
+import { socketLogger } from './logger';
 
 let io: SocketIOServer | null = null;
 
@@ -19,22 +20,22 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
 
     // ==================== Conexões WebSocket ====================
     io.on('connection', (socket) => {
-        console.log(`[Socket.io] ✅ Cliente conectado: ${socket.id}`);
+        socketLogger.info(`✅ Cliente conectado: ${socket.id}`);
 
         // Cliente entra na sala de um chat específico
         socket.on('join-chat', (chatId: string) => {
             socket.join(`chat:${chatId}`);
-            console.log(`[Socket.io] Cliente ${socket.id} entrou na sala chat:${chatId}`);
+            socketLogger.debug(`Cliente ${socket.id} entrou na sala chat:${chatId}`);
         });
 
         // Cliente sai da sala
         socket.on('leave-chat', (chatId: string) => {
             socket.leave(`chat:${chatId}`);
-            console.log(`[Socket.io] Cliente ${socket.id} saiu da sala chat:${chatId}`);
+            socketLogger.debug(`Cliente ${socket.id} saiu da sala chat:${chatId}`);
         });
 
         socket.on('disconnect', () => {
-            console.log(`[Socket.io] ❌ Cliente desconectado: ${socket.id}`);
+            socketLogger.debug(`❌ Cliente desconectado: ${socket.id}`);
         });
     });
 
@@ -43,14 +44,14 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
     const subscriber = new Redis(redisUrl);
 
     subscriber.on('error', (err) => {
-        console.error('[Socket.io] Redis subscriber error:', err);
+        socketLogger.error('Redis subscriber error:', err);
     });
 
     subscriber.subscribe('chat-updates', (err) => {
         if (err) {
-            console.error('[Socket.io] Falha ao assinar canal chat-updates:', err);
+            socketLogger.error('Falha ao assinar canal chat-updates:', err);
         } else {
-            console.log('[Socket.io] ✅ Assinado canal Redis: chat-updates');
+            socketLogger.info('✅ Assinado canal Redis: chat-updates');
         }
     });
 
@@ -68,12 +69,12 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
                 // Enviar update global (para a lista de atendimentos)
                 io?.emit('chat-update-global', data);
             } catch (err) {
-                console.error('[Socket.io] Erro ao parsear mensagem Redis:', err);
+                socketLogger.error('Erro ao parsear mensagem Redis:', err);
             }
         }
     });
 
-    console.log('[Socket.io] ✅ Socket.io Server inicializado');
+    socketLogger.info('✅ Socket.io Server inicializado');
     return io;
 }
 

@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { r2Logger } from './logger';
 
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
@@ -8,7 +9,7 @@ const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 
 if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET_NAME) {
-    console.warn('[R2] Credenciais R2 não totalmente configuradas');
+    r2Logger.warn('Credenciais R2 não totalmente configuradas');
 }
 
 const r2 = new S3Client({
@@ -46,7 +47,7 @@ export async function listFilesFromR2(prefix?: string): Promise<{ key: string; u
             };
         });
     } catch (error) {
-        console.error('[R2] Erro ao listar arquivos:', error);
+        r2Logger.error('Erro ao listar arquivos:', error);
         return [];
     }
 }

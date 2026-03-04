@@ -6,6 +6,9 @@ import { evolutionFindMessages, evolutionSendMediaMessage, evolutionSendTextMess
 import { generateEmbedding } from './embedding';
 import { consultarServico } from '../lib/serpro';
 import { saveConsultation } from '../lib/serpro-db';
+import logger from '../lib/logger';
+
+const log = logger.child('ServerTools');
 
 function isObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null;
@@ -42,7 +45,7 @@ export async function getUser(phone: string): Promise<string> {
         if (res.rows.length === 0) return JSON.stringify({ status: 'not_found' });
         return JSON.stringify(res.rows[0]);
     } catch (error) {
-        console.error('getUser error:', error);
+        log.error('getUser error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -57,7 +60,7 @@ export async function createUser(data: Record<string, unknown>): Promise<string>
         );
         return JSON.stringify({ status: 'success', id: res.rows[0].id });
     } catch (error) {
-        console.error('createUser error:', error);
+        log.error('createUser error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -103,7 +106,7 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
 
         return JSON.stringify({ status: 'success', message: 'User updated' });
     } catch (error) {
-        console.error('updateUser error:', error);
+        log.error('updateUser error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -121,7 +124,7 @@ export async function setAgentRouting(phone: string, agent: string | null): Prom
             return JSON.stringify({ status: 'success', message: 'Routing override cleared' });
         }
     } catch (error) {
-        console.error('setAgentRouting error:', error);
+        log.error('setAgentRouting error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -130,7 +133,7 @@ export async function getAgentRouting(phone: string): Promise<string | null> {
     try {
         return await redis.get(`routing_override:${phone}`);
     } catch (error) {
-        console.error('getAgentRouting error:', error);
+        log.error('getAgentRouting error:', error);
         return null;
     }
 }
@@ -150,7 +153,7 @@ export async function checkAvailability(dateStr: string): Promise<string> {
         );
         return JSON.stringify({ available: res.rows.length === 0, message: res.rows.length > 0 ? 'Horário indisponível.' : 'Horário disponível.' });
     } catch (error) {
-        console.error('checkAvailability error:', error);
+        log.error('checkAvailability error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -166,7 +169,7 @@ export async function scheduleMeeting(phone: string, dateStr: string): Promise<s
         await query(`UPDATE leads_vendas SET data_reuniao = $1 WHERE lead_id = $2`, [parsedDate, leadId]);
         return JSON.stringify({ status: 'success', message: `Reunião agendada para ${dateStr}` });
     } catch (error) {
-        console.error('scheduleMeeting error:', error);
+        log.error('scheduleMeeting error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -240,7 +243,7 @@ export async function callAttendant(phone: string, reason: string = 'Solicitaç�
 
         return JSON.stringify({ status: 'success', message: 'Solicitação registrada. Aguarde um momento.' });
     } catch (error) {
-        console.error('callAttendant error:', error);
+        log.error('callAttendant error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -260,7 +263,7 @@ export async function contextRetrieve(phone: string, limit: number = 30): Promis
         }).filter(Boolean).reverse();
         return JSON.stringify(messages);
     } catch (error) {
-        console.error('contextRetrieve error:', error);
+        log.error('contextRetrieve error:', error);
         return '[]';
     }
 }
@@ -272,7 +275,7 @@ export async function searchServices(searchQuery: string): Promise<string> {
         const all = await query('SELECT nome as name, descricao as description, price_info FROM services WHERE active = true');
         return JSON.stringify(all.rows);
     } catch (error) {
-        console.error('searchServices error:', error);
+        log.error('searchServices error:', error);
         return '[]';
     }
 }
@@ -315,7 +318,7 @@ export async function sendMedia(phone: string, keyOrUrl: string): Promise<string
         await evolutionSendMediaMessage(toWhatsAppJid(phone), mediaUrl, mediaType, fileName, fileName, mimetype);
         return JSON.stringify({ status: 'sent', message: `Arquivo ${fileName} enviado.` });
     } catch (error) {
-        console.error(`sendMedia error ${keyOrUrl}:`, error);
+        log.error(`sendMedia error ${keyOrUrl}:`, error);
         return JSON.stringify({ status: 'error', message: `Erro ao enviar arquivo: ${String(error)}` });
     }
 }
@@ -341,7 +344,7 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
             return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type });
         }
     } catch (error) {
-        console.error(`sendCommercialPresentation error ${type}:`, error);
+        log.error(`sendCommercialPresentation error ${type}:`, error);
         return JSON.stringify({ status: 'error', message: `Erro ao enviar ${type}: ${String(error)}` });
     }
 }
@@ -352,7 +355,7 @@ export async function checkCnpjSerpro(cnpj: string, service: 'CCMEI_DADOS' | 'SI
     try {
         const result = await consultarServico(service, cnpj);
         saveConsultation(cnpj, service, result, 200).catch(err =>
-            console.error('[checkCnpjSerpro] Error saving:', err)
+            log.error('[checkCnpjSerpro] Error saving:', err)
         );
         return JSON.stringify(result);
     } catch (error) {
@@ -405,7 +408,7 @@ export async function interpreter(
                 await redis.lpush(redisKey, JSON.stringify(memoryObj));
                 await redis.ltrim(redisKey, 0, 49);
             } catch (err) {
-                console.error('Redis write error:', err);
+                log.error('Redis write error:', err);
             }
 
             if (embedding && embedding.length > 0) {
@@ -454,7 +457,7 @@ export async function interpreter(
                     }
                 }
             } catch (err) {
-                console.error('Redis read error:', err);
+                log.error('Redis read error:', err);
             }
 
             if (rows.length === 0) {
@@ -493,7 +496,7 @@ export async function interpreter(
             return JSON.stringify({ status: 'success', memories });
         }
     } catch (error) {
-        console.error('Interpreter error:', error);
+        log.error('Interpreter error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
     }
 }
@@ -512,7 +515,7 @@ export async function trackResourceDelivery(
       VALUES ($1, $2, $3, NOW(), 'delivered', $4)
     `, [leadId, resourceType, resourceKey, JSON.stringify(metadata || {})]);
     } catch (error) {
-        console.error('trackResourceDelivery error:', error);
+        log.error('trackResourceDelivery error:', error);
     }
 }
 
@@ -525,7 +528,7 @@ export async function checkProcuracaoStatus(leadId: number): Promise<boolean> {
     `, [leadId]);
         return result.rows.length > 0 && result.rows[0].status === 'completed';
     } catch (error) {
-        console.error('checkProcuracaoStatus error:', error);
+        log.error('checkProcuracaoStatus error:', error);
         return false;
     }
 }
@@ -537,7 +540,7 @@ export async function markProcuracaoCompleted(leadId: number): Promise<void> {
       WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
     `, [leadId]);
     } catch (error) {
-        console.error('markProcuracaoCompleted error:', error);
+        log.error('markProcuracaoCompleted error:', error);
     }
 }
 
@@ -565,8 +568,8 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
                 if (segment.metadata?.mediaKey) await sendMedia(phone, String(segment.metadata.mediaKey));
                 break;
         }
-        console.log(`[MessageSegment] Sent: ${segment.id} to ${phone}`);
+        log.info(`[MessageSegment] Sent: ${segment.id} to ${phone}`);
     } catch (error) {
-        console.error(`[MessageSegment] Error sending ${segment.id}:`, error);
+        log.error(`[MessageSegment] Error sending ${segment.id}:`, error);
     }
 }

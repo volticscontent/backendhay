@@ -1,5 +1,6 @@
 import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
+import { agentLogger } from '../../lib/logger';
 import {
     sendForm, getUser, sendEnumeratedList, sendMedia, getAvailableMedia,
     updateUser, callAttendant, contextRetrieve, interpreter, sendMessageSegment,
@@ -139,7 +140,7 @@ Assim que você entender a intenção do cliente, USE AS TOOLS proativamente.
 
 export async function runApoloAgent(message: AgentMessage, context: AgentContext) {
     let userDataJson = "{}";
-    try { userDataJson = await getUser(context.userPhone); } catch (error) { console.warn("Error fetching user data:", error); }
+    try { userDataJson = await getUser(context.userPhone); } catch (error) { agentLogger.warn("Error fetching user data:", error); }
 
     let userData = "Não encontrado";
     try {
@@ -152,7 +153,7 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
 
     let mediaList = "Nenhuma mídia disponível.";
     let dynamicContext = "";
-    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { console.warn("Error fetching media/context:", e); }
+    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error fetching media/context:", e); }
 
     const systemPrompt = APOLO_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)

@@ -1,4 +1,5 @@
 import redis from './redis';
+import { socketLogger } from './logger';
 
 const SOCKET_SERVER_URL = process.env.SOCKET_SERVER_URL;
 
@@ -10,7 +11,7 @@ export async function notifySocketServer(channel: string, data: unknown): Promis
         // Pub/Sub (preferido — baixa latência)
         await redis.publish(channel, JSON.stringify(data));
     } catch (pubsubError) {
-        console.warn('[Socket] Redis Pub/Sub falhou, tentando HTTP fallback:', pubsubError);
+        socketLogger.warn('Redis Pub/Sub falhou, tentando HTTP fallback:', pubsubError);
 
         // HTTP Fallback
         if (SOCKET_SERVER_URL) {
@@ -21,7 +22,7 @@ export async function notifySocketServer(channel: string, data: unknown): Promis
                     body: JSON.stringify({ channel, data }),
                 });
             } catch (httpError) {
-                console.error('[Socket] HTTP fallback também falhou:', httpError);
+                socketLogger.error('HTTP fallback também falhou:', httpError);
             }
         }
     }

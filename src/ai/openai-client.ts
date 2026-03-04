@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { AgentContext } from './types';
+import { agentLogger } from '../lib/logger';
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'dummy-key',
@@ -51,7 +52,7 @@ export async function runAgent(
                 });
             } catch (error) {
                 attempts++;
-                console.warn(`[OpenAI] Tentativa ${attempts} falhou:`, error);
+                agentLogger.warn(`Tentativa ${attempts} falhou:`, error);
                 if (attempts >= maxAttempts) throw error;
                 await new Promise(res => setTimeout(res, 1000 * attempts));
             }
@@ -60,7 +61,10 @@ export async function runAgent(
     };
 
     try {
+        const aiTimer = agentLogger.timer('OpenAI request');
         const response = await callOpenAI(messages, toolsConfig);
+        const usage = response.usage;
+        aiTimer.end(usage ? `tokens: ${usage.prompt_tokens}→${usage.completion_tokens} (total: ${usage.total_tokens})` : undefined);
 
         const choice = response.choices[0];
         const message = choice.message;
@@ -71,7 +75,8 @@ export async function runAgent(
             for (const toolCall of message.tool_calls) {
                 if (toolCall.type === 'function') {
                     const toolName = toolCall.function.name;
-                    console.log(`[Agent] 🛠️ Chamando tool: ${toolName}`, toolCall.function.arguments);
+                    agentLogger.info(`🛠️ Chamando tool: ${toolName}`, toolCall.function.arguments);
+                    const toolTimer = agentLogger.timer(`Tool ${toolName}`);
                     let toolResult = '';
 
                     try {
@@ -81,9 +86,11 @@ export async function runAgent(
                         if (tool) {
                             try {
                                 toolResult = await tool.function(toolArgs);
-                                console.log(`[Agent] ✅ Tool ${toolName} output:`, toolResult.substring(0, 100) + (toolResult.length > 100 ? '...' : ''));
+                                toolTimer.end();
+                                agentLogger.debug(`Tool ${toolName} output: ${toolResult.substring(0, 150)}${toolResult.length > 150 ? '...' : ''}`);
                             } catch (toolExecError) {
-                                console.error(`Erro ao executar tool ${toolName}:`, toolExecError);
+                                agentLogger.error(`Erro ao executar tool ${toolName}:`, toolExecError);
+                                toolTimer.end('ERRO');
                                 toolResult = JSON.stringify({
                                     status: 'error',
                                     message: `Erro ao executar ferramenta ${toolName}: ${toolExecError instanceof Error ? toolExecError.message : String(toolExecError)}`
@@ -93,7 +100,7 @@ export async function runAgent(
                             toolResult = JSON.stringify({ status: 'error', message: `Ferramenta ${toolName} não encontrada.` });
                         }
                     } catch (jsonError) {
-                        console.error(`Erro ao parsear argumentos da tool ${toolName}:`, jsonError);
+                        agentLogger.error(`Erro ao parsear argumentos da tool ${toolName}:`, jsonError);
                         toolResult = JSON.stringify({ status: 'error', message: 'Erro ao processar argumentos da ferramenta (JSON inválido).' });
                     }
 
@@ -105,13 +112,16 @@ export async function runAgent(
                 }
             }
 
+            const finalTimer = agentLogger.timer('OpenAI second request');
             const secondResponse = await callOpenAI(messages);
+            const usage2 = secondResponse.usage;
+            finalTimer.end(usage2 ? `tokens: ${usage2.prompt_tokens}→${usage2.completion_tokens}` : undefined);
             return secondResponse.choices[0].message.content || '';
         }
 
         return message.content || '';
     } catch (error: unknown) {
-        console.error('[Agent] Erro ao executar agente:', error);
+        agentLogger.error('❌ Erro ao executar agente:', error);
         return 'Desculpe, tive um problema técnico. Tente novamente mais tarde.';
     }
 }

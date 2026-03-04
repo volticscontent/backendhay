@@ -1,4 +1,7 @@
 import OpenAI from 'openai';
+import logger from '../lib/logger';
+
+const log = logger.child('Embedding');
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'dummy-key',
@@ -14,7 +17,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
         return response.data[0].embedding;
     } catch (error) {
-        console.error('[Embedding] Erro ao gerar embedding:', error);
+        log.error('Erro ao gerar embedding:', error);
         return [];
     }
 }

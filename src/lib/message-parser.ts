@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
+import logger from './logger';
+
+const log = logger.child('MessageParser');
 
 /**
  * Extrai o conteúdo da mensagem do payload da Evolution API.
@@ -55,7 +58,7 @@ export async function parseIncomingMessage(
                 const pdfData = await pdfParse(pdfBuffer);
                 return `${caption} [Conteúdo do PDF ${fileName} extraído com sucesso]:\n\n${pdfData.text}`;
             } catch (err) {
-                console.error('[MessageParser] Erro ao extrair PDF:', err);
+                log.error('Erro ao extrair PDF:', err);
                 return `${caption} [Arquivo PDF: ${fileName} - Falha ao extrair texto]`;
             }
         }
@@ -84,7 +87,7 @@ export async function parseIncomingMessage(
                     }
                 }
             } catch (err) {
-                console.error('[MessageParser] Falha na transcrição de áudio:', err);
+                log.error('Falha na transcrição de áudio:', err);
                 return '[Áudio recebido] (Falha na transcrição)';
             }
         }

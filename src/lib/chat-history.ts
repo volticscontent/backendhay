@@ -1,4 +1,7 @@
 import pool from './db';
+import logger from './logger';
+
+const log = logger.child('ChatHistory');
 
 /**
  * Busca histórico de chat do banco de dados
@@ -18,7 +21,7 @@ export async function getChatHistory(
         );
         return res.rows.reverse(); // Oldest first
     } catch (error) {
-        console.error('[ChatHistory] Erro ao buscar histórico:', error);
+        log.error('Erro ao buscar histórico:', error);
         return [];
     } finally {
         client.release();
@@ -44,7 +47,7 @@ export async function addToHistory(
             [phone, role, textContent]
         );
     } catch (error) {
-        console.error('[ChatHistory] Erro ao adicionar:', error);
+        log.error('Erro ao adicionar:', error);
     } finally {
         client.release();
     }
