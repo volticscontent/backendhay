@@ -204,10 +204,16 @@ export async function sendMeetingForm(phone: string): Promise<string> {
     return JSON.stringify({ link, message: `Link de agendamento gerado: ${link}. Envie ao cliente.` });
 }
 
-export async function sendEnumeratedList(): Promise<string> {
-    return JSON.stringify({
-        message: `1. Regularização\n2. Abertura de MEI\n3. Falar com atendente\n4. Informações sobre os serviços\n5. Sair do atendimento`
-    });
+export async function sendEnumeratedList(phone: string): Promise<string> {
+    const listText = `Olá! 👋 Como posso te ajudar? Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
+    try {
+        const jid = toWhatsAppJid(phone);
+        await evolutionSendTextMessage(jid, listText);
+        return JSON.stringify({ status: 'success', message: 'Lista enviada ao cliente com sucesso.' });
+    } catch (error) {
+        log.error('sendEnumeratedList error:', error);
+        return JSON.stringify({ status: 'error', message: `Falha ao enviar lista: ${String(error)}` });
+    }
 }
 
 // ==================== Atendente ====================

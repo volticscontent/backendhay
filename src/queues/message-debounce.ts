@@ -1,5 +1,6 @@
 import { Queue, Worker, Job } from 'bullmq';
 import redis from '../lib/redis';
+import { createRedisConnection } from '../lib/redis';
 import { runApoloAgent } from '../ai/agents/apolo';
 import { runVendedorAgent } from '../ai/agents/vendedor';
 import { runAtendenteAgent } from '../ai/agents/atendente';
@@ -23,7 +24,7 @@ const STALE_JOB_STATES = new Set(['completed', 'failed', 'unknown']);
 // ==================== Fila ====================
 
 export const debounceQueue = new Queue('message-debounce', {
-    connection: redis as any,
+    connection: createRedisConnection() as any,
     defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 3000 },
@@ -353,7 +354,7 @@ export function startDebounceWorker(): Worker {
             await releaseLock(userPhone);
         }
     }, {
-        connection: redis as any,
+        connection: createRedisConnection() as any,
         concurrency: 5,
     });
 

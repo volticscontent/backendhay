@@ -1,5 +1,6 @@
 import { Queue, Worker, Job } from 'bullmq';
 import redis from '../lib/redis';
+import { createRedisConnection } from '../lib/redis';
 import { evolutionSendTextMessage, evolutionSendMediaMessage } from '../lib/evolution';
 import { toWhatsAppJid } from '../lib/utils';
 import { notifySocketServer } from '../lib/socket';
@@ -9,7 +10,7 @@ import { queueLogger, workerLogger, followUpLogger } from '../lib/logger';
 
 /** Fila de envio de mensagens com delay */
 export const messageQueue = new Queue('message-sending', {
-    connection: redis as any,
+    connection: createRedisConnection() as any,
     defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
@@ -20,7 +21,7 @@ export const messageQueue = new Queue('message-sending', {
 
 /** Fila de follow-up (mensagens agendadas) */
 export const followUpQueue = new Queue('follow-up', {
-    connection: redis as any,
+    connection: createRedisConnection() as any,
     defaultJobOptions: {
         attempts: 2,
         backoff: { type: 'exponential', delay: 5000 },
@@ -176,7 +177,7 @@ export function startMessageWorker(): Worker {
 
         workerLogger.info(`✅ Todas as ${messages.length} mensagens enviadas para ${phone}`);
     }, {
-        connection: redis as any,
+        connection: createRedisConnection() as any,
         concurrency: 5, // Processa 5 jobs simultaneamente
         limiter: {
             max: 20,     // Máximo 20 jobs
@@ -221,7 +222,7 @@ export function startFollowUpWorker(): Worker {
         await evolutionSendTextMessage(jid, message);
         followUpLogger.info(`✅ ${type} enviado para ${phone}`);
     }, {
-        connection: redis as any,
+        connection: createRedisConnection() as any,
         concurrency: 3,
     });
 
