@@ -4,7 +4,8 @@ import { agentLogger } from '../../lib/logger';
 import {
     sendForm, getUser, sendEnumeratedList, sendMedia, getAvailableMedia,
     updateUser, callAttendant, contextRetrieve, interpreter, sendMessageSegment,
-    trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted
+    trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted,
+    setAgentRouting
 } from '../server-tools';
 import { getDynamicContext } from '../knowledge-base';
 import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, MessageSegment } from '../regularizacao-system';
@@ -61,10 +62,12 @@ Antes de responder, você DEVE seguir este processo mental:
 
 ### 1. Acolhimento e Menu Inicial (PRIORIDADE MÁXIMA)
 Cumprimente o cliente pelo nome ({{USER_NAME}}) de forma amigável.
-- **Se o cliente JÁ disse o que quer na primeira mensagem (ex: "Quero regularizar dívida"):** PULE O MENU e vá direto para o passo 3 (Ação).
-- **Se o cliente NÃO disse o que quer (apenas "Oi", "Tudo bem", etc.):** Envie uma saudação curta e **OBRIGATORIAMENTE CHAME A TOOL** 'enviar_lista_enumerada' para mostrar as opções.
+- **Se o cliente JÁ disse o que quer na primeira mensagem (ex: "Quero regularizar dívida"):** PULE O MENU e vá direto para a ação.
+- **Se o cliente NÃO disse o que quer (apenas "Oi", "Tudo bem", etc.) OU pedir explicitamente "menu"/"opções":** Envie uma saudação curta e **CHAME A TOOL** 'enviar_lista_enumerada'.
   - **NÃO escreva o menu no texto.** Deixe a tool fazer isso.
-  - Exemplo de resposta: "Olá {{USER_NAME}}, sou o Apolo da Haylander. Veja como posso te ajudar:" (E chama tool).
+  - **NÃO escreva frases como "aguardando", "vou te mostrar", "carregando".** A tool já envia o conteúdo.
+  - Exemplo CORRETO: "Olá {{USER_NAME}}! 😊 Olha só como posso te ajudar 👇" (E chama a tool).
+  - Exemplo ERRADO: "Vou te mostrar: aguardando a lista de opções" ← NUNCA faça isso!
 
 ### 2. Diagnóstico e Seleção de Menu
 Se o cliente responder com um NÚMERO ou escolher uma opção do menu:
@@ -95,6 +98,11 @@ Assim que você entender a intenção do cliente, USE AS TOOLS proativamente.
   2. Pergunte: "Você prefere aguardar para voltar ao MEI ou já resolver isso agora abrindo um novo MEI?"
   3. **Se escolher a Opção 1:** Vá para o fluxo de Procuração.
   4. **Se escolher a Opção 2:** Vá para a abertura/baixa explicando que a Senha GOV será obrigatória.
+  **Regras Críticas para este Cenário (MEI Excluído):**
+  - NUNCA fale de valores antes de explicar as diferenças entre as opções.
+  - SEMPRE justifique por que o acesso GOV será necessário (para executar baixa e abertura nos portais governamentais).
+  - Incentive a procuração quando possível/não houver urgência.
+  - Atendimento humano apenas se houver bloqueio.
 
 - **Cenário B: Abertura de Empresa / Dar Baixa no MEI**
   1. Explique que para este serviço específico, **será necessário o acesso GOV (CPF e Senha)**.
@@ -107,9 +115,8 @@ Assim que você entender a intenção do cliente, USE AS TOOLS proativamente.
 **PASSO 3B (Assistido):** Confirme e transfira para atendente.
 **PASSO 4:** Tracking e acompanhamento.
 
-- **Cenário C: Menu de Opções** — Use 'enviar_lista_enumerada'.
-- **Cenário D: Material Comercial** — Use 'enviar_midia'.
-- **Cenário E: Resistência ou Recusa (Modo Manual)** — Colete dados manualmente com update_user e qualifique.
+- **Cenário C: Material Comercial** — Use 'enviar_midia'.
+- **Cenário D: Resistência ou Recusa (Modo Manual)** — Colete dados manualmente com update_user e qualifique.
 
 ### EXEMPLOS DE RACIOCÍNIO (Chain of Thought)
 
@@ -136,6 +143,8 @@ Assim que você entender a intenção do cliente, USE AS TOOLS proativamente.
 - Mantenha o tom profissional mas acessível e acolhedor.
 - Respostas curtas (WhatsApp). Use '|||' para separar mensagens!
 - Sempre tente levar o cliente para o **Formulário**.
+- **PROIBIDO NARRAR TOOLS:** NUNCA escreva no texto que vai chamar uma ferramenta, que está "aguardando", "carregando", "enviando" ou "buscando". Apenas CHAME a tool silenciosamente. O texto da sua resposta deve ser SOMENTE a mensagem natural para o cliente.
+- **VÍDEO DO E-CAC:** SEMPRE que você citar e explicar o que é "e-CAC", acesso "GOV" para baixar MEI ou pedir código de acesso do e-CAC ao cliente, você DEVE OBRIGATORIAMENTE chamar a tool 'enviar_midia' passando a key 'video-tutorial-procuracao-ecac' para enviar o vídeo explicativo junto com a sua mensagem de texto.
 `;
 
 export async function runApoloAgent(message: AgentMessage, context: AgentContext) {
@@ -168,7 +177,7 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
         { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia (PDF, Vídeo, Áudio).', parameters: { type: 'object', properties: { key: { type: 'string', description: 'A chave (ID) do arquivo de mídia.' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
         { name: 'select_User', description: 'Buscar informações atualizadas do lead no banco de dados.', parameters: { type: 'object', properties: {} }, function: async () => await getUser(context.userPhone) },
-        { name: 'update_user', description: 'Atualizar dados do lead.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['qualificado', 'desqualificado', 'atendimento_humano'] }, qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] }, faturamento_mensal: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, tipo_divida: { type: 'string' }, possui_socio: { type: 'boolean' }, cnpj: { type: 'string' }, motivo_qualificacao: { type: 'string' } } }, function: async (args: Record<string, unknown>) => await updateUser({ telefone: context.userPhone, ...args }) },
+        { name: 'update_user', description: 'Atualizar dados do lead.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['qualificado', 'desqualificado', 'atendimento_humano'] }, qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] }, faturamento_mensal: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, tipo_divida: { type: 'string' }, possui_socio: { type: 'boolean' }, cpf: { type: 'string' }, motivo_qualificacao: { type: 'string' } } }, function: async (args: Record<string, unknown>) => { const result = await updateUser({ telefone: context.userPhone, ...args }); if (args.qualificacao) { await setAgentRouting(context.userPhone, 'vendedor'); agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`); } return result; } },
         { name: 'chamar_atendente', description: 'Transferir o atendimento para um atendente humano.', parameters: { type: 'object', properties: {} }, function: async () => await callAttendant(context.userPhone, 'Solicitação do cliente') },
         { name: 'interpreter', description: 'Ferramenta de memória compartilhada.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] }, function: async (args) => await interpreter(context.userPhone, args.action as 'post' | 'get', args.text as string, args.category as 'qualificacao' | 'vendas' | 'atendimento') },
         {
