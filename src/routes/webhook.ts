@@ -108,11 +108,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
             log.error('Socket notification failed:', err)
         );
 
-        // 3. Adicionar à fila de sincronização de contexto
-        redis.zadd('context_sync_queue', Date.now(), userPhone).catch(err =>
-            log.error('Erro ao adicionar à fila de contexto:', err)
-        );
-        redis.del(`context_nudge_sent:${userPhone}`).catch(() => { });
+
 
         // 4. DEBOUNCE: acumular mensagem e agendar processamento
         //    Se mais mensagens chegarem em 2s, o timer é resetado.
@@ -138,6 +134,35 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 // Health check
 router.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'healthy', uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
+
+// HTTP Fallback for Socket.io
+router.post('/notify', (req: Request, res: Response) => {
+    try {
+        const { channel, data } = req.body;
+        if (!channel || !data) {
+            res.status(400).json({ error: 'Missing channel or data' });
+            return;
+        }
+
+        const io = require('../lib/socket-server').getIO();
+        if (!io) {
+            res.status(503).json({ error: 'Socket.io not initialized' });
+            return;
+        }
+
+        if (channel === 'chat-updates') {
+            const chatId = data.chatId;
+            if (chatId) {
+                io.to(`chat:${chatId}`).emit('new-message', data);
+            }
+            io.emit('chat-update-global', data);
+        }
+
+        res.json({ status: 'notified' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to process notification' });
+    }
 });
 
 export default router;
