@@ -15,6 +15,7 @@ export interface AgentContext {
     userPhone: string;
     history: { role: 'user' | 'system' | 'assistant'; content: string }[];
     attendantRequestedReason?: string;
+    outOfHours?: boolean;
 }
 
 export type AgentType = 'apolo' | 'vendedor' | 'atendente';

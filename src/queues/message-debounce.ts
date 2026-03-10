@@ -339,46 +339,41 @@ export function startDebounceWorker(): Worker {
                 : `[Multimodal: ${rawMessages.length} parte(s)]`;
             log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: ${logMsg}`);
 
-            // 4. Verificar horário comercial
-            if (!isWithinBusinessHours()) {
-                log.info(`🕐 Fora do horário comercial para ${userPhone}. Enviando mensagem padrão.`);
-                const oohMsg = getOutOfHoursMessage();
-                await addToHistory(userPhone, 'assistant', oohMsg);
-                await enqueueMessages({
-                    phone: metadata.sender,
-                    messages: [{ content: oohMsg, type: 'text', delay: 0 }],
-                    context: 'out-of-hours',
-                });
-            } else {
-                // 5. Resolver estado + roteamento
-                const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
-                const { runner, label } = AGENT_MAP[userState];
-                log.info(`🤖 → ${label}`);
+            // 4. Verificar horário comercial (Apenas capturar)
+            const isOutOfHours = !isWithinBusinessHours();
+            if (isOutOfHours) {
+                log.info(`🕐 Fora do horário comercial para ${userPhone}. A IA cuidará da mensagem.`);
+            }
 
-                if (!runner) {
-                    log.warn(`⚠️ Nenhum agente configurado para responder estado: ${userState}`);
-                    return;
-                }
+            // 5. Resolver estado + roteamento
+            const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
+            const { runner, label } = AGENT_MAP[userState];
+            log.info(`🤖 → ${label}`);
 
-                // 6. Chamar AI
-                const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
-                const attendantReason = await log.timed('getAttendantReason', () => redis.get(`attendant_requested:${userPhone}`));
+            if (!runner) {
+                log.warn(`⚠️ Nenhum agente configurado para responder estado: ${userState}`);
+                return;
+            }
 
-                const context: AgentContext = {
-                    userId: metadata.sender,
-                    userName: metadata.pushName,
-                    userPhone,
-                    history,
-                    ...(attendantReason ? { attendantRequestedReason: attendantReason } : {})
-                };
+            // 6. Chamar AI
+            const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
+            const attendantReason = await log.timed('getAttendantReason', () => redis.get(`attendant_requested:${userPhone}`));
 
-                try {
-                    const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
-                    await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
-                } catch (aiError) {
-                    log.error(`❌ Erro AI para ${userPhone}:`, aiError);
-                    await sendFallback(metadata.sender, userPhone);
-                }
+            const context: AgentContext = {
+                userId: metadata.sender,
+                userName: metadata.pushName,
+                userPhone,
+                history,
+                outOfHours: isOutOfHours,
+                ...(attendantReason ? { attendantRequestedReason: attendantReason } : {})
+            };
+
+            try {
+                const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
+                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
+            } catch (aiError) {
+                log.error(`❌ Erro AI para ${userPhone}:`, aiError);
+                await sendFallback(metadata.sender, userPhone);
             }
 
             totalTimer.end(`${rawMessages.length} msg(s) de ${userPhone}`);

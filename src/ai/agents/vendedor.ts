@@ -17,6 +17,7 @@ Você recebe o bastão do Apolo (SDR) quando o lead já passou pela qualificaç�
 
 {{DYNAMIC_CONTEXT}}
 {{ATTENDANT_WARNING}}
+{{OUT_OF_HOURS_WARNING}}
 
 **SUA NOVA MISSÃO CRÍTICA (REPESCAGEM):**
 Você agora atende também os leads marcados como **"desqualificado"**.
@@ -78,12 +79,14 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
     try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error:", e); }
 
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: EMPRESA FECHADA]\nNeste exato momento, a Haylander Contabilidade está fora do horário comercial (fechada). A sua missão principal AGORA é avisar o cliente de forma amigável e sutil na sua primeira mensagem que o expediente já se encerrou, MAS que você está lá para adiantar o lado dele recolhendo informações. Mantenha o fluxo normal, use as tools se precisar, apenas deixe claro que um humano só responderá no próximo dia útil.\n` : '';
 
     const systemPrompt = VENDEDOR_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', mediaList)
         .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
         .replace('{{ATTENDANT_WARNING}}', attendantWarning)
+        .replace('{{OUT_OF_HOURS_WARNING}}', outOfHoursWarning)
         .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
 
     const tools: ToolDefinition[] = [
