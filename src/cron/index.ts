@@ -3,6 +3,7 @@ import pool from '../lib/db';
 import redis from '../lib/redis';
 import { enqueueMessages } from '../queues/message-queue';
 import { cronLogger } from '../lib/logger';
+import { isWithinBusinessHours } from '../lib/business-hours';
 
 /**
  * Registra todos os CRON jobs do sistema
@@ -11,47 +12,33 @@ export function registerCronJobs(): void {
     cronLogger.info('Registrando jobs...');
 
     // ============================
-    // 1. Context Sync — A cada 10 minutos
-    //    Processa usuários inativos há 10+ minutos e sincroniza contexto
+    // 1. Context Sync — REMOVIDO
+    //    Nudges de inatividade agora são gerenciados pelo BullMQ follow-up queue
+    //    (scheduleFollowUp em message-debounce.ts) com timer de 5 minutos.
     // ============================
-    cron.schedule('*/10 * * * *', async () => {
-        cronLogger.debug('Context Sync - Iniciando...');
-        try {
-            const cutoff = Date.now() - 10 * 60 * 1000; // 10 minutos atrás
-            const users = await redis.zrangebyscore('context_sync_queue', 0, cutoff);
-
-            if (users.length === 0) return;
-
-            cronLogger.info(`Context Sync - ${users.length} usuários para processar`);
-
-            for (const phone of users) {
-                try {
-                    // Opcional: enviar nudge de 5 minutos se não enviou
-                    const nudgeSent = await redis.get(`context_nudge_sent:${phone}`);
-                    if (!nudgeSent) {
-                        // Marcar como processado e remover da fila
-                        await redis.zrem('context_sync_queue', phone);
-                        cronLogger.debug(`Context Sync - ${phone} processado`);
-                    }
-                } catch (err) {
-                    cronLogger.error(`Erro ao processar ${phone}:`, err);
-                }
-            }
-        } catch (error) {
-            cronLogger.error('Context Sync Error:', error);
-        }
-    });
 
     // ============================
     // 2. Follow-up de Inatividade — A cada 30 minutos
     //    Envia lembrete para leads que não responderam há mais de 2 horas
     // ============================
+    // ============================
+    // 2. Follow-up de Inatividade — A cada 30 minutos
+    //    Envia lembrete para leads que não responderam há mais de 2 horas
+    // ============================
     cron.schedule('*/30 * * * *', async () => {
-        cronLogger.info('Follow-up Inatividade - Iniciando...');
+        const log = cronLogger.withTrace(`cron-followup-${Date.now().toString(36)}`);
+
+        if (!isWithinBusinessHours()) {
+            log.debug('Follow-up Inatividade - Fora do horário comercial, pulando.');
+            return;
+        }
+
+        log.info('Follow-up Inatividade - Iniciando...');
+        const timer = log.timer('Cron Follow-up Total');
         const client = await pool.connect();
         try {
             // Buscar leads "nao_respondido" há mais de 2 horas sem follow-up recente
-            const res = await client.query(`
+            const res = await log.timed('Query leads inativos', () => client.query(`
         SELECT l.telefone, l.nome_completo
         FROM leads l
         LEFT JOIN leads_atendimento la ON l.id = la.lead_id
@@ -59,11 +46,17 @@ export function registerCronJobs(): void {
           AND l.data_cadastro < NOW() - INTERVAL '2 hours'
           AND (la.data_followup IS NULL OR la.data_followup < NOW() - INTERVAL '24 hours')
         LIMIT 10
-      `);
+      `));
 
-            if (res.rows.length === 0) return;
-            cronLogger.info(`Follow-up - ${res.rows.length} leads para contatar`);
+            if (res.rows.length === 0) {
+                log.info('Nenhum lead para follow-up no momento.');
+                timer.end('Sem leads');
+                return;
+            }
 
+            log.info(`Follow-up - ${res.rows.length} leads para contatar`);
+
+            let count = 0;
             for (const lead of res.rows) {
                 try {
                     // Limpar telefone: remover @lid, @s.whatsapp.net etc
@@ -71,7 +64,7 @@ export function registerCronJobs(): void {
                     const phone = rawPhone.split('@')[0].replace(/\D/g, '');
 
                     if (!phone || phone.length < 10) {
-                        cronLogger.debug(`Follow-up - Telefone inválido, pulando: ${rawPhone}`);
+                        log.debug(`Follow-up - Telefone inválido, pulando: ${rawPhone}`);
                         continue;
                     }
 
@@ -89,16 +82,19 @@ export function registerCronJobs(): void {
             WHERE lead_id = (SELECT id FROM leads WHERE telefone = $1)
           `, [lead.telefone]);
 
-                    cronLogger.info(`Follow-up enviado para ${phone}`);
+                    log.info(`Follow-up enviado para ${phone}`);
+                    count++;
 
                     // Rate limit: esperar 2s entre envios
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 } catch (err) {
-                    cronLogger.error(`Erro no follow-up de ${lead.telefone}:`, err);
+                    log.error(`Erro no follow-up de ${lead.telefone}:`, err);
                 }
             }
+            timer.end(`${count} follow-ups enviados`);
         } catch (error) {
-            cronLogger.error('Follow-up Error:', error);
+            log.error('Follow-up Error:', error);
+            timer.end('Erro');
         } finally {
             client.release();
         }
@@ -108,14 +104,19 @@ export function registerCronJobs(): void {
     // 3. Limpeza de Cache Redis — Diariamente às 3:00 AM
     // ============================
     cron.schedule('0 3 * * *', async () => {
-        cronLogger.info('Limpeza de cache - Iniciando...');
+        const log = cronLogger.withTrace(`cron-clean-${Date.now().toString(36)}`);
+        log.info('Limpeza noturna - Iniciando...');
+        const timer = log.timer('Limpeza Noturna');
         try {
-            // Limpar filas de contexto antigas (mais de 24h)
-            const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
-            const removed = await redis.zremrangebyscore('context_sync_queue', 0, cutoff24h);
-            cronLogger.info(`Limpeza - ${removed} entradas de contexto removidas`);
+            // Limpar histórico de chat antigo (> 7 dias)
+            const result = await pool.query(
+                `DELETE FROM chat_history WHERE created_at < NOW() - INTERVAL '7 days'`
+            );
+            log.info(`Limpeza - ${result.rowCount} mensagens de chat removidas`);
+            timer.end(`${result.rowCount} msg removidas`);
         } catch (error) {
-            cronLogger.error('Limpeza Error:', error);
+            log.error('Limpeza Error:', error);
+            timer.end('Erro na limpeza');
         }
     });
 
@@ -124,17 +125,20 @@ export function registerCronJobs(): void {
     //    Envia resumo de atividade para o atendente
     // ============================
     cron.schedule('0 8 * * *', async () => {
-        cronLogger.info('Relatório Diário - Gerando...');
+        const log = cronLogger.withTrace(`cron-report-${Date.now().toString(36)}`);
+        log.info('Relatório Diário - Gerando...');
+        const timer = log.timer('Relatório Diário Total');
+
         const client = await pool.connect();
         try {
             const yesterday = new Date();
             yesterday.setDate(yesterday.getDate() - 1);
 
-            const [newLeads, qualifiedLeads, meetings] = await Promise.all([
+            const [newLeads, qualifiedLeads, meetings] = await log.timed('Monitoramento de leads e reuniões', () => Promise.all([
                 client.query(`SELECT COUNT(*) as count FROM leads WHERE data_cadastro > $1`, [yesterday]),
                 client.query(`SELECT COUNT(*) as count FROM leads WHERE situacao = 'qualificado' AND data_cadastro > $1`, [yesterday]),
                 client.query(`SELECT COUNT(*) as count FROM leads_vendas WHERE data_reuniao > $1`, [yesterday]),
-            ]);
+            ]));
 
             const report = `📊 *Relatório Diário Haylander*\n\n` +
                 `📥 Novos Leads: ${newLeads.rows[0].count}\n` +
@@ -149,10 +153,15 @@ export function registerCronJobs(): void {
                     messages: [{ content: report, type: 'text', delay: 0 }],
                     context: 'cron-relatorio-diario'
                 });
-                cronLogger.info('Relatório enviado para a fila');
+                log.info('Relatório enviado para a fila');
+                timer.end('Relatório enviado');
+            } else {
+                log.warn('Relatório não enviado: ATTENDANT_PHONE ausente no .env');
+                timer.end('Sem ATTENDANT_PHONE');
             }
         } catch (error) {
-            cronLogger.error('Relatório Error:', error);
+            log.error('Relatório Error:', error);
+            timer.end('Erro no relatório');
         } finally {
             client.release();
         }

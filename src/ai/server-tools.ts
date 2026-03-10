@@ -55,10 +55,11 @@ export async function createUser(data: Record<string, unknown>): Promise<string>
         const { nome_completo, telefone } = data;
         const email = data.email || null;
         const res = await query(
-            `INSERT INTO leads (nome_completo, telefone, email, data_cadastro) VALUES ($1, $2, $3, NOW()) RETURNING id`,
+            `INSERT INTO leads (nome_completo, telefone, email, data_cadastro) VALUES ($1, $2, $3, NOW()) RETURNING *`,
             [nome_completo, telefone, email]
         );
-        return JSON.stringify({ status: 'success', id: res.rows[0].id });
+        log.info(`[createUser] Success: ${telefone}`, { result: res.rows[0] });
+        return JSON.stringify({ status: 'success', id: res.rows[0].id, result: res.rows[0] });
     } catch (error) {
         log.error('createUser error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
@@ -82,15 +83,25 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
 
         for (const [key, value] of Object.entries(fields)) {
             if (leadsFields.includes(key)) {
-                updateFields.push(`${key} = $${i}`);
+                if (key === 'observacoes') {
+                    // Observações são acumulativas — append com quebra de linha
+                    updateFields.push(`observacoes = CASE WHEN observacoes IS NULL OR observacoes = '' THEN $${i} ELSE observacoes || E'\\n' || $${i} END`);
+                } else {
+                    updateFields.push(`${key} = $${i}`);
+                }
                 values.push(value);
                 i++;
             }
         }
 
+        let updatedData = {};
         if (updateFields.length > 0) {
             values.push(telefone);
-            await query(`UPDATE leads SET ${updateFields.join(', ')} WHERE telefone = $${i}`, values);
+            const updateRes = await query(`UPDATE leads SET ${updateFields.join(', ')} WHERE telefone = $${i} RETURNING *`, values);
+            if (updateRes.rows.length > 0) {
+                updatedData = updateRes.rows[0];
+                log.info(`[updateUser] Success: ${telefone}`, { result: updatedData });
+            }
         }
 
         const resId = await query('SELECT id FROM leads WHERE telefone = $1', [telefone]);
@@ -104,7 +115,7 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
             }
         }
 
-        return JSON.stringify({ status: 'success', message: 'User updated' });
+        return JSON.stringify({ status: 'success', message: 'User updated', result: updatedData });
     } catch (error) {
         log.error('updateUser error:', error);
         return JSON.stringify({ status: 'error', message: String(error) });
@@ -208,8 +219,25 @@ export async function sendEnumeratedList(phone: string): Promise<string> {
     const listText = `Olá! 👋 Como posso te ajudar? Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
     try {
         const jid = toWhatsAppJid(phone);
-        await evolutionSendTextMessage(jid, listText);
-        return JSON.stringify({ status: 'success', message: 'Lista enviada ao cliente com sucesso.' });
+        const evoLog = await evolutionSendTextMessage(jid, listText);
+        log.info(`[sendEnumeratedList] Evolution response for ${phone}:`, { evolution_log: evoLog });
+
+        // Registrar no histórico para manter contexto entre agente e cliente
+        const { addToHistory } = await import('../lib/chat-history');
+        await addToHistory(phone, 'assistant', listText);
+
+        // Notificar socket para o painel admin ver a mensagem
+        // 3) Emitir mensagem WebSocket para atualizar a UI do atendente em tempo real
+        const { notifySocketServer } = await import('../lib/socket');
+        notifySocketServer('haylander-chat-updates', {
+            chatId: jid,
+            fromMe: true, // O bot enviou
+            message: { conversation: listText },
+            id: `msg-${Date.now()}`,
+            messageTimestamp: Math.floor(Date.now() / 1000)
+        }).catch(err => log.error('Erro ao notificar via Socket.io Server', err));
+
+        return JSON.stringify({ status: 'success', message: 'Lista enviada ao cliente com sucesso.', evolution_log: evoLog });
     } catch (error) {
         log.error('sendEnumeratedList error:', error);
         return JSON.stringify({ status: 'error', message: `Falha ao enviar lista: ${String(error)}` });
@@ -223,30 +251,15 @@ export async function callAttendant(phone: string, reason: string = 'Solicitaç�
         await query(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
 
         const attendantNumber = process.env.ATTENDANT_PHONE;
-        const instanceId = process.env.EVOLUTION_INSTANCE_ID;
-        const apiBaseUrl = process.env.EVOLUTION_API_URL;
-        const apiKey = process.env.EVOLUTION_API_KEY;
 
-        if (attendantNumber && instanceId && apiBaseUrl && apiKey) {
-            const cleanBaseUrl = apiBaseUrl.replace(/\/$/, '');
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-            try {
-                await fetch(`${cleanBaseUrl}/message/sendText/${instanceId}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
-                    body: JSON.stringify({
-                        number: attendantNumber,
-                        text: `🔔 *Solicitação de Atendimento*\n\nCliente *${phone}* solicitou atendente.\n📝 *Motivo:* ${reason}\n🔗 https://wa.me/${phone}`
-                    }),
-                    signal: controller.signal
-                });
-            } finally {
-                clearTimeout(timeoutId);
-            }
-            return JSON.stringify({ status: 'success', message: 'Atendente notificado. Aguarde um momento.' });
+        if (attendantNumber) {
+            const text = `🔔 *Solicitação de Atendimento*\n\nCliente *${phone}* solicitou atendente.\n📝 *Motivo:* ${reason}\n🔗 https://wa.me/${phone.replace(/\D/g, '')}`;
+            const evoLog = await evolutionSendTextMessage(toWhatsAppJid(attendantNumber), text);
+            log.info(`[callAttendant] Evolution response for notifying attendant (${attendantNumber}):`, { evolution_log: evoLog });
+            return JSON.stringify({ status: 'success', message: 'Atendente notificado. Aguarde um momento.', evolution_log: evoLog });
         }
 
+        log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
         return JSON.stringify({ status: 'success', message: 'Solicitação registrada. Aguarde um momento.' });
     } catch (error) {
         log.error('callAttendant error:', error);
@@ -289,10 +302,26 @@ export async function searchServices(searchQuery: string): Promise<string> {
 // ==================== Mídia ====================
 
 export async function getAvailableMedia(): Promise<string> {
-    return JSON.stringify([
+    const defaults = [
         { key: 'apc', description: 'Apresentação Comercial (PDF)', type: 'document' },
         { key: 'video_institucional', description: 'Vídeo Institucional', type: 'video' }
-    ]);
+    ];
+    try {
+        const { listFilesFromR2 } = await import('../lib/r2');
+        const files = await listFilesFromR2();
+        const validExts = ['.pdf', '.mp4', '.jpg', '.jpeg', '.png'];
+        const mediaFiles = files
+            .filter((f: any) => validExts.some(ext => f.key.toLowerCase().endsWith(ext)) && !f.key.includes('private'))
+            .map((f: any) => ({
+                key: f.key,
+                description: f.key.split('/').pop()?.replace(/[-_]/g, ' ').replace(/\.[^/.]+$/, '') || f.key,
+                type: f.key.endsWith('.mp4') ? 'video' : f.key.endsWith('.pdf') ? 'document' : 'image',
+                url: f.url,
+            }));
+        return JSON.stringify([...defaults, ...mediaFiles]);
+    } catch {
+        return JSON.stringify(defaults);
+    }
 }
 
 export async function sendMedia(phone: string, keyOrUrl: string): Promise<string> {
@@ -321,8 +350,9 @@ export async function sendMedia(phone: string, keyOrUrl: string): Promise<string
     else if (ext === 'pdf') { mediaType = 'document'; mimetype = 'application/pdf'; }
 
     try {
-        await evolutionSendMediaMessage(toWhatsAppJid(phone), mediaUrl, mediaType, fileName, fileName, mimetype);
-        return JSON.stringify({ status: 'sent', message: `Arquivo ${fileName} enviado.` });
+        const evoLog = await evolutionSendMediaMessage(toWhatsAppJid(phone), mediaUrl, mediaType, fileName, fileName, mimetype);
+        log.info(`[sendMedia] Evolution response for ${phone}:`, { evolution_log: evoLog });
+        return JSON.stringify({ status: 'sent', message: `Arquivo ${fileName} enviado.`, evolution_log: evoLog });
     } catch (error) {
         log.error(`sendMedia error ${keyOrUrl}:`, error);
         return JSON.stringify({ status: 'error', message: `Erro ao enviar arquivo: ${String(error)}` });
@@ -343,11 +373,13 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
 
     try {
         if (type === 'apc') {
-            await evolutionSendMediaMessage(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
-            return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type });
+            const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
+            log.info(`[sendCommercialPresentation] Evolution response (APC) for ${phone}:`, { evolution_log: evoLog });
+            return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type, evolution_log: evoLog });
         } else {
-            await evolutionSendMediaMessage(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
-            return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type });
+            const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
+            log.info(`[sendCommercialPresentation] Evolution response (Video) for ${phone}:`, { evolution_log: evoLog });
+            return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type, evolution_log: evoLog });
         }
     } catch (error) {
         log.error(`sendCommercialPresentation error ${type}:`, error);
@@ -381,29 +413,6 @@ export async function interpreter(
     const redisKey = `interpreter_memory:${phone}`;
 
     try {
-        // Ensure table exists
-        try {
-            await query(`
-        CREATE TABLE IF NOT EXISTS interpreter_memories (
-          id SERIAL PRIMARY KEY,
-          phone VARCHAR(20) NOT NULL,
-          content TEXT NOT NULL,
-          category VARCHAR(50),
-          embedding vector(1536),
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-        } catch {
-            await query(`
-        CREATE TABLE IF NOT EXISTS interpreter_memories (
-          id SERIAL PRIMARY KEY,
-          phone VARCHAR(20) NOT NULL,
-          content TEXT NOT NULL,
-          category VARCHAR(50),
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-        }
 
         if (action === 'post') {
             const truncatedText = text.substring(0, 1000);

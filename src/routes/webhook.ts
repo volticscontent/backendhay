@@ -6,6 +6,7 @@ import { cancelPendingFollowUps } from '../queues/message-queue';
 import { bufferAndDebounce } from '../queues/message-debounce';
 import { parseIncomingMessage } from '../lib/message-parser';
 import { webhookLogger } from '../lib/logger';
+import { saveLidPhoneMapping } from '../lib/lid-map';
 
 let requestCounter = 0;
 function nextTraceId(): string {
@@ -87,9 +88,18 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
             return;
         }
 
-        const userPhone = sender.replace('@s.whatsapp.net', '');
+        const userPhone = sender.replace('@s.whatsapp.net', '').replace('@lid', '');
         const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
         log.info(`📩 Mensagem de ${userPhone}: ${logMsg}`);
+
+        // Salvar mapeamento LID → telefone real (Redis + PostgreSQL)
+        const remoteJid = body.data?.key?.remoteJid;
+        if (remoteJid?.includes('@lid') && userPhone && !userPhone.includes('@lid')) {
+            saveLidPhoneMapping(remoteJid, userPhone, pushName).catch(err =>
+                log.error('Erro ao salvar mapeamento LID:', err)
+            );
+            log.debug(`🗺️ Mapeamento LID salvo: ${remoteJid} → ${userPhone}`);
+        }
 
         // 0. Cancelar follow-ups pendentes (cliente respondeu)
         cancelPendingFollowUps(userPhone).catch(err =>
@@ -103,8 +113,8 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         await addToHistory(userPhone, 'user', message);
 
         // 2. Publish INCOMING message to Redis for Real-time
-        const incomingSocketMsg = { chatId: sender, ...body.data };
-        notifySocketServer('chat-updates', incomingSocketMsg).catch(err =>
+        const incomingSocketMsg = { chatId: sender, senderPn: sender, userPhone, ...body.data };
+        notifySocketServer('haylander-bot-events', incomingSocketMsg).catch(err =>
             log.error('Socket notification failed:', err)
         );
 
@@ -151,7 +161,7 @@ router.post('/notify', (req: Request, res: Response) => {
             return;
         }
 
-        if (channel === 'chat-updates') {
+        if (channel === 'haylander-bot-events') {
             const chatId = data.chatId;
             if (chatId) {
                 io.to(`chat:${chatId}`).emit('new-message', data);

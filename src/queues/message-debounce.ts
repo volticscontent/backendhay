@@ -7,8 +7,9 @@ import { runAtendenteAgent } from '../ai/agents/atendente';
 import { AgentContext, AgentMessage } from '../ai/types';
 import { getUser, updateUser, createUser, getAgentRouting } from '../ai/server-tools';
 import { addToHistory, getChatHistory } from '../lib/chat-history';
-import { enqueueMessages } from './message-queue';
+import { enqueueMessages, scheduleFollowUp, cancelPendingFollowUps } from './message-queue';
 import { debounceLogger } from '../lib/logger';
+import { isWithinBusinessHours, getOutOfHoursMessage } from '../lib/business-hours';
 
 // ==================== Constantes ====================
 
@@ -41,14 +42,15 @@ interface DebounceMetadata {
     userPhone: string;
 }
 
-type UserState = 'lead' | 'qualified' | 'customer';
+type UserState = 'lead' | 'qualified' | 'customer' | 'attendant';
 
 type AgentRunner = (message: AgentMessage, context: AgentContext) => Promise<string>;
 
-const AGENT_MAP: Record<UserState, { runner: AgentRunner; label: string }> = {
+const AGENT_MAP: Record<UserState, { runner: AgentRunner | null; label: string }> = {
     qualified: { runner: runVendedorAgent, label: 'VENDEDOR (Icaro)' },
     customer: { runner: runAtendenteAgent, label: 'ATENDENTE (Apolo Customer)' },
     lead: { runner: runApoloAgent, label: 'APOLO (SDR)' },
+    attendant: { runner: null, label: 'ATENDIMENTO HUMANO' },
 };
 
 // ==================== Helpers Redis (atômico via pipeline) ====================
@@ -215,6 +217,8 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
         return 'qualified';
     }
 
+    if (user.needs_attendant) return 'attendant';
+
     if (user.situacao === 'cliente') return 'customer';
     if (user.qualificacao) return 'qualified';
     return 'lead';
@@ -236,6 +240,16 @@ async function sendAgentResponse(responseText: string, sender: string, userPhone
     }));
 
     await enqueueMessages({ phone: sender, messages: segments, context: 'agent-response' });
+
+    // Cancelar nudges anteriores e agendar novo follow-up de 5 minutos
+    await cancelPendingFollowUps(userPhone);
+    const nudgeMsg = 'Oi, só pra ver se você conseguiu ler a mensagem acima! Posso te ajudar com mais alguma coisa? 😊';
+    await scheduleFollowUp(
+        userPhone,
+        nudgeMsg,
+        5 * 60 * 1000,
+        'nudge'
+    );
 }
 
 /** Envia mensagem de fallback quando AI falha */
@@ -325,26 +339,43 @@ export function startDebounceWorker(): Worker {
                 : `[Multimodal: ${rawMessages.length} parte(s)]`;
             log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: ${logMsg}`);
 
-            // 4. Resolver estado + roteamento
-            const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
-            const { runner, label } = AGENT_MAP[userState];
-            log.info(`🤖 → ${label}`);
+            // 4. Verificar horário comercial
+            if (!isWithinBusinessHours()) {
+                log.info(`🕐 Fora do horário comercial para ${userPhone}. Enviando mensagem padrão.`);
+                const oohMsg = getOutOfHoursMessage();
+                await addToHistory(userPhone, 'assistant', oohMsg);
+                await enqueueMessages({
+                    phone: metadata.sender,
+                    messages: [{ content: oohMsg, type: 'text', delay: 0 }],
+                    context: 'out-of-hours',
+                });
+            } else {
+                // 5. Resolver estado + roteamento
+                const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
+                const { runner, label } = AGENT_MAP[userState];
+                log.info(`🤖 → ${label}`);
 
-            // 5. Chamar AI
-            const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
-            const context: AgentContext = {
-                userId: metadata.sender,
-                userName: metadata.pushName,
-                userPhone,
-                history,
-            };
+                if (userState === 'attendant' || !runner) {
+                    log.info(`⏸️ Usuário ${userPhone} está aguardando atendimento humano. Mensagem do bot ignorada.`);
+                    return;
+                }
 
-            try {
-                const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
-                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
-            } catch (aiError) {
-                log.error(`❌ Erro AI para ${userPhone}:`, aiError);
-                await sendFallback(metadata.sender, userPhone);
+                // 6. Chamar AI
+                const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
+                const context: AgentContext = {
+                    userId: metadata.sender,
+                    userName: metadata.pushName,
+                    userPhone,
+                    history,
+                };
+
+                try {
+                    const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
+                    await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
+                } catch (aiError) {
+                    log.error(`❌ Erro AI para ${userPhone}:`, aiError);
+                    await sendFallback(metadata.sender, userPhone);
+                }
             }
 
             totalTimer.end(`${rawMessages.length} msg(s) de ${userPhone}`);

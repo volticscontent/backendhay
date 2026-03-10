@@ -14,14 +14,15 @@
         "@aws-sdk/s3-request-presigner": "^3.700.0",
         "bullmq": "^5.34.0",
         "cors": "^2.8.5",
-        "dotenv": "^16.4.7",
+        "dotenv": "^16.6.1",
         "express": "^4.21.2",
         "ioredis": "^5.4.2",
         "node-cron": "^3.0.3",
         "openai": "^4.76.0",
         "pdf-parse": "^1.1.1",
-        "pg": "^8.13.1",
+        "pg": "^8.20.0",
         "socket.io": "^4.8.3",
+        "socket.io-client": "^4.8.3",
         "uuid": "^11.0.5"
     },
     "devDependencies": {

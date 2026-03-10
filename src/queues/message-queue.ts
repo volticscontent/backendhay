@@ -5,6 +5,7 @@ import { evolutionSendTextMessage, evolutionSendMediaMessage } from '../lib/evol
 import { toWhatsAppJid } from '../lib/utils';
 import { notifySocketServer } from '../lib/socket';
 import { queueLogger, workerLogger, followUpLogger } from '../lib/logger';
+import { isWithinBusinessHours } from '../lib/business-hours';
 
 // ==================== Filas ====================
 
@@ -160,7 +161,7 @@ export function startMessageWorker(): Worker {
                 }
 
                 // Notificar Socket Server sobre mensagem enviada
-                notifySocketServer('chat-updates', {
+                notifySocketServer('haylander-chat-updates', {
                     chatId: jid,
                     fromMe: true,
                     message: { conversation: msg.content },
@@ -202,7 +203,13 @@ export function startMessageWorker(): Worker {
 export function startFollowUpWorker(): Worker {
     const worker = new Worker<FollowUpJobData>('follow-up', async (job: Job<FollowUpJobData>) => {
         const { phone, message, type } = job.data;
-        followUpLogger.info(`Enviando ${type} para ${phone}`);
+        followUpLogger.info(`Processando ${type} para ${phone}`);
+
+        // Nudges só devem ser enviados dentro do horário comercial
+        if (type === 'nudge' && !isWithinBusinessHours()) {
+            followUpLogger.info(`🕐 Fora do horário comercial. Cancelando nudge para ${phone}`);
+            return;
+        }
 
         // Verificar se o cliente respondeu recentemente (evitar follow-up indesejado)
         const jid = toWhatsAppJid(phone);

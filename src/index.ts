@@ -10,6 +10,7 @@ import { initSocketServer } from './lib/socket-server';
 import pool from './lib/db';
 import redis from './lib/redis';
 import { bootLogger } from './lib/logger';
+import { warmLidCache } from './lib/lid-map';
 
 const app = express();
 const httpServer = createServer(app);
@@ -54,6 +55,10 @@ async function bootstrap() {
     const followUpWorker = startFollowUpWorker();
     const debounceWorker = startDebounceWorker();
     bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce)');
+
+    // 1.5 Aquecer cache de mapeamento LID → telefone
+    bootLogger.info('Aquecendo cache LID...');
+    await warmLidCache();
 
     // 2. CRON Jobs
     bootLogger.info('Registrando CRON Jobs...');
