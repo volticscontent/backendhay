@@ -13,6 +13,7 @@ Hoje é: {{CURRENT_DATE}}
 Você atende clientes que já estão na base (Situação = Cliente).
 
 {{DYNAMIC_CONTEXT}}
+{{ATTENDANT_WARNING}}
 
 **SUA MISSÃO:**
 Garantir que os dados do cliente estejam atualizados e oferecer suporte inicial.
@@ -65,10 +66,13 @@ export async function runAtendenteAgent(message: AgentMessage, context: AgentCon
 
     const [availableMedia, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]);
 
+    const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
+
     const systemPrompt = ATENDENTE_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', availableMedia)
         .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
+        .replace('{{ATTENDANT_WARNING}}', attendantWarning)
         .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
 
     const tools: ToolDefinition[] = [

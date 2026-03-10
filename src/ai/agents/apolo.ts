@@ -46,6 +46,7 @@ Somos especialistas em:
 - **Planejamento Tributário / Transformação de MEI:** Para MEIs estourando limite ou empresas pagando muito imposto. Fazemos migração de regime.
 
 {{DYNAMIC_CONTEXT}}
+{{ATTENDANT_WARNING}}
 
 **FLUXO DE PENSAMENTO OBRIGATÓRIO (Chain of Thought):**
 Antes de responder, você DEVE seguir este processo mental:
@@ -164,11 +165,14 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
     let dynamicContext = "";
     try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error fetching media/context:", e); }
 
+    const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
+
     const systemPrompt = APOLO_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{USER_NAME}}', context.userName || 'Cliente')
         .replace('{{MEDIA_LIST}}', mediaList)
         .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
+        .replace('{{ATTENDANT_WARNING}}', attendantWarning)
         .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
 
     const tools: ToolDefinition[] = [

@@ -249,6 +249,7 @@ export async function sendEnumeratedList(phone: string): Promise<string> {
 export async function callAttendant(phone: string, reason: string = 'Solicitação do cliente'): Promise<string> {
     try {
         await query(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
+        await redis.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
 
         const attendantNumber = process.env.ATTENDANT_PHONE;
 

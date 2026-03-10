@@ -217,7 +217,7 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
         return 'qualified';
     }
 
-    if (user.needs_attendant) return 'attendant';
+    // if (user.needs_attendant) return 'attendant'; // Removido para permitir que o bot continue respondendo
 
     if (user.situacao === 'cliente') return 'customer';
     if (user.qualificacao) return 'qualified';
@@ -355,18 +355,21 @@ export function startDebounceWorker(): Worker {
                 const { runner, label } = AGENT_MAP[userState];
                 log.info(`🤖 → ${label}`);
 
-                if (userState === 'attendant' || !runner) {
-                    log.info(`⏸️ Usuário ${userPhone} está aguardando atendimento humano. Mensagem do bot ignorada.`);
+                if (!runner) {
+                    log.warn(`⚠️ Nenhum agente configurado para responder estado: ${userState}`);
                     return;
                 }
 
                 // 6. Chamar AI
                 const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
+                const attendantReason = await log.timed('getAttendantReason', () => redis.get(`attendant_requested:${userPhone}`));
+
                 const context: AgentContext = {
                     userId: metadata.sender,
                     userName: metadata.pushName,
                     userPhone,
                     history,
+                    ...(attendantReason ? { attendantRequestedReason: attendantReason } : {})
                 };
 
                 try {

@@ -16,6 +16,7 @@ Hoje é: {{CURRENT_DATE}}
 Você recebe o bastão do Apolo (SDR) quando o lead já passou pela qualificação.
 
 {{DYNAMIC_CONTEXT}}
+{{ATTENDANT_WARNING}}
 
 **SUA NOVA MISSÃO CRÍTICA (REPESCAGEM):**
 Você agora atende também os leads marcados como **"desqualificado"**.
@@ -76,10 +77,13 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
     let dynamicContext = "";
     try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error:", e); }
 
+    const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
+
     const systemPrompt = VENDEDOR_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', mediaList)
         .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
+        .replace('{{ATTENDANT_WARNING}}', attendantWarning)
         .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
 
     const tools: ToolDefinition[] = [

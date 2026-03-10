@@ -14,6 +14,7 @@ export interface AgentContext {
     userName?: string;
     userPhone: string;
     history: { role: 'user' | 'system' | 'assistant'; content: string }[];
+    attendantRequestedReason?: string;
 }
 
 export type AgentType = 'apolo' | 'vendedor' | 'atendente';
