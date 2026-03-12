@@ -139,10 +139,25 @@ export function startMessageWorker(): Worker {
             }
 
             try {
+                let textToSend = msg.content;
+                let captionToSend = msg.content;
+                let msgBotLabel = '';
+                
+                if (context && context.startsWith('agent-response|')) {
+                    msgBotLabel = context.split('|')[1];
+                    let invisiblePrefix = '\u200B\u200B\u200B\u200B'; // Padrao: 4
+                    if (msgBotLabel.includes('APOLO (SDR)')) invisiblePrefix = '\u200B'; // 1
+                    else if (msgBotLabel.includes('VENDEDOR')) invisiblePrefix = '\u200B\u200B'; // 2
+                    else if (msgBotLabel.includes('ATENDENTE')) invisiblePrefix = '\u200B\u200B\u200B'; // 3
+                    
+                    textToSend = invisiblePrefix + textToSend;
+                    if (captionToSend) captionToSend = invisiblePrefix + captionToSend;
+                }
+
                 switch (msg.type) {
                     case 'text':
                     case 'link':
-                        await evolutionSendTextMessage(jid, msg.content);
+                        await evolutionSendTextMessage(jid, textToSend);
                         break;
                     case 'media': {
                         const mediaUrl = msg.content;
@@ -155,7 +170,7 @@ export function startMessageWorker(): Worker {
                         else if (['mp3', 'ogg'].includes(ext || '')) { mediatype = 'audio'; mimetype = 'audio/mpeg'; }
                         else if (ext === 'pdf') { mediatype = 'document'; mimetype = 'application/pdf'; }
 
-                        await evolutionSendMediaMessage(jid, mediaUrl, mediatype, msg.content.split('/').pop() || 'file', 'file', mimetype);
+                        await evolutionSendMediaMessage(jid, mediaUrl, mediatype, captionToSend, msg.content.split('/').pop() || 'file', mimetype);
                         break;
                     }
                 }
@@ -164,7 +179,7 @@ export function startMessageWorker(): Worker {
                 notifySocketServer('haylander-chat-updates', {
                     chatId: jid,
                     fromMe: true,
-                    message: { conversation: msg.content },
+                    message: { conversation: textToSend },
                     messageTimestamp: Math.floor(Date.now() / 1000),
                 }).catch(() => { /* silencioso */ });
 

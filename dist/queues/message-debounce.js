@@ -1,29 +1,34 @@
-import { Queue, Worker, Job } from 'bullmq';
-import redis from '../lib/redis';
-import { createRedisConnection } from '../lib/redis';
-import { runApoloAgent } from '../ai/agents/apolo';
-import { runVendedorAgent } from '../ai/agents/vendedor';
-import { runAtendenteAgent } from '../ai/agents/atendente';
-import { AgentContext, AgentMessage } from '../ai/types';
-import { getUser, updateUser, createUser, getAgentRouting } from '../ai/server-tools';
-import { addToHistory, getChatHistory } from '../lib/chat-history';
-import { enqueueMessages, scheduleFollowUp, cancelPendingFollowUps } from './message-queue';
-import { debounceLogger } from '../lib/logger';
-import { isWithinBusinessHours } from '../lib/business-hours';
-
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.debounceQueue = void 0;
+exports.bufferAndDebounce = bufferAndDebounce;
+exports.startDebounceWorker = startDebounceWorker;
+const bullmq_1 = require("bullmq");
+const redis_1 = __importDefault(require("../lib/redis"));
+const redis_2 = require("../lib/redis");
+const apolo_1 = require("../ai/agents/apolo");
+const vendedor_1 = require("../ai/agents/vendedor");
+const atendente_1 = require("../ai/agents/atendente");
+const server_tools_1 = require("../ai/server-tools");
+const chat_history_1 = require("../lib/chat-history");
+const message_queue_1 = require("./message-queue");
+const logger_1 = require("../lib/logger");
+const business_hours_1 = require("../lib/business-hours");
 // ==================== Constantes ====================
-
-const DEBOUNCE_DELAY_MS = 2500;
+const DEBOUNCE_DELAY_MS = 1500;
 const BUFFER_KEY_PREFIX = 'msg_buffer:';
 const META_KEY_PREFIX = 'msg_meta:';
 const LOCK_KEY_PREFIX = 'msg_lock:';
 const BUFFER_TTL = 120;
 const LOCK_TTL = 60;
 const MAX_BUFFER_SIZE = 20;
+const STALE_JOB_STATES = new Set(['completed', 'failed', 'unknown']);
 // ==================== Fila ====================
-
-export const debounceQueue = new Queue('message-debounce', {
-    connection: createRedisConnection() as any,
+exports.debounceQueue = new bullmq_1.Queue('message-debounce', {
+    connection: (0, redis_2.createRedisConnection)(),
     defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 3000 },
@@ -31,49 +36,27 @@ export const debounceQueue = new Queue('message-debounce', {
         removeOnFail: true,
     },
 });
-
-// ==================== Types ====================
-
-interface DebounceMetadata {
-    sender: string;
-    pushName?: string;
-    userPhone: string;
-}
-
-type UserState = 'lead' | 'qualified' | 'customer' | 'attendant';
-
-type AgentRunner = (message: AgentMessage, context: AgentContext) => Promise<string>;
-
-const AGENT_MAP: Record<UserState, { runner: AgentRunner | null; label: string }> = {
-    qualified: { runner: runVendedorAgent, label: 'VENDEDOR (Icaro)' },
-    customer: { runner: runAtendenteAgent, label: 'ATENDENTE (Apolo Customer)' },
-    lead: { runner: runApoloAgent, label: 'APOLO (SDR)' },
+const AGENT_MAP = {
+    qualified: { runner: vendedor_1.runVendedorAgent, label: 'VENDEDOR (Icaro)' },
+    customer: { runner: atendente_1.runAtendenteAgent, label: 'ATENDENTE (Apolo Customer)' },
+    lead: { runner: apolo_1.runApoloAgent, label: 'APOLO (SDR)' },
     attendant: { runner: null, label: 'ATENDIMENTO HUMANO' },
 };
-
 // ==================== Helpers Redis (atômico via pipeline) ====================
-
 /** Acumula mensagem + metadados de forma atômica para evitar estado inconsistente */
-async function atomicBufferPush(
-    userPhone: string,
-    serialized: string,
-    metadata: DebounceMetadata,
-): Promise<number> {
+async function atomicBufferPush(userPhone, serialized, metadata) {
     const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
     const metaKey = `${META_KEY_PREFIX}${userPhone}`;
-
-    const pipeline = redis.pipeline();
+    const pipeline = redis_1.default.pipeline();
     pipeline.rpush(bufferKey, serialized);
     pipeline.expire(bufferKey, BUFFER_TTL);
     pipeline.set(metaKey, JSON.stringify(metadata), 'EX', BUFFER_TTL);
     pipeline.llen(bufferKey);
-
     const results = await pipeline.exec();
     // llen é o 4° comando (index 3), resultado em [err, value]
-    const bufferLen = (results?.[3]?.[1] as number) ?? 0;
+    const bufferLen = results?.[3]?.[1] ?? 0;
     return bufferLen;
 }
-
 /** Lua script para flush atômico — leitura + deleção numa única operação Redis (sem race condition) */
 const FLUSH_LUA_SCRIPT = `
   local msgs = redis.call('lrange', KEYS[1], 0, -1)
@@ -81,92 +64,82 @@ const FLUSH_LUA_SCRIPT = `
   redis.call('del', KEYS[1], KEYS[2])
   return {msgs, meta or ''}
 `;
-
 /** Lê buffer + meta e limpa tudo atomicamente via Lua (verdadeiro pop atômico) */
-async function atomicBufferFlush(userPhone: string): Promise<{ messages: string[]; metadata: DebounceMetadata | null }> {
+async function atomicBufferFlush(userPhone) {
     const bufferKey = `${BUFFER_KEY_PREFIX}${userPhone}`;
     const metaKey = `${META_KEY_PREFIX}${userPhone}`;
-
-    const result = await redis.eval(
-        FLUSH_LUA_SCRIPT,
-        2,          // número de KEYS
-        bufferKey,  // KEYS[1]
-        metaKey,    // KEYS[2]
-    ) as [string[], string];
-
+    const result = await redis_1.default.eval(FLUSH_LUA_SCRIPT, 2, // número de KEYS
+    bufferKey, // KEYS[1]
+    metaKey);
     const rawMessages = result?.[0] ?? [];
     const metaRaw = result?.[1] || null;
-    const metadata = metaRaw ? JSON.parse(metaRaw) as DebounceMetadata : null;
+    const metadata = metaRaw ? JSON.parse(metaRaw) : null;
     return { messages: rawMessages, metadata };
 }
-
 /** Lock distribuído simples para evitar processamento duplo do mesmo usuário */
-async function acquireLock(userPhone: string): Promise<boolean> {
+async function acquireLock(userPhone) {
     const lockKey = `${LOCK_KEY_PREFIX}${userPhone}`;
-    const result = await redis.set(lockKey, '1', 'EX', LOCK_TTL, 'NX');
+    const result = await redis_1.default.set(lockKey, '1', 'EX', LOCK_TTL, 'NX');
     return result === 'OK';
 }
-
-async function releaseLock(userPhone: string): Promise<void> {
-    await redis.del(`${LOCK_KEY_PREFIX}${userPhone}`);
+async function releaseLock(userPhone) {
+    await redis_1.default.del(`${LOCK_KEY_PREFIX}${userPhone}`);
 }
-
 // ==================== Helpers de Negócio ====================
-
 /** Remove job anterior (qualquer estado exceto active) para liberar o jobId */
-async function clearPreviousJob(jobId: string, userPhone: string): Promise<'cleared' | 'active' | 'none'> {
+async function clearPreviousJob(jobId, userPhone) {
     try {
-        const existing = await debounceQueue.getJob(jobId);
-        if (!existing) return 'none';
-
+        const existing = await exports.debounceQueue.getJob(jobId);
+        if (!existing)
+            return 'none';
         const state = await existing.getState();
-
         if (state === 'active') {
-            debounceLogger.info(`Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+            logger_1.debounceLogger.info(`Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
             return 'active';
         }
-
         // delayed, waiting, completed, failed — tudo removível
         await existing.remove();
         const label = state === 'delayed' || state === 'waiting' ? 'Timer resetado' : `Job antigo (${state}) removido`;
-        debounceLogger.debug(`${label} para ${userPhone}`);
+        logger_1.debounceLogger.debug(`${label} para ${userPhone}`);
         return 'cleared';
-    } catch {
+    }
+    catch {
         return 'none';
     }
 }
-
 /** Concatena mensagens do buffer, preservando conteúdo multimodal (imagens) */
-function combineMessages(rawMessages: string[]): AgentMessage {
-    const textParts: string[] = [];
-    let lastMultimodal: AgentMessage | null = null;
-
+function combineMessages(rawMessages) {
+    const textParts = [];
+    let lastMultimodal = null;
     for (const raw of rawMessages) {
         try {
             const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.some((item: any) => item.type === 'image_url')) {
+            if (Array.isArray(parsed) && parsed.some((item) => item.type === 'image_url')) {
                 // É conteúdo multimodal (imagem) — guardar o mais recente
                 lastMultimodal = parsed;
                 // Extrair texto da parte multimodal
                 const texts = parsed
-                    .filter((item: any) => item.type === 'text' && item.text)
-                    .map((item: any) => item.text);
-                if (texts.length > 0) textParts.push(texts.join(' '));
-            } else if (Array.isArray(parsed)) {
+                    .filter((item) => item.type === 'text' && item.text)
+                    .map((item) => item.text);
+                if (texts.length > 0)
+                    textParts.push(texts.join(' '));
+            }
+            else if (Array.isArray(parsed)) {
                 // Array sem imagem — extrair texto
-                textParts.push(parsed.map((item: any) => item.text || '').filter(Boolean).join(' '));
-            } else {
+                textParts.push(parsed.map((item) => item.text || '').filter(Boolean).join(' '));
+            }
+            else {
                 textParts.push(raw);
             }
-        } catch {
+        }
+        catch {
             textParts.push(raw);
         }
     }
-
     // Se tem conteúdo multimodal, montar resposta com todo o texto + a imagem
     if (lastMultimodal && Array.isArray(lastMultimodal)) {
         const allText = textParts.join('\n').trim();
-        const imageItem = lastMultimodal.find((item: any) => item.type === 'image_url');
+        const imageItem = lastMultimodal.find((item) => item.type === 'image_url');
         if (imageItem) {
             return [
                 { type: 'text', text: allText || 'Analise esta imagem enviada pelo cliente.' },
@@ -174,199 +147,164 @@ function combineMessages(rawMessages: string[]): AgentMessage {
             ];
         }
     }
-
     return textParts.join('\n');
 }
-
 /** Resolve o estado do usuário a partir do DB */
-async function resolveUserState(userPhone: string, pushName?: string): Promise<UserState> {
-    const userJson = await getUser(userPhone);
-    let user: Record<string, unknown> | null = null;
-
+async function resolveUserState(userPhone, pushName) {
+    const userJson = await (0, server_tools_1.getUser)(userPhone);
+    let user = null;
     try {
         if (userJson) {
             const parsed = JSON.parse(userJson);
-            if (parsed.status !== 'error' && parsed.status !== 'not_found') user = parsed;
+            if (parsed.status !== 'error' && parsed.status !== 'not_found')
+                user = parsed;
         }
-    } catch (e) {
-        debounceLogger.error('Erro ao parsear usuario:', e);
     }
-
+    catch (e) {
+        logger_1.debounceLogger.error('Erro ao parsear usuario:', e);
+    }
     if (!user) {
-        debounceLogger.info(`🆕 Novo usuário (${userPhone}). Criando registro...`);
+        logger_1.debounceLogger.info(`🆕 Novo usuário (${userPhone}). Criando registro...`);
         try {
-            const result = JSON.parse(await createUser({ telefone: userPhone, nome_completo: pushName || 'Desconhecido' }));
+            const result = JSON.parse(await (0, server_tools_1.createUser)({ telefone: userPhone, nome_completo: pushName || 'Desconhecido' }));
             if (result.status !== 'error') {
-                await updateUser({ telefone: userPhone, situacao: 'nao_respondido' });
+                await (0, server_tools_1.updateUser)({ telefone: userPhone, situacao: 'nao_respondido' });
             }
-        } catch (err) {
-            debounceLogger.error(`Erro ao criar usuário ${userPhone}:`, err);
+        }
+        catch (err) {
+            logger_1.debounceLogger.error(`Erro ao criar usuário ${userPhone}:`, err);
         }
         return 'lead';
     }
-
     // Atualizar nome se necessário
-    const currentName = user.nome_completo as string;
+    const currentName = user.nome_completo;
     const shouldUpdateName = pushName && (!currentName || currentName === 'Desconhecido' || currentName.trim() === '');
-    await updateUser({
+    await (0, server_tools_1.updateUser)({
         telefone: userPhone,
         ...(shouldUpdateName ? { nome_completo: pushName } : {}),
     });
-
     // Verificar override de roteamento
-    const override = await getAgentRouting(userPhone);
+    const override = await (0, server_tools_1.getAgentRouting)(userPhone);
     if (override === 'vendedor') {
-        debounceLogger.info(`🔀 Override ativo → Vendas (${userPhone})`);
+        logger_1.debounceLogger.info(`🔀 Override ativo → Vendas (${userPhone})`);
         return 'qualified';
     }
-
     // if (user.needs_attendant) return 'attendant'; // Removido para permitir que o bot continue respondendo
-
-    if (user.situacao === 'cliente') return 'customer';
-    if (user.qualificacao) return 'qualified';
+    if (user.situacao === 'cliente')
+        return 'customer';
+    if (user.qualificacao)
+        return 'qualified';
     return 'lead';
 }
-
 /** Envia resposta do agente via BullMQ */
-async function sendAgentResponse(responseText: string, sender: string, userPhone: string, agentLabel: string = 'BOT'): Promise<void> {
-    if (!responseText) return;
-
-    await addToHistory(userPhone, 'assistant', responseText);
-
+async function sendAgentResponse(responseText, sender, userPhone) {
+    if (!responseText)
+        return;
+    await (0, chat_history_1.addToHistory)(userPhone, 'assistant', responseText);
     const messages = responseText.split('|||').map(m => m.trim()).filter(m => m.length > 0);
-    if (messages.length === 0) return;
-
+    if (messages.length === 0)
+        return;
     const segments = messages.map((msg, i) => ({
         content: msg,
-        type: 'text' as const,
+        type: 'text',
         delay: i === 0 ? 0 : 1500,
     }));
-
-    await enqueueMessages({ phone: sender, messages: segments, context: `agent-response|${agentLabel}` });
-
+    await (0, message_queue_1.enqueueMessages)({ phone: sender, messages: segments, context: 'agent-response' });
     // Cancelar nudges anteriores e agendar novo follow-up de 5 minutos
-    await cancelPendingFollowUps(userPhone);
+    await (0, message_queue_1.cancelPendingFollowUps)(userPhone);
     const nudgeMsg = 'Oi, só pra ver se você conseguiu ler a mensagem acima! Posso te ajudar com mais alguma coisa? 😊';
-    await scheduleFollowUp(
-        userPhone,
-        nudgeMsg,
-        5 * 60 * 1000,
-        'nudge'
-    );
+    await (0, message_queue_1.scheduleFollowUp)(userPhone, nudgeMsg, 5 * 60 * 1000, 'nudge');
 }
-
 /** Envia mensagem de fallback quando AI falha */
-async function sendFallback(sender: string, userPhone: string): Promise<void> {
+async function sendFallback(sender, userPhone) {
     try {
-        await enqueueMessages({
+        await (0, message_queue_1.enqueueMessages)({
             phone: sender,
             messages: [{
-                content: 'Tivemos uma instabilidade rápida no sistema. Nossa equipe já foi notificada. Um atendente humano responderá em breve.',
-                type: 'text',
-                delay: 0,
-            }],
+                    content: 'Tivemos uma instabilidade rápida no sistema. Nossa equipe já foi notificada. Um atendente humano responderá em breve.',
+                    type: 'text',
+                    delay: 0,
+                }],
             context: 'fallback-error',
         });
-        await updateUser({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro no bot, encaminhado para humano' });
-    } catch (err) {
-        debounceLogger.error('Falha crítica no fallback:', err);
+        await (0, server_tools_1.updateUser)({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro no bot, encaminhado para humano' });
+    }
+    catch (err) {
+        logger_1.debounceLogger.error('Falha crítica no fallback:', err);
     }
 }
-
 // ==================== API Pública ====================
-
 /**
  * Acumula mensagem no buffer Redis e (re)agenda o processamento com debounce.
  * Operações Redis são atômicas via pipeline. Protege contra buffer overflow.
  */
-export async function bufferAndDebounce(
-    userPhone: string,
-    message: string | Array<{ type: string; text?: string; image_url?: { url: string } }>,
-    metadata: DebounceMetadata,
-): Promise<void> {
+async function bufferAndDebounce(userPhone, message, metadata) {
     const serialized = typeof message === 'string' ? message : JSON.stringify(message);
-
     // 1. Push atômico no buffer
     const bufferLen = await atomicBufferPush(userPhone, serialized, metadata);
-    debounceLogger.info(`+1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
-
+    logger_1.debounceLogger.info(`+1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
     // 2. Proteção contra flood — se buffer muito grande, forçar processamento
     if (bufferLen >= MAX_BUFFER_SIZE) {
-        debounceLogger.warn(`⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
+        logger_1.debounceLogger.warn(`⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
         const jobId = `debounce-${userPhone}`;
         await clearPreviousJob(jobId, userPhone);
-        await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: 0 });
+        await exports.debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: 0 });
         return;
     }
-
     // 3. Limpar job anterior e criar novo com delay (reseta o timer)
     const jobId = `debounce-${userPhone}`;
     const status = await clearPreviousJob(jobId, userPhone);
-
     if (status === 'active') {
         // Job ativo: a mensagem já está no buffer. O worker fará re-check ao terminar.
-        debounceLogger.info(`Job ativo para ${userPhone}. Mensagem no buffer, será processada após conclusão.`);
+        logger_1.debounceLogger.info(`Job ativo para ${userPhone}. Mensagem no buffer, será processada após conclusão.`);
         return;
     }
-
-    await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
-    debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
+    await exports.debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
+    logger_1.debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
 }
-
 // ==================== Worker ====================
-
-export function startDebounceWorker(): Worker {
-    const worker = new Worker('message-debounce', async (job: Job) => {
-        const { userPhone } = job.data as { userPhone: string };
-        const log = debounceLogger.withTrace(`db-${userPhone.slice(-4)}-${Date.now().toString(36)}`);
+function startDebounceWorker() {
+    const worker = new bullmq_1.Worker('message-debounce', async (job) => {
+        const { userPhone } = job.data;
+        const log = logger_1.debounceLogger.withTrace(`db-${userPhone.slice(-4)}-${Date.now().toString(36)}`);
         const totalTimer = log.timer('Pipeline total');
-
         // 1. Lock distribuído — evita processamento duplo
         const locked = await log.timed('acquireLock', () => acquireLock(userPhone));
         if (!locked) {
             log.warn(`🔒 Lock ocupado para ${userPhone}. Re-enfileirando...`);
             throw new Error('Lock occupied — will retry');
         }
-
         try {
             log.info(`🔄 Processando mensagens de ${userPhone}...`);
-
             // 2. Flush atômico do buffer
             const { messages: rawMessages, metadata } = await log.timed('bufferFlush', () => atomicBufferFlush(userPhone));
-
             if (rawMessages.length === 0 || !metadata) {
                 log.info(`Buffer vazio para ${userPhone}, nada a processar.`);
                 return;
             }
-
             // 3. Concatenar mensagens
             const combinedMessage = combineMessages(rawMessages);
             const logMsg = typeof combinedMessage === 'string'
                 ? `"${combinedMessage.substring(0, 100)}${combinedMessage.length > 100 ? '...' : ''}"`
                 : `[Multimodal: ${rawMessages.length} parte(s)]`;
             log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: ${logMsg}`);
-
             // 4. Verificar horário comercial (Apenas capturar)
-            const isOutOfHours = !isWithinBusinessHours();
+            const isOutOfHours = !(0, business_hours_1.isWithinBusinessHours)();
             if (isOutOfHours) {
                 log.info(`🕐 Fora do horário comercial para ${userPhone}. A IA cuidará da mensagem.`);
             }
-
             // 5. Resolver estado + roteamento
             const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
             const { runner, label } = AGENT_MAP[userState];
             log.info(`🤖 → ${label}`);
-
             if (!runner) {
                 log.warn(`⚠️ Nenhum agente configurado para responder estado: ${userState}`);
                 return;
             }
-
             // 6. Chamar AI
-            const history = await log.timed('getChatHistory', () => getChatHistory(userPhone));
-            const attendantReason = await log.timed('getAttendantReason', () => redis.get(`attendant_requested:${userPhone}`));
-
-            const context: AgentContext = {
+            const history = await log.timed('getChatHistory', () => (0, chat_history_1.getChatHistory)(userPhone));
+            const attendantReason = await log.timed('getAttendantReason', () => redis_1.default.get(`attendant_requested:${userPhone}`));
+            const context = {
                 userId: metadata.sender,
                 userName: metadata.pushName,
                 userPhone,
@@ -374,48 +312,46 @@ export function startDebounceWorker(): Worker {
                 outOfHours: isOutOfHours,
                 ...(attendantReason ? { attendantRequestedReason: attendantReason } : {})
             };
-
             try {
                 const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
-                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone, label));
-            } catch (aiError) {
+                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
+            }
+            catch (aiError) {
                 log.error(`❌ Erro AI para ${userPhone}:`, aiError);
                 await sendFallback(metadata.sender, userPhone);
             }
-
             totalTimer.end(`${rawMessages.length} msg(s) de ${userPhone}`);
             log.info(`✅ Concluído para ${userPhone}`);
-        } finally {
+        }
+        finally {
             // Re-check: se chegaram msgs durante o processamento, re-agendar
             try {
-                const remainingCount = await redis.llen(`${BUFFER_KEY_PREFIX}${userPhone}`);
+                const remainingCount = await redis_1.default.llen(`${BUFFER_KEY_PREFIX}${userPhone}`);
                 if (remainingCount > 0) {
                     const recheckJobId = `debounce-${userPhone}`;
-                    await debounceQueue.add('process-buffered', { userPhone }, {
+                    await exports.debounceQueue.add('process-buffered', { userPhone }, {
                         jobId: recheckJobId,
                         delay: DEBOUNCE_DELAY_MS,
-                    }).catch(() => { /* job já pode existir, ok */ });
+                    }).catch(() => { });
                     log.info(`🔄 Re-check: ${remainingCount} msg(s) pendentes para ${userPhone}, job re-agendado`);
                 }
-            } catch (recheckErr) {
+            }
+            catch (recheckErr) {
                 log.error(`Erro no re-check de buffer:`, recheckErr);
             }
-
             // SEMPRE libera o lock, mesmo em caso de erro
             await releaseLock(userPhone);
         }
     }, {
-        connection: createRedisConnection() as any,
+        connection: (0, redis_2.createRedisConnection)(),
         concurrency: 5,
     });
-
     worker.on('completed', (job) => {
-        debounceLogger.debug(`Job ${job.id} concluído`);
+        logger_1.debounceLogger.debug(`Job ${job.id} concluído`);
     });
-
     worker.on('failed', (job, err) => {
-        debounceLogger.error(`❌ Job ${job?.id} falhou: ${err.message}`);
+        logger_1.debounceLogger.error(`❌ Job ${job?.id} falhou: ${err.message}`);
     });
-
     return worker;
 }
+//# sourceMappingURL=message-debounce.js.map
