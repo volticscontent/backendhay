@@ -111,10 +111,26 @@ function startMessageWorker() {
                 await new Promise(resolve => setTimeout(resolve, msg.delay));
             }
             try {
+                let textToSend = msg.content;
+                let captionToSend = msg.content;
+                let msgBotLabel = '';
+                if (context && context.startsWith('agent-response|')) {
+                    msgBotLabel = context.split('|')[1];
+                    let invisiblePrefix = '\u200B\u200B\u200B\u200B'; // Padrao: 4
+                    if (msgBotLabel.includes('APOLO (SDR)'))
+                        invisiblePrefix = '\u200B'; // 1
+                    else if (msgBotLabel.includes('VENDEDOR'))
+                        invisiblePrefix = '\u200B\u200B'; // 2
+                    else if (msgBotLabel.includes('ATENDENTE'))
+                        invisiblePrefix = '\u200B\u200B\u200B'; // 3
+                    textToSend = invisiblePrefix + textToSend;
+                    if (captionToSend)
+                        captionToSend = invisiblePrefix + captionToSend;
+                }
                 switch (msg.type) {
                     case 'text':
                     case 'link':
-                        await (0, evolution_1.evolutionSendTextMessage)(jid, msg.content);
+                        await (0, evolution_1.evolutionSendTextMessage)(jid, textToSend);
                         break;
                     case 'media': {
                         const mediaUrl = msg.content;
@@ -137,7 +153,7 @@ function startMessageWorker() {
                             mediatype = 'document';
                             mimetype = 'application/pdf';
                         }
-                        await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, mediatype, msg.content.split('/').pop() || 'file', 'file', mimetype);
+                        await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, mediatype, captionToSend, msg.content.split('/').pop() || 'file', mimetype);
                         break;
                     }
                 }
@@ -145,7 +161,7 @@ function startMessageWorker() {
                 (0, socket_1.notifySocketServer)('haylander-chat-updates', {
                     chatId: jid,
                     fromMe: true,
-                    message: { conversation: msg.content },
+                    message: { conversation: textToSend },
                     messageTimestamp: Math.floor(Date.now() / 1000),
                 }).catch(() => { });
                 // Atualizar progresso do job

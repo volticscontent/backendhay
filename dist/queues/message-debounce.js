@@ -18,14 +18,13 @@ const message_queue_1 = require("./message-queue");
 const logger_1 = require("../lib/logger");
 const business_hours_1 = require("../lib/business-hours");
 // ==================== Constantes ====================
-const DEBOUNCE_DELAY_MS = 1500;
+const DEBOUNCE_DELAY_MS = 2500;
 const BUFFER_KEY_PREFIX = 'msg_buffer:';
 const META_KEY_PREFIX = 'msg_meta:';
 const LOCK_KEY_PREFIX = 'msg_lock:';
 const BUFFER_TTL = 120;
 const LOCK_TTL = 60;
 const MAX_BUFFER_SIZE = 20;
-const STALE_JOB_STATES = new Set(['completed', 'failed', 'unknown']);
 // ==================== Fila ====================
 exports.debounceQueue = new bullmq_1.Queue('message-debounce', {
     connection: (0, redis_2.createRedisConnection)(),
@@ -197,7 +196,7 @@ async function resolveUserState(userPhone, pushName) {
     return 'lead';
 }
 /** Envia resposta do agente via BullMQ */
-async function sendAgentResponse(responseText, sender, userPhone) {
+async function sendAgentResponse(responseText, sender, userPhone, agentLabel = 'BOT') {
     if (!responseText)
         return;
     await (0, chat_history_1.addToHistory)(userPhone, 'assistant', responseText);
@@ -209,7 +208,7 @@ async function sendAgentResponse(responseText, sender, userPhone) {
         type: 'text',
         delay: i === 0 ? 0 : 1500,
     }));
-    await (0, message_queue_1.enqueueMessages)({ phone: sender, messages: segments, context: 'agent-response' });
+    await (0, message_queue_1.enqueueMessages)({ phone: sender, messages: segments, context: `agent-response|${agentLabel}` });
     // Cancelar nudges anteriores e agendar novo follow-up de 5 minutos
     await (0, message_queue_1.cancelPendingFollowUps)(userPhone);
     const nudgeMsg = 'Oi, só pra ver se você conseguiu ler a mensagem acima! Posso te ajudar com mais alguma coisa? 😊';
@@ -314,7 +313,7 @@ function startDebounceWorker() {
             };
             try {
                 const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
-                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone));
+                await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone, label));
             }
             catch (aiError) {
                 log.error(`❌ Erro AI para ${userPhone}:`, aiError);

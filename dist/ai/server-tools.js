@@ -170,7 +170,9 @@ async function updateUser(data) {
             const leadId = resId.rows[0].id;
             const check = await (0, db_2.query)('SELECT id FROM leads_atendimento WHERE lead_id = $1', [leadId]);
             if (check.rows.length > 0) {
-                await (0, db_2.query)('UPDATE leads_atendimento SET data_controle_24h = NOW() WHERE lead_id = $1', [leadId]);
+                if (fields.situacao) {
+                    await (0, db_2.query)('UPDATE leads_atendimento SET data_controle_24h = NOW() WHERE lead_id = $1', [leadId]);
+                }
             }
             else {
                 await (0, db_2.query)('INSERT INTO leads_atendimento (lead_id, data_controle_24h) VALUES ($1, NOW())', [leadId]);
@@ -303,6 +305,18 @@ async function callAttendant(phone, reason = 'Solicitação do cliente') {
     try {
         await (0, db_2.query)(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
         await redis_1.default.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
+        // Notificar via WebSocket para o painel (ChatInterface/Frontend) atualizar realtime
+        try {
+            const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+            await notifySocketServer('haylander-chat-updates', {
+                type: 'attendant-requested',
+                phone: phone,
+                reason: reason
+            });
+        }
+        catch (socketErr) {
+            log.warn('Erro ao notificar socket sobre request de atendente:', socketErr);
+        }
         const attendantNumber = process.env.ATTENDANT_PHONE;
         if (attendantNumber) {
             const text = `🔔 *Solicitação de Atendimento*\n\nCliente *${phone}* solicitou atendente.\n📝 *Motivo:* ${reason}\n🔗 https://wa.me/${phone.replace(/\D/g, '')}`;

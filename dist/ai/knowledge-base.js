@@ -83,8 +83,10 @@ async function getDynamicContext() {
     ]);
     const result = `\n\n${services}\n\n${assets}`;
     try {
-        // 3. Salva no cache por 10 minutos (600 segundos)
-        await redis_1.default.setex(CACHE_KEY, 600, result);
+        // 3. Salva no cache por 10 minutos (600 segundos) Apenas se não houver erro de busca
+        if (!services.startsWith('Erro') && !assets.startsWith('Erro')) {
+            await redis_1.default.setex(CACHE_KEY, 600, result);
+        }
     }
     catch (err) {
         log.warn('Erro ao salvar no cache Redis:', err);
