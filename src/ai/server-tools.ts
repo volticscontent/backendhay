@@ -341,7 +341,7 @@ export async function getAvailableMedia(): Promise<string> {
 
 export async function sendMedia(phone: string, keyOrUrl: string): Promise<string> {
     if (keyOrUrl === 'apc') return sendCommercialPresentation(phone, 'apc');
-    if (keyOrUrl === 'video_institucional' || keyOrUrl === 'video') return sendCommercialPresentation(phone, 'video');
+    if (keyOrUrl === 'video_institucional' || keyOrUrl === 'video' || keyOrUrl === 'video-tutorial-procuracao-ecac') return sendCommercialPresentation(phone, 'video');
 
     let mediaUrl = keyOrUrl;
     const fileName = keyOrUrl.split('/').pop() || 'arquivo';
