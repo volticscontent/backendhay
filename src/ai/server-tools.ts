@@ -71,52 +71,93 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
         const { telefone, ...fields } = data;
         if (!telefone) return JSON.stringify({ status: 'error', message: 'Telefone is required' });
 
-        const leadsFields = [
-            'nome_completo', 'email', 'cpf', 'nome_mae', 'senha_gov', 'situacao', 'observacoes', 'qualificacao',
-            'faturamento_mensal', 'tem_divida', 'tipo_negocio', 'possui_socio', 'valor_divida_federal',
-            'valor_divida_ativa', 'valor_divida_estadual', 'valor_divida_municipal', 'cartao_cnpj',
-            'tipo_divida', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'cnpj', 'razao_social'
-        ];
-        const updateFields: string[] = [];
-        const values: unknown[] = [];
-        let i = 1;
-
-        for (const [key, value] of Object.entries(fields)) {
-            if (leadsFields.includes(key)) {
-                if (key === 'observacoes') {
-                    // Observações são acumulativas — append com quebra de linha
-                    updateFields.push(`observacoes = CASE WHEN observacoes IS NULL OR observacoes = '' THEN $${i} ELSE observacoes || E'\\n' || $${i} END`);
-                } else {
-                    updateFields.push(`${key} = $${i}`);
-                }
-                values.push(value);
-                i++;
-            }
-        }
+        const resId = await query('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+        if (resId.rows.length === 0) return JSON.stringify({ status: 'not_found', message: 'Usuário não encontrado' });
+        const leadId = resId.rows[0].id;
 
         let updatedData = {};
-        if (updateFields.length > 0) {
-            values.push(telefone);
-            const updateRes = await query(`UPDATE leads SET ${updateFields.join(', ')} WHERE telefone = $${i} RETURNING *`, values);
-            if (updateRes.rows.length > 0) {
-                updatedData = updateRes.rows[0];
-                log.info(`[updateUser] Success: ${telefone}`, { result: updatedData });
-            }
-        }
 
-        const resId = await query('SELECT id FROM leads WHERE telefone = $1', [telefone]);
-        if (resId.rows.length > 0) {
-            const leadId = resId.rows[0].id;
-            const check = await query('SELECT id FROM leads_atendimento WHERE lead_id = $1', [leadId]);
-            if (check.rows.length > 0) {
-                if (fields.situacao) {
-                    await query('UPDATE leads_atendimento SET data_controle_24h = NOW() WHERE lead_id = $1', [leadId]);
+        const tableMappings: Record<string, string[]> = {
+            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+            leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
+            leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
+            leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
+            leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'vendido'],
+            leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
+        };
+
+        for (const [tableName, validFields] of Object.entries(tableMappings)) {
+            const updateFields: string[] = [];
+            const values: unknown[] = [];
+            let i = 1;
+
+            if (tableName === 'leads') {
+                for (const field of validFields) {
+                    if (fields[field] !== undefined) {
+                        updateFields.push(`${field} = $${i}`);
+                        values.push(fields[field]);
+                        i++;
+                    }
+                }
+                if (updateFields.length > 0) {
+                    values.push(telefone);
+                    const updateRes = await query(`UPDATE leads SET ${updateFields.join(', ')}, atualizado_em = NOW() WHERE telefone = $${i} RETURNING *`, values);
+                    if (updateRes.rows.length > 0) {
+                        updatedData = { ...updatedData, ...updateRes.rows[0] };
+                    }
                 }
             } else {
-                await query('INSERT INTO leads_atendimento (lead_id, data_controle_24h) VALUES ($1, NOW())', [leadId]);
+                for (const field of validFields) {
+                    if (fields[field] !== undefined) {
+                        if (tableName === 'leads_atendimento' && field === 'observacoes') {
+                            updateFields.push(`${field} = CASE WHEN ${field} IS NULL OR ${field} = '' THEN $${i} ELSE ${field} || E'\\n' || $${i} END`);
+                        } else {
+                            updateFields.push(`${field} = $${i}`);
+                        }
+                        values.push(fields[field]);
+                        i++;
+                    }
+                }
+
+                if (tableName === 'leads_atendimento' && fields.situacao !== undefined) {
+                    updateFields.push(`data_controle_24h = NOW()`);
+                }
+
+                if (updateFields.length > 0) {
+                    const check = await query(`SELECT id FROM ${tableName} WHERE lead_id = $1`, [leadId]);
+                    if (check.rows.length > 0) {
+                        values.push(leadId);
+                        await query(`UPDATE ${tableName} SET ${updateFields.join(', ')}, updated_at = NOW() WHERE lead_id = $${i}`, values);
+                        updatedData = { ...updatedData, ...fields };
+                    } else {
+                        const insertCols = ['lead_id'];
+                        const insertVals: unknown[] = [leadId];
+                        const insertPlaceholders = ['$1'];
+
+                        let paramIdx = 2;
+                        for (const field of validFields) {
+                            if (fields[field] !== undefined) {
+                                insertCols.push(field);
+                                insertVals.push(fields[field]);
+                                insertPlaceholders.push(`$${paramIdx}`);
+                                paramIdx++;
+                            }
+                        }
+
+                        if (tableName === 'leads_atendimento' && fields.situacao !== undefined) {
+                            insertCols.push('data_controle_24h');
+                            insertVals.push(new Date());
+                            insertPlaceholders.push(`$${paramIdx}`);
+                            paramIdx++;
+                        }
+                        await query(`INSERT INTO ${tableName} (${insertCols.join(', ')}) VALUES (${insertPlaceholders.join(', ')})`, insertVals);
+                        updatedData = { ...updatedData, ...fields };
+                    }
+                }
             }
         }
 
+        log.info(`[updateUser] Success: ${telefone}`);
         return JSON.stringify({ status: 'success', message: 'User updated', result: updatedData });
     } catch (error) {
         log.error('updateUser error:', error);
