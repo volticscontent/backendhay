@@ -393,7 +393,7 @@ async function getAvailableMedia() {
 async function sendMedia(phone, keyOrUrl) {
     if (keyOrUrl === 'apc')
         return sendCommercialPresentation(phone, 'apc');
-    if (keyOrUrl === 'video_institucional' || keyOrUrl === 'video')
+    if (keyOrUrl === 'video_institucional' || keyOrUrl === 'video' || keyOrUrl === 'video-tutorial-procuracao-ecac')
         return sendCommercialPresentation(phone, 'video');
     let mediaUrl = keyOrUrl;
     const fileName = keyOrUrl.split('/').pop() || 'arquivo';
@@ -428,6 +428,17 @@ async function sendMedia(phone, keyOrUrl) {
     try {
         const evoLog = await (0, evolution_1.evolutionSendMediaMessage)((0, utils_1.toWhatsAppJid)(phone), mediaUrl, mediaType, fileName, fileName, mimetype);
         log.info(`[sendMedia] Evolution response for ${phone}:`, { evolution_log: evoLog });
+        try {
+            const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+            notifySocketServer('haylander-chat-updates', {
+                chatId: (0, utils_1.toWhatsAppJid)(phone),
+                fromMe: true,
+                message: { conversation: `[Midia enviada: ${fileName}]` },
+                id: `msg-${Date.now()}`,
+                messageTimestamp: Math.floor(Date.now() / 1000)
+            }).catch(() => { });
+        }
+        catch (e) { }
         return JSON.stringify({ status: 'sent', message: `Arquivo ${fileName} enviado.`, evolution_log: evoLog });
     }
     catch (error) {
@@ -451,11 +462,33 @@ async function sendCommercialPresentation(phone, type = 'apc') {
         if (type === 'apc') {
             const evoLog = await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
             log.info(`[sendCommercialPresentation] Evolution response (APC) for ${phone}:`, { evolution_log: evoLog });
+            try {
+                const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+                notifySocketServer('haylander-chat-updates', {
+                    chatId: jid,
+                    fromMe: true,
+                    message: { conversation: `[Apresentação Comercial enviada]` },
+                    id: `msg-${Date.now()}`,
+                    messageTimestamp: Math.floor(Date.now() / 1000)
+                }).catch(() => { });
+            }
+            catch (e) { }
             return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type, evolution_log: evoLog });
         }
         else {
             const evoLog = await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
             log.info(`[sendCommercialPresentation] Evolution response (Video) for ${phone}:`, { evolution_log: evoLog });
+            try {
+                const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+                notifySocketServer('haylander-chat-updates', {
+                    chatId: jid,
+                    fromMe: true,
+                    message: { conversation: `[Vídeo Tutorial enviado]` },
+                    id: `msg-${Date.now()}`,
+                    messageTimestamp: Math.floor(Date.now() / 1000)
+                }).catch(() => { });
+            }
+            catch (e) { }
             return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type, evolution_log: evoLog });
         }
     }
@@ -618,6 +651,20 @@ async function sendMessageSegment(phone, segment) {
                     await sendMedia(phone, String(segment.metadata.mediaKey));
                 break;
         }
+        try {
+            const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+            let contentText = segment.content;
+            if (segment.type === 'link' && segment.metadata?.url)
+                contentText += '\n' + segment.metadata.url;
+            notifySocketServer('haylander-chat-updates', {
+                chatId: (0, utils_1.toWhatsAppJid)(phone),
+                fromMe: true,
+                message: { conversation: segment.type === 'media' ? `[Midia enviada]` : contentText },
+                id: `msg-${Date.now()}`,
+                messageTimestamp: Math.floor(Date.now() / 1000)
+            }).catch(() => { });
+        }
+        catch (e) { }
         log.info(`[MessageSegment] Sent: ${segment.id} to ${phone}`);
     }
     catch (error) {

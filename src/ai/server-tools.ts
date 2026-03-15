@@ -367,6 +367,18 @@ export async function sendMedia(phone: string, keyOrUrl: string): Promise<string
     try {
         const evoLog = await evolutionSendMediaMessage(toWhatsAppJid(phone), mediaUrl, mediaType, fileName, fileName, mimetype);
         log.info(`[sendMedia] Evolution response for ${phone}:`, { evolution_log: evoLog });
+        
+        try {
+            const { notifySocketServer } = await import('../lib/socket');
+            notifySocketServer('haylander-chat-updates', {
+                chatId: toWhatsAppJid(phone),
+                fromMe: true,
+                message: { conversation: `[Midia enviada: ${fileName}]` },
+                id: `msg-${Date.now()}`,
+                messageTimestamp: Math.floor(Date.now() / 1000)
+            }).catch(() => {});
+        } catch (e) {}
+
         return JSON.stringify({ status: 'sent', message: `Arquivo ${fileName} enviado.`, evolution_log: evoLog });
     } catch (error) {
         log.error(`sendMedia error ${keyOrUrl}:`, error);
@@ -390,10 +402,34 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
         if (type === 'apc') {
             const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
             log.info(`[sendCommercialPresentation] Evolution response (APC) for ${phone}:`, { evolution_log: evoLog });
+            
+            try {
+                const { notifySocketServer } = await import('../lib/socket');
+                notifySocketServer('haylander-chat-updates', {
+                    chatId: jid,
+                    fromMe: true,
+                    message: { conversation: `[Apresentação Comercial enviada]` },
+                    id: `msg-${Date.now()}`,
+                    messageTimestamp: Math.floor(Date.now() / 1000)
+                }).catch(() => {});
+            } catch (e) {}
+
             return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type, evolution_log: evoLog });
         } else {
             const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
             log.info(`[sendCommercialPresentation] Evolution response (Video) for ${phone}:`, { evolution_log: evoLog });
+            
+            try {
+                const { notifySocketServer } = await import('../lib/socket');
+                notifySocketServer('haylander-chat-updates', {
+                    chatId: jid,
+                    fromMe: true,
+                    message: { conversation: `[Vídeo Tutorial enviado]` },
+                    id: `msg-${Date.now()}`,
+                    messageTimestamp: Math.floor(Date.now() / 1000)
+                }).catch(() => {});
+            } catch (e) {}
+
             return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type, evolution_log: evoLog });
         }
     } catch (error) {
@@ -598,6 +634,21 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
                 if (segment.metadata?.mediaKey) await sendMedia(phone, String(segment.metadata.mediaKey));
                 break;
         }
+
+        try {
+            const { notifySocketServer } = await import('../lib/socket');
+            let contentText = segment.content;
+            if (segment.type === 'link' && segment.metadata?.url) contentText += '\n' + segment.metadata.url;
+            
+            notifySocketServer('haylander-chat-updates', {
+                chatId: toWhatsAppJid(phone),
+                fromMe: true,
+                message: { conversation: segment.type === 'media' ? `[Midia enviada]` : contentText },
+                id: `msg-${Date.now()}`,
+                messageTimestamp: Math.floor(Date.now() / 1000)
+            }).catch(() => {});
+        } catch (e) {}
+
         log.info(`[MessageSegment] Sent: ${segment.id} to ${phone}`);
     } catch (error) {
         log.error(`[MessageSegment] Error sending ${segment.id}:`, error);

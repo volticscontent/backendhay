@@ -47,16 +47,16 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
         socketLogger.error('Redis subscriber error:', err);
     });
 
-    subscriber.subscribe('haylander-bot-events', (err) => {
+    subscriber.subscribe('haylander-bot-events', 'haylander-chat-updates', (err) => {
         if (err) {
-            socketLogger.error('Falha ao assinar canal haylander-bot-events:', err);
+            socketLogger.error('Falha ao assinar canais Redis:', err);
         } else {
-            socketLogger.info('✅ Assinado canal Redis: haylander-bot-events');
+            socketLogger.info('✅ Assinados canais Redis: haylander-bot-events, haylander-chat-updates');
         }
     });
 
     subscriber.on('message', (channel, message) => {
-        if (channel === 'haylander-bot-events') {
+        if (channel === 'haylander-bot-events' || channel === 'haylander-chat-updates') {
             try {
                 const data = JSON.parse(message);
                 const chatId = data.chatId;

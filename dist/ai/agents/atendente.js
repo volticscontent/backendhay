@@ -51,6 +51,10 @@ Informações Reais do Cliente:
 5. **interpreter** — Memória compartilhada (post/get).
 
 {{MEDIA_LIST}}
+
+# Regras de Ouro
+- Mensagens fragmentadas com '|||'.
+- **PROIBIDO NARRAR TOOLS DE MÍDIA:** Ao usar a tool 'enviar_midia', NUNCA escreva no texto links fictícios ou o conteúdo do arquivo. A tool já faz o envio real do arquivo diretamente no WhatsApp do cliente automaticamente. Se quiser, apenas avise que o arquivo está sendo enviado.
 `;
 async function runAtendenteAgent(message, context) {
     const userDataJson = await (0, server_tools_1.getUser)(context.userPhone);

@@ -133,7 +133,7 @@ router.post('/notify', (req, res) => {
             res.status(503).json({ error: 'Socket.io not initialized' });
             return;
         }
-        if (channel === 'haylander-bot-events') {
+        if (channel === 'haylander-bot-events' || channel === 'haylander-chat-updates') {
             const chatId = data.chatId;
             if (chatId) {
                 io.to(`chat:${chatId}`).emit('new-message', data);
