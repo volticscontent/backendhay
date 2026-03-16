@@ -2,7 +2,7 @@ import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
 import {
     updateUser, getUser, callAttendant, contextRetrieve,
-    interpreter, sendMedia, getAvailableMedia, setAgentRouting
+    interpreter, sendMedia, getAvailableMedia, setAgentRouting, getUpdatableFields
 } from '../server-tools';
 import { getDynamicContext } from '../knowledge-base';
 
@@ -86,7 +86,8 @@ export async function runAtendenteAgent(message: AgentMessage, context: AgentCon
     const tools: ToolDefinition[] = [
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia.', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
         { name: 'context_retrieve', description: 'Buscar o contexto recente da conversa.', parameters: { type: 'object', properties: { limit: { type: 'number' } } }, function: async (args) => await contextRetrieve(context.userId, typeof args.limit === 'number' ? args.limit : 30) },
-        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { nome_completo: { type: 'string' }, cnpj: { type: 'string' }, email: { type: 'string' }, observacoes: { type: 'string' } } }, function: async (args) => await updateUser({ telefone: context.userPhone, ...args as Record<string, string> }) },
+        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { nome_completo: { type: 'string' }, cnpj: { type: 'string' }, email: { type: 'string' }, observacoes: { type: 'string' } }, additionalProperties: true }, function: async (args) => await updateUser({ telefone: context.userPhone, ...args as Record<string, string> }) },
+        { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await getUpdatableFields() },
         { name: 'chamar_atendente', description: 'Chamar atendente humano.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] }, function: async (args) => await callAttendant(context.userPhone, args.reason as string) },
         {
             name: 'iniciar_nova_venda', description: 'Transferir para o time de vendas para novos serviços.',

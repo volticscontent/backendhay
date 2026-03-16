@@ -681,6 +681,201 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
             let contentText = segment.content;
             if (segment.type === 'link' && segment.metadata?.url) contentText += '\n' + segment.metadata.url;
             
+        );
+        return JSON.stringify(result);
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({ status: 'error', message: errorMessage });
+    }
+}
+
+// ==================== Interpreter (Memory) ====================
+
+export async function interpreter(
+    phone: string,
+    action: 'post' | 'get',
+    text: string,
+    category: 'qualificacao' | 'vendas' | 'atendimento' = 'atendimento'
+): Promise<string> {
+    const redisKey = `interpreter_memory:${phone}`;
+
+    try {
+
+        if (action === 'post') {
+            const truncatedText = text.substring(0, 1000);
+            const embedding = await generateEmbedding(truncatedText);
+
+            try {
+                const memoryObj = { content: truncatedText, category, embedding: embedding || [], created_at: new Date().toISOString() };
+                await redis.lpush(redisKey, JSON.stringify(memoryObj));
+                await redis.ltrim(redisKey, 0, 49);
+            } catch (err) {
+                log.error('Redis write error:', err);
+            }
+
+            if (embedding && embedding.length > 0) {
+                try {
+                    await query(
+                        `INSERT INTO interpreter_memories (phone, content, category, embedding) VALUES ($1, $2, $3, $4::vector)`,
+                        [phone, truncatedText, category, JSON.stringify(embedding)]
+                    );
+                } catch {
+                    await query(
+                        `INSERT INTO interpreter_memories (phone, content, category) VALUES ($1, $2, $3)`,
+                        [phone, truncatedText, category]
+                    );
+                }
+            } else {
+                await query(
+                    `INSERT INTO interpreter_memories (phone, content, category) VALUES ($1, $2, $3)`,
+                    [phone, truncatedText, category]
+                );
+            }
+            return JSON.stringify({ status: 'stored', message: 'Memória armazenada com sucesso.' });
+        } else {
+            // GET
+            const embedding = await generateEmbedding(text);
+
+            interface InterpreterMemory {
+                content: string;
+                category: string;
+                embedding?: number[];
+                created_at: string;
+                similarity?: number;
+            }
+
+            let rows: InterpreterMemory[] = [];
+
+            try {
+                const rawMemories = await redis.lrange(redisKey, 0, -1);
+                if (rawMemories.length > 0) {
+                    const memories = rawMemories.map(m => JSON.parse(m) as InterpreterMemory);
+                    if (embedding && embedding.length > 0) {
+                        const scored = memories.map(m => ({ ...m, similarity: (m.embedding && m.embedding.length > 0) ? cosineSimilarity(embedding, m.embedding) : 0 }));
+                        scored.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
+                        rows = scored.slice(0, 5);
+                    } else {
+                        rows = memories.slice(0, 5);
+                    }
+                }
+            } catch (err) {
+                log.error('Redis read error:', err);
+            }
+
+            if (rows.length === 0) {
+                if (embedding && embedding.length > 0) {
+                    try {
+                        const res = await query(`
+              SELECT content, category, created_at, 1 - (embedding <=> $1::vector) as similarity
+              FROM interpreter_memories WHERE phone = $2 ORDER BY similarity DESC LIMIT 5
+            `, [JSON.stringify(embedding), phone]);
+                        rows = res.rows as unknown as InterpreterMemory[];
+                    } catch {
+                        const res = await query(`
+              SELECT content, category, created_at FROM interpreter_memories
+              WHERE phone = $1 AND content ILIKE $2 ORDER BY created_at DESC LIMIT 5
+            `, [phone, `%${text}%`]);
+                        rows = res.rows as unknown as InterpreterMemory[];
+                    }
+                } else {
+                    const res = await query(`
+            SELECT content, category, created_at FROM interpreter_memories
+            WHERE phone = $1 ORDER BY created_at DESC LIMIT 5
+          `, [phone]);
+                    rows = res.rows as unknown as InterpreterMemory[];
+                }
+            }
+
+            if (rows.length === 0) {
+                return JSON.stringify({ status: 'no_results', message: 'Nenhuma memória relevante encontrada.' });
+            }
+
+            const memories = rows.map(r => {
+                const date = new Date(r.created_at).toLocaleString('pt-BR');
+                return `[${date}] [${r.category}] ${r.content}`;
+            }).join('\n');
+
+            return JSON.stringify({ status: 'success', memories });
+        }
+    } catch (error) {
+        log.error('Interpreter error:', error);
+        return JSON.stringify({ status: 'error', message: String(error) });
+    }
+}
+
+// ==================== Tracking ====================
+
+export async function trackResourceDelivery(
+    leadId: number,
+    resourceType: string,
+    resourceKey: string,
+    metadata?: Record<string, unknown>
+): Promise<void> {
+    try {
+        await query(`
+      INSERT INTO resource_tracking (lead_id, resource_type, resource_key, delivered_at, status, metadata)
+      VALUES ($1, $2, $3, NOW(), 'delivered', $4)
+    `, [leadId, resourceType, resourceKey, JSON.stringify(metadata || {})]);
+    } catch (error) {
+        log.error('trackResourceDelivery error:', error);
+    }
+}
+
+export async function checkProcuracaoStatus(leadId: number): Promise<boolean> {
+    try {
+        const result = await query(`
+      SELECT status FROM resource_tracking
+      WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
+      ORDER BY delivered_at DESC LIMIT 1
+    `, [leadId]);
+        return result.rows.length > 0 && result.rows[0].status === 'completed';
+    } catch (error) {
+        log.error('checkProcuracaoStatus error:', error);
+        return false;
+    }
+}
+
+export async function markProcuracaoCompleted(leadId: number): Promise<void> {
+    try {
+        await query(`
+      UPDATE resource_tracking SET status = 'completed', accessed_at = NOW()
+      WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
+    `, [leadId]);
+    } catch (error) {
+        log.error('markProcuracaoCompleted error:', error);
+    }
+}
+
+// ==================== Message Segments ====================
+
+export interface MessageSegment {
+    id: string;
+    content: string;
+    type: 'text' | 'media' | 'link';
+    delay?: number;
+    metadata?: Record<string, unknown>;
+}
+
+export async function sendMessageSegment(phone: string, segment: MessageSegment): Promise<void> {
+    try {
+        switch (segment.type) {
+            case 'text':
+                await evolutionSendTextMessage(toWhatsAppJid(phone), segment.content);
+                break;
+            case 'link':
+                await evolutionSendTextMessage(toWhatsAppJid(phone), segment.content);
+                if (segment.metadata?.url) await evolutionSendTextMessage(toWhatsAppJid(phone), String(segment.metadata.url));
+                break;
+            case 'media':
+                if (segment.metadata?.mediaKey) await sendMedia(phone, String(segment.metadata.mediaKey));
+                break;
+        }
+
+        try {
+            const { notifySocketServer } = await import('../lib/socket');
+            let contentText = segment.content;
+            if (segment.type === 'link' && segment.metadata?.url) contentText += '\n' + segment.metadata.url;
+            
             notifySocketServer('haylander-chat-updates', {
                 chatId: toWhatsAppJid(phone),
                 fromMe: true,
@@ -694,4 +889,19 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
     } catch (error) {
         log.error(`[MessageSegment] Error sending ${segment.id}:`, error);
     }
+}
+
+export async function getUpdatableFields() {
+    const tableMappings: Record<string, string[]> = {
+        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+        leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
+        leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
+        leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
+        leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'vendido'],
+        leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
+    };
+    return JSON.stringify({
+        instrucoes: "Para atualizar os dados do cliente centralmente, chame update_user enviando os campos desejados na raiz do JSON (ex: { situacao: 'qualificado', email: 'x@y.com' }). Use a tabela abaixo para saber EXATAMENTE como os campos se chamam no banco.",
+        tabelas_e_campos: tableMappings
+    }, null, 2);
 }

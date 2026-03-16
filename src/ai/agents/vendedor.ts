@@ -4,7 +4,7 @@ import { agentLogger } from '../../lib/logger';
 import {
     tryScheduleMeeting, callAttendant, updateUser, searchServices,
     getUser, contextRetrieve, interpreter, sendMedia, getAvailableMedia,
-    setAgentRouting, sendMeetingForm
+    setAgentRouting, sendMeetingForm, getUpdatableFields
 } from '../server-tools';
 import { getDynamicContext } from '../knowledge-base';
 
@@ -101,7 +101,8 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
             function: async (args) => { await updateUser({ telefone: context.userPhone, observacoes: `[FIM VENDA] ${args.motivo}` }); return await setAgentRouting(context.userPhone, null); }
         },
         { name: 'chamar_atendente', description: 'Chamar atendente humano.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] }, function: async (args) => await callAttendant(context.userPhone, args.reason as string) },
-        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { situacao: { type: 'string' }, observacoes: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, valor_divida_federal: { type: 'string' }, cnpj: { type: 'string' }, razao_social: { type: 'string' }, faturamento_mensal: { type: 'string' } } }, function: async (args: Record<string, unknown>) => await updateUser({ telefone: context.userPhone, ...args }) },
+        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano'] }, observacoes: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, valor_divida_federal: { type: 'string' }, cnpj: { type: 'string' }, razao_social: { type: 'string' }, faturamento_mensal: { type: 'string' } }, additionalProperties: true }, function: async (args: Record<string, unknown>) => await updateUser({ telefone: context.userPhone, ...args }) },
+        { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await getUpdatableFields() },
         { name: 'services', description: 'Consultar informações sobre serviços.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }, function: async (args) => await searchServices(args.query as string) },
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia.', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
         { name: 'interpreter', description: 'Memória compartilhada (post/get).', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] }, function: async (args) => await interpreter(context.userPhone, args.action as 'post' | 'get', args.text as string, args.category as 'qualificacao' | 'vendas' | 'atendimento') },
