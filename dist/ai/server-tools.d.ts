@@ -28,4 +28,5 @@ export interface MessageSegment {
     metadata?: Record<string, unknown>;
 }
 export declare function sendMessageSegment(phone: string, segment: MessageSegment): Promise<void>;
+export declare function getUpdatableFields(): Promise<string>;
 //# sourceMappingURL=server-tools.d.ts.map
