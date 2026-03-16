@@ -78,7 +78,7 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
         let updatedData = {};
 
         const tableMappings: Record<string, string[]> = {
-            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
             leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
             leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
             leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
@@ -245,7 +245,13 @@ export async function sendForm(phone: string, observacao: string): Promise<strin
     baseUrl = baseUrl.replace(/\/$/, '');
     const link = `${baseUrl}/${phone}`;
     await updateUser({ telefone: phone, observacoes: `Interesse: ${observacao}` });
-    return JSON.stringify({ link, message: `Formulário gerado com sucesso. O link é: ${link}. Envie este link EXATO para o cliente.` });
+    
+    // Enviar mensagem automaticamente para garantir entrega
+    const message = `Aqui está o link do seu formulário de qualificação: ${link}\n\nPor favor, preencha para que possamos te ajudar da melhor forma! 😊`;
+    const jid = toWhatsAppJid(phone);
+    await evolutionSendTextMessage(jid, message);
+
+    return JSON.stringify({ link, message: `Formulário gerado e enviado com sucesso. O link é: ${link}.` });
 }
 
 export async function sendMeetingForm(phone: string): Promise<string> {
@@ -255,7 +261,13 @@ export async function sendMeetingForm(phone: string): Promise<string> {
     }
     baseUrl = baseUrl.replace(/\/$/, '');
     const link = `${baseUrl}/reuniao/${phone}`;
-    return JSON.stringify({ link, message: `Link de agendamento gerado: ${link}. Envie ao cliente.` });
+    
+    // Enviar mensagem automaticamente para garantir entrega
+    const message = `Separei um link para você escolher o melhor horário para nossa reunião: ${link}\n\nFico no aguardo do seu agendamento! 👇`;
+    const jid = toWhatsAppJid(phone);
+    await evolutionSendTextMessage(jid, message);
+
+    return JSON.stringify({ link, message: `Link de agendamento gerado e enviado: ${link}.` });
 }
 
 export async function sendEnumeratedList(phone: string): Promise<string> {
@@ -698,7 +710,7 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
 
 export async function getUpdatableFields() {
     const tableMappings: Record<string, string[]> = {
-        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
         leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
         leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
         leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],

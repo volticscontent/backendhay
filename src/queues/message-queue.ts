@@ -221,13 +221,7 @@ export function startFollowUpWorker(): Worker {
         const { phone, message, type } = job.data;
         followUpLogger.info(`Processando ${type} para ${phone}`);
 
-        // Nudges só devem ser enviados dentro do horário comercial
-        if (type === 'nudge' && !isWithinBusinessHours()) {
-            followUpLogger.info(`🕐 Fora do horário comercial. Cancelando nudge para ${phone}`);
-            return;
-        }
-
-        // Verificar se o cliente respondeu recentemente (evitar follow-up indesejado)
+        // Processando mensagem
         const jid = toWhatsAppJid(phone);
         const lastActivity = await redis.get(`last_activity:${phone}`);
 
