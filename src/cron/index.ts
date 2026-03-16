@@ -4,6 +4,7 @@ import redis from '../lib/redis';
 import { enqueueMessages } from '../queues/message-queue';
 import { cronLogger } from '../lib/logger';
 import { isWithinBusinessHours } from '../lib/business-hours';
+import { normalizePhone } from '../lib/utils';
 
 /**
  * Registra todos os CRON jobs do sistema
@@ -59,12 +60,11 @@ export function registerCronJobs(): void {
             let count = 0;
             for (const lead of res.rows) {
                 try {
-                    // Limpar telefone: remover @lid, @s.whatsapp.net etc
-                    const rawPhone = lead.telefone || '';
-                    const phone = rawPhone.split('@')[0].replace(/\D/g, '');
+                    // Limpar telefone usando utilitário robusto
+                    const phone = normalizePhone(lead.telefone || '');
 
                     if (!phone || phone.length < 10) {
-                        log.debug(`Follow-up - Telefone inválido, pulando: ${rawPhone}`);
+                        log.debug(`Follow-up - Telefone inválido, pulando: ${lead.telefone}`);
                         continue;
                     }
 

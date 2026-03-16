@@ -1,3 +1,5 @@
+import { evolutionLogger } from './logger';
+
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const EVOLUTION_INSTANCE_NAME = process.env.EVOLUTION_INSTANCE_NAME || '';
@@ -21,6 +23,7 @@ async function evolutionRequest(path: string, method: string = 'GET', body?: unk
 
         if (!response.ok) {
             const errorText = await response.text();
+            evolutionLogger.error(`Evolution API Error ${response.status} em ${path}:`, errorText);
             throw new Error(`Evolution API Error ${response.status}: ${errorText}`);
         }
 

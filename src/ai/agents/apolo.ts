@@ -51,16 +51,16 @@ Somos especialistas em:
 
 **FLUXO DE PENSAMENTO OBRIGATÓRIO (Chain of Thought):**
 Antes de responder, você DEVE seguir este processo mental:
-1. O usuário preencheu o formulário? (Verifique se há dados novos em {{USER_DATA}})
-2. Se SIM, classifique o lead AGORA (Respeite a ordem de PRECEDÊNCIA):
-   - **REGRA 1 (CRÍTICA):** Faturamento É 'Até 5k' E SEM Dívida? -> **DESQUALIFICADO** (PARE AQUI! Não importa se tem CNPJ ou não).
+1. Faça 1 ou 2 perguntas curtas e amigáveis para descobrir o cenário básico (faturamento mensal aproximado e se tem dívidas), caso ele não tenha informado.
+2. Com base nas respostas, classifique o lead AGORA (Respeite a ordem de PRECEDÊNCIA):
+   - **REGRA 1 (CRÍTICA):** Faturamento É 'Até 5k' E SEM Dívida? -> **DESQUALIFICADO** (PARE AQUI!).
    - Faturamento > 10k? -> MQL
    - Tem Dívida (tem_divida = true)? -> MQL
    - Quer Abrir Empresa (Novo CNPJ)? -> MQL (Somente se NÃO cair na regra 1).
    - NENHUM dos acima? -> DESQUALIFICADO.
-3. Se for QUALIFICADO (MQL ou SQL), chame update_user preenchendo 'qualificacao' e 'motivo_qualificacao'. O 'motivo_qualificacao' OBRIGATORIAMENTE deve explicar o porquê (ex: 'Faturamento acima de 10k', 'Possui Dívida', 'Quer abrir novo MEI').
+3. Se for QUALIFICADO (MQL ou SQL), chame update_user preenchendo 'qualificacao', 'motivo_qualificacao' e as informações extraídas. O 'motivo_qualificacao' DEVE explicar o porquê.
 4. Se for DESQUALIFICADO, chame update_user com {"situacao": "desqualificado", "motivo_qualificacao": "Faturamento até 5k e sem dívidas"}.
-5. SEMPRE use o campo 'observacoes' no update_user para salvar resumos essenciais do contexto (ex: "Lead escolheu processo Autônomo no e-CAC", "Lead questionou sobre valor de multa"). Isso é essencial para o Vendedor ou Atendente saberem de onde parou.
+5. SEMPRE use o campo 'observacoes' no update_user para salvar resumos essenciais do contexto ("Faturou X", "Tem Dívida", "Lead escolheu processo Autônomo"). O vendedor precisará dessa informação.
 
 # Suas Diretrizes de Atendimento (Fluxo Ideal)
 
@@ -95,7 +95,9 @@ Assim que você entender a intenção do cliente, USE AS TOOLS proativamente.
   4. **Se o cliente responder que quer "Autônomo" ou tentar fazer sozinho:** USE APENAS a tool 'enviar_processo_autonomo'.
      - **AVISO MÁXIMO:** Você é ESTRITAMENTE PROIBIDO de escrever o passo a passo, dar dicas de como acessar o e-CAC, ou enviar links de vídeos no seu texto! VOCÊ DEVE APENAS CHAMAR A TOOL 'enviar_processo_autonomo'. Ela faz todo o envio oficial por debaixo dos panos.
   5. **Se o cliente responder que quer "Assistido" ou precisar de ajuda:** USE APENAS 'enviar_processo_assistido'.
-  6. **Após o cliente ir para o e-CAC e confirmar que concluiu:** VOCÊ DEVE usar a ferramenta 'verificar_serpro_pos_ecac'. Se o retorno dela indicar Sucesso/Dados confirmados, chame 'marcar_procuracao_concluida'. Se o retorno falhar, pedir comprovante em print (Aviso de "Falta print comprovando!").
+  6. **Após o cliente ir para o e-CAC e confirmar que concluiu:** VOCÊ DEVE usar a ferramenta 'verificar_serpro_pos_ecac' IMEDIATAMENTE.
+     - Se o retorno for Sucesso / Dados confirmados, chame 'marcar_procuracao_concluida'.
+     - Se o retorno falhar, você DEVE pedir proativamente: *"Poderia me enviar um print da tela comprovando o cadastro para eu conseguir validar por aqui?"*
   7. Lembre-se de registrar na ferramenta update_user (campo "observacoes") sempre que o cliente concluir um passo importante.
 
 - **Cenário A.1: MEI Excluído ou Desenquadrado (Pré-Fechamento)**
@@ -150,7 +152,6 @@ Tudo isso é feito AUTOMATICAMENTE pelas TOOLS. Você NUNCA DEVE escrever textua
 - Mantenha o tom profissional mas acessível e acolhedor.
 - Respostas curtas (WhatsApp). Use '|||' para separar mensagens!
 - **PROIBIDO NARRAR TOOLS DE ENVIO AUTOMÁTICO:** Para as tools 'enviar_midia', 'enviar_lista_enumerada', 'iniciar_fluxo_regularizacao', 'enviar_processo_autonomo' e 'enviar_processo_assistido', NUNCA escreva links fictícios ou narre os passos no seu texto, pois elas JÁ ENVIAM TUDO AUTOMATICAMENTE. Seu texto deve ser MUDO nestes casos (ou apenas "Estou enviando abaixo").
-- **EXCEÇÃO IMPORTANTE (O QUE VOCÊ DEVE ENVIAR):** A tool 'enviar_formulario' NÃO EVIA MENSAGEM AUTOMÁTICA! Ela apenas gera o link. Quando você usar 'enviar_formulario', você DEVE OBRIGATORIAMENTE pegar o link retornado pela tool e colocá-lo no seu próprio texto de resposta para o cliente clicar!
 - **VÍDEO DO E-CAC:** SEMPRE que você citar e explicar o que é "e-CAC", acesso "GOV" para baixar MEI ou pedir código de acesso do e-CAC ao cliente, você DEVE OBRIGATORIAMENTE fornecer no seu texto o link oficial (https://cav.receita.fazenda.gov.br/autenticacao/login) E chamar a tool 'enviar_midia' passando a key 'video-tutorial-procuracao-ecac' para enviar o vídeo explicativo junto com a sua mensagem de texto.
 `;
 
@@ -185,7 +186,6 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
 
     const tools: ToolDefinition[] = [
         { name: 'context_retrieve', description: 'Buscar o contexto recente da conversa do cliente (Evolution API).', parameters: { type: 'object', properties: { limit: { type: 'number', description: 'Quantidade de mensagens a buscar (padrão 30).' } } }, function: async (args) => { const limit = typeof args.limit === 'number' ? args.limit : 30; return await contextRetrieve(context.userId, limit); } },
-        { name: 'enviar_formulario', description: 'Enviar o formulário de qualificação para o cliente.', parameters: { type: 'object', properties: { observacao: { type: 'string', description: 'O interesse ou motivo escolhido pelo cliente.' } }, required: ['observacao'] }, function: async (args) => await sendForm(context.userPhone, args.observacao as string) },
         { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia (PDF, Vídeo, Áudio).', parameters: { type: 'object', properties: { key: { type: 'string', description: 'A chave (ID) do arquivo de mídia.' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
         { name: 'select_User', description: 'Buscar informações atualizadas do lead no banco de dados.', parameters: { type: 'object', properties: {} }, function: async () => await getUser(context.userPhone) },
@@ -220,10 +220,14 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
                     const ud = await getUser(context.userPhone);
                     if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
                     const p = JSON.parse(ud);
-                    if (p.status === 'error' || p.status === 'not_found' || !p.cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado ou erro ao buscar" });
+                    if (p.status === 'error' || p.status === 'not_found' || !p.cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado ou erro ao buscar. Peça o print da tela do e-CAC." });
                     
-                    const serproResult = await checkCnpjSerpro(p.cnpj, 'CCMEI_DADOS');
-                    return JSON.stringify({ status: "success", serpro_dados: JSON.parse(serproResult) });
+                    try {
+                        const serproResult = await checkCnpjSerpro(p.cnpj, 'CCMEI_DADOS');
+                        return JSON.stringify({ status: "success", serpro_dados: JSON.parse(serproResult) });
+                    } catch (serproError) {
+                        return JSON.stringify({ status: "error", message: "A validação no Serpro retornou erro ou os dados não refletiram ainda. Você DEVE pedir um print do cadastro do e-CAC para confirmação visual." });
+                    }
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
                 }

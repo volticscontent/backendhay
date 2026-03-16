@@ -187,11 +187,12 @@ export function startMessageWorker(): Worker {
                 await job.updateProgress((i + 1) / messages.length * 100);
             } catch (sendError) {
                 workerLogger.error(`Erro ao enviar mensagem ${i + 1}/${messages.length} para ${phone}:`, sendError);
-                // Continua tentando as próximas mensagens
+                // Propaga o erro para que o BullMQ possa realizar os 'attempts' (retentativas) configurados
+                throw sendError;
             }
         }
 
-        workerLogger.info(`✅ Todas as ${messages.length} mensagens enviadas para ${phone}`);
+        workerLogger.info(`✅ Todas as ${messages.length} mensagens processadas para ${phone}`);
     }, {
         connection: createRedisConnection() as any,
         concurrency: 5, // Processa 5 jobs simultaneamente
