@@ -303,7 +303,31 @@ export async function sendEnumeratedList(phone: string): Promise<string> {
 
 export async function callAttendant(phone: string, reason: string = 'Solicitação do cliente'): Promise<string> {
     try {
+        const { getNextAvailableSlot } = await import('../lib/business-hours');
+        const now = new Date();
+        const scheduledDate = getNextAvailableSlot(now, 30);
+        const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+
+        // 1. Atualizar lead para sinalizar necessidade de humano
         await query(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
+        
+        // 2. Tentar obter ID do lead para marcar na leads_vendas
+        const leadRes = await query(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
+        if (leadRes.rows.length > 0) {
+            const leadId = leadRes.rows[0].id;
+            // Upsert na leads_vendas com tag 'atendimento'
+            await query(`
+                INSERT INTO leads_vendas (lead_id, data_reuniao, status_atendimento, reuniao_agendada)
+                VALUES ($1, $2, 'atendimento', true)
+                ON CONFLICT (lead_id) DO UPDATE SET
+                    data_reuniao = EXCLUDED.data_reuniao,
+                    status_atendimento = 'atendimento',
+                    reuniao_agendada = true,
+                    updated_at = NOW()
+            `, [leadId, scheduledDate]);
+        }
+
         await redis.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
 
         // Notificar via WebSocket para o painel (ChatInterface/Frontend) atualizar realtime
@@ -321,10 +345,19 @@ export async function callAttendant(phone: string, reason: string = 'Solicitaç�
         const attendantNumber = process.env.ATTENDANT_PHONE;
 
         if (attendantNumber) {
-            const text = `🔔 *Solicitação de Atendimento*\n\nCliente *${phone}* solicitou atendente.\n📝 *Motivo:* ${reason}\n🔗 https://wa.me/${phone.replace(/\D/g, '')}`;
+            const text = `🔔 *Solicitação de Atendimento*\n\n` +
+                         `👤 *Cliente:* ${phone}\n` +
+                         `📝 *Motivo:* ${reason}\n` +
+                         `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
+                         `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
+            
             const evoLog = await evolutionSendTextMessage(toWhatsAppJid(attendantNumber), text);
             log.info(`[callAttendant] Evolution response for notifying attendant (${attendantNumber}):`, { evolution_log: evoLog });
-            return JSON.stringify({ status: 'success', message: 'Atendente notificado. Aguarde um momento.', evolution_log: evoLog });
+            return JSON.stringify({ 
+                status: 'success', 
+                message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`, 
+                evolution_log: evoLog 
+            });
         }
 
         log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');

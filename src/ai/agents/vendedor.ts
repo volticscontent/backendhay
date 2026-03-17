@@ -63,6 +63,7 @@ Você **NÃO** gera contratos. Você prepara o terreno, valida a necessidade e g
 - Nunca gere contrato ou prometa honorários fechados para serviços complexos.
 - **PROIBIDO NARRAR TOOLS DE MÍDIA:** Ao usar a tool 'enviar_midia', NUNCA escreva no texto links fictícios ou o conteúdo do arquivo. A tool já faz o envio real do arquivo diretamente no WhatsApp do cliente automaticamente. Se quiser, apenas avise que o arquivo está sendo enviado.
 - **EXCEÇÃO IMPORTANTE (O QUE VOCÊ DEVE ENVIAR):** A tool 'enviar_link_reuniao' JÁ ENVIA a mensagem automática com o link para o cliente! Você não precisa repetir o link no seu texto, mas deve avisar que está enviando o link abaixo para ele escolher o horário.
+- **CHAMAR ATENDENTE:** Se o cliente exigir falar com o Haylander ou houver uma objeção que você não consiga contornar, use 'chamar_atendente'. **OBRIGATÓRIO:** No campo 'reason', resuma o que o cliente quer e qual o entrave atual (ex: "Cliente quer desconto em regularização de 100k").
 `;
 
 export async function runVendedorAgent(message: AgentMessage, context: AgentContext) {

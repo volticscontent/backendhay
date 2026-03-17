@@ -48,6 +48,53 @@ export function isWithinBusinessHours(): boolean {
 }
 
 /**
+ * Retorna a próxima data/hora disponível considerando um offset de minutos.
+ * Respeita o horário comercial e pula fins de semana.
+ */
+export function getNextAvailableSlot(baseDate: Date, offsetMinutes: number): Date {
+    // Fuso de São Paulo
+    const nowStr = baseDate.toLocaleString('en-US', { timeZone: BUSINESS_HOURS_CONFIG.timezone });
+    let date = new Date(nowStr);
+    
+    // Adiciona o offset inicial
+    date.setMinutes(date.getMinutes() + offsetMinutes);
+
+    // Ajusta para o horário comercial
+    let iterations = 0;
+    while (iterations < 10) { // Safety break
+        iterations++;
+        const day = date.getDay();
+        const hour = date.getHours();
+        const schedule = BUSINESS_HOURS_CONFIG.schedule[day];
+
+        // 1. Se for dia fechado (fim de semana), pula para o próximo dia às 09:00
+        if (!schedule) {
+            date.setDate(date.getDate() + 1);
+            date.setHours(9, 0, 0, 0);
+            continue;
+        }
+
+        // 2. Se for antes do horário de abertura, ajusta para a abertura
+        if (hour < schedule.open) {
+            date.setHours(schedule.open, 0, 0, 0);
+            return date;
+        }
+
+        // 3. Se for depois ou no limite do fechamento, pula para o próximo dia às 09:00
+        if (hour >= schedule.close) {
+            date.setDate(date.getDate() + 1);
+            date.setHours(9, 0, 0, 0);
+            continue;
+        }
+
+        // Se chegou aqui, está dentro do horário e é um dia válido
+        return date;
+    }
+
+    return date;
+}
+
+/**
  * Retorna a mensagem padronizada para fora do horário.
  */
 export function getOutOfHoursMessage(): string {
