@@ -64,6 +64,7 @@ export async function runAgent(
 
     try {
         let round = 0;
+        let accumulatedContent = '';
 
         while (round < MAX_TOOL_ROUNDS) {
             round++;
@@ -75,9 +76,13 @@ export async function runAgent(
             const choice = response.choices[0];
             const message = choice.message;
 
-            // Se não tem tool calls, retornar a resposta final
+            if (message.content) {
+                accumulatedContent += (accumulatedContent ? '\n' : '') + message.content;
+            }
+
+            // Se não tem tool calls, retornar o conteúdo acumulado
             if (!message.tool_calls || message.tool_calls.length === 0) {
-                return message.content || '';
+                return accumulatedContent.trim();
             }
 
             // Processar tool calls
