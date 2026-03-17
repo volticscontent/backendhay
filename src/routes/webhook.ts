@@ -109,8 +109,8 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // Registrar atividade no Redis
         redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
-        // 1. Salvar mensagem do usuário no histórico
-        await addToHistory(userPhone, 'user', message);
+        // 1. Registrar atividade no Redis (para nudges)
+        redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
         // 2. Publish INCOMING message to Redis for Real-time
         const incomingSocketMsg = { chatId: sender, senderPn: sender, userPhone, ...body.data };
@@ -120,9 +120,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
 
 
 
-        // 4. DEBOUNCE: acumular mensagem e agendar processamento
-        //    Se mais mensagens chegarem em 2s, o timer é resetado.
-        //    Só processa quando o usuário parar de digitar.
+        // 2. DEBOUNCE: acumular mensagem e agendar processamento
         const messageText = typeof message === 'string' ? message : JSON.stringify(message);
         await bufferAndDebounce(userPhone, messageText, {
             sender,

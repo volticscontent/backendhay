@@ -20,6 +20,7 @@ const LOCK_KEY_PREFIX = 'msg_lock:';
 const BUFFER_TTL = 120;
 const LOCK_TTL = 60;
 const MAX_BUFFER_SIZE = 20;
+const RECHECK_FLAG_PREFIX = 'msg_recheck:';
 // ==================== Fila ====================
 
 export const debounceQueue = new Queue('message-debounce', {
@@ -308,8 +309,9 @@ export async function bufferAndDebounce(
     const status = await clearPreviousJob(jobId, userPhone);
 
     if (status === 'active') {
-        // Job ativo: a mensagem já está no buffer. O worker fará re-check ao terminar.
-        debounceLogger.info(`Job ativo para ${userPhone}. Mensagem no buffer, será processada após conclusão.`);
+        // Sinalizar que o worker atual deve fazer re-check ao terminar
+        await redis.set(`${RECHECK_FLAG_PREFIX}${userPhone}`, '1', 'EX', 60);
+        debounceLogger.info(`Job ativo para ${userPhone}. Sinalizando re-check.`);
         return;
     }
 
@@ -380,11 +382,10 @@ export function startDebounceWorker(): Worker {
             };
 
             try {
-                const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
-                
-                // Salvar mensagem do usuário no histórico para as próximas rodadas
+                // 5. Salvar mensagem do usuário no histórico REAL (apenas uma vez, o bloco combinado)
                 await addToHistory(userPhone, 'user', combinedMessage);
-                
+
+                const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
                 await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone, label));
             } catch (aiError) {
                 log.error(`❌ Erro AI para ${userPhone}:`, aiError);
@@ -394,25 +395,27 @@ export function startDebounceWorker(): Worker {
             totalTimer.end(`${rawMessages.length} msg(s) de ${userPhone}`);
             log.info(`✅ Concluído para ${userPhone}`);
         } finally {
-            // Re-check: se chegaram msgs durante o processamento, re-agendar
+            // Re-check: se chegaram msgs durante o processamento (verificado via flag ou buffer residual)
             try {
+                const recheckFlag = await redis.get(`${RECHECK_FLAG_PREFIX}${userPhone}`);
                 const remainingCount = await redis.llen(`${BUFFER_KEY_PREFIX}${userPhone}`);
-                if (remainingCount > 0) {
-                    // Usamos um ID único (timestamp) para o re-check evitar colisão com o job atual que ainda consta como 'active'
-                    const recheckJobId = `debounce-${userPhone}-${Date.now()}`;
+                
+                if (recheckFlag === '1' || remainingCount > 0) {
+                    await redis.del(`${RECHECK_FLAG_PREFIX}${userPhone}`);
+                    const recheckJobId = `debounce-${userPhone}`;
+                    
+                    // Agenda o próximo ciclo com o ID padrão para permitir reset pelo webhook
                     await debounceQueue.add('process-buffered', { userPhone }, {
                         jobId: recheckJobId,
-                        delay: DEBOUNCE_DELAY_MS,
-                    }).catch((err) => { 
-                        debounceLogger.error(`Erro ao adicionar job de re-check para ${userPhone}:`, err);
-                    });
-                    log.info(`🔄 Re-check: ${remainingCount} msg(s) pendentes para ${userPhone}, job re-agendado (${recheckJobId})`);
+                        delay: 1500, // Menor delay para re-check (agilidade)
+                    }).catch(() => {});
+                    log.info(`🔄 Re-agendando para processar mensagens residuais (${remainingCount}) de ${userPhone}`);
                 }
             } catch (recheckErr) {
                 log.error(`Erro no re-check de buffer:`, recheckErr);
             }
 
-            // SEMPRE libera o lock, mesmo em caso de erro
+            // SEMPRE libera o lock
             await releaseLock(userPhone);
         }
     }, {

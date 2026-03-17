@@ -154,20 +154,6 @@ export function startMessageWorker(): Worker {
                     if (captionToSend) captionToSend = invisiblePrefix + captionToSend;
                 }
 
-                if (msg.type === 'text' || msg.type === 'link') {
-                    const msgHash = Buffer.from(textToSend).toString('base64');
-                    const lastMsgKey = `last_msg_sent:${phone}`;
-                    const lastMsgHash = await redis.get(lastMsgKey);
-                    
-                    if (lastMsgHash === msgHash) {
-                        workerLogger.warn(`🚫 Mensagem repetida detectada para ${phone}. Pulando envio.`);
-                        continue; // Pula esta mensagem
-                    }
-                    
-                    // Salvar hash da mensagem enviada por 30 segundos
-                    await redis.set(lastMsgKey, msgHash, 'EX', 30);
-                }
-
                 switch (msg.type) {
                     case 'text':
                     case 'link':
