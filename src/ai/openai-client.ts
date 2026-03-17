@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { AgentContext } from './types';
 import { agentLogger } from '../lib/logger';
+import { getChatHistory } from '../lib/chat-history';
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'dummy-key',
@@ -21,18 +22,12 @@ export async function runAgent(
     context: AgentContext,
     tools: ToolDefinition[]
 ): Promise<string> {
-    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        { role: 'system', content: systemPrompt },
-        ...context.history.map(h => ({ role: h.role, content: h.content } as OpenAI.Chat.Completions.ChatCompletionMessageParam)),
-        { role: 'user', content: userMessage }
-    ];
-
     const toolsConfig: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map(t => ({
         type: 'function',
         function: {
             name: t.name,
             description: t.description,
-            parameters: t.parameters,
+            parameters: t.parameters as any,
         },
     }));
 
@@ -63,6 +58,27 @@ export async function runAgent(
     const MAX_TOOL_ROUNDS = 5;
 
     try {
+        // 1. Carregar histórico recente (últimas 15 mensagens)
+        const history = await getChatHistory(context.userPhone, 15);
+        
+        const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+            { role: 'system', content: systemPrompt }
+        ];
+        
+        // 2. Adicionar histórico (evitando duplicar a mensagem atual se ela já foi salva no webhook)
+        const currentMsgText = typeof userMessage === 'string' ? userMessage : JSON.stringify(userMessage);
+        
+        for (const h of history) {
+            // Se a última mensagem do histórico for idêntica à atual, ignoramos para não duplicar
+            if (h.role === 'user' && h.content === currentMsgText && h === history[history.length - 1]) {
+                continue;
+            }
+            messages.push({ role: h.role as 'user' | 'assistant' | 'system', content: h.content });
+        }
+
+        // 3. Adicionar a mensagem atual do usuário
+        messages.push({ role: 'user', content: currentMsgText });
+
         let round = 0;
         let accumulatedContent = '';
 

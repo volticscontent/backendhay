@@ -116,25 +116,33 @@ async function releaseLock(userPhone: string): Promise<void> {
 
 /** Remove job anterior (qualquer estado exceto active) para liberar o jobId */
 async function clearPreviousJob(jobId: string, userPhone: string): Promise<'cleared' | 'active' | 'none'> {
+    const recheckId = `${jobId}-recheck`;
     try {
-        const existing = await debounceQueue.getJob(jobId);
-        if (!existing) return 'none';
+        const [job, recheckJob] = await Promise.all([
+            debounceQueue.getJob(jobId),
+            debounceQueue.getJob(recheckId)
+        ]);
 
-        const state = await existing.getState();
+        let isActive = false;
 
-        if (state === 'active') {
-            debounceLogger.info(`Job ${existing.id} ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+        if (job) {
+            const state = await job.getState();
+            if (state === 'active') isActive = true;
+            else await job.remove().catch(() => {});
+        }
+
+        if (recheckJob) {
+            const state = await recheckJob.getState();
+            if (state === 'active') isActive = true;
+            else await recheckJob.remove().catch(() => {});
+        }
+
+        if (isActive) {
+            debounceLogger.info(`Job ativo para ${userPhone}, agendamento ignorado (worker fará recheck)`);
             return 'active';
         }
 
-        // delayed, waiting, completed, failed — tudo removível
-        try {
-            await existing.remove();
-            debounceLogger.debug(`Job ${existing.id} removido (${state}) para ${userPhone}`);
-        } catch (removeErr) {
-            debounceLogger.warn(`Falha ao remover job ${existing.id}:`, removeErr);
-        }
-        return 'cleared';
+        return (job || recheckJob) ? 'cleared' : 'none';
     } catch (err) {
         debounceLogger.error(`Erro ao limpar job para ${userPhone}:`, err);
         return 'none';
@@ -382,9 +390,6 @@ export function startDebounceWorker(): Worker {
             };
 
             try {
-                // 5. Salvar mensagem do usuário no histórico REAL (apenas uma vez, o bloco combinado)
-                await addToHistory(userPhone, 'user', combinedMessage);
-
                 const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
                 await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone, label));
             } catch (aiError) {
@@ -402,14 +407,13 @@ export function startDebounceWorker(): Worker {
                 
                 if (recheckFlag === '1' || remainingCount > 0) {
                     await redis.del(`${RECHECK_FLAG_PREFIX}${userPhone}`);
-                    const recheckJobId = `debounce-${userPhone}`;
+                    const recheckJobId = `debounce-${userPhone}-recheck`;
                     
-                    // Agenda o próximo ciclo com o ID padrão para permitir reset pelo webhook
                     await debounceQueue.add('process-buffered', { userPhone }, {
                         jobId: recheckJobId,
-                        delay: 1500, // Menor delay para re-check (agilidade)
+                        delay: 1000, 
                     }).catch(() => {});
-                    log.info(`🔄 Re-agendando para processar mensagens residuais (${remainingCount}) de ${userPhone}`);
+                    log.info(`🔄 Re-agendando via RECHECK ID para ${userPhone}`);
                 }
             } catch (recheckErr) {
                 log.error(`Erro no re-check de buffer:`, recheckErr);

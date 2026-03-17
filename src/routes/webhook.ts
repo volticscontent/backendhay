@@ -109,6 +109,9 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // Registrar atividade no Redis
         redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
+        // 1. Salvar mensagem do usuário no histórico IMEDIATAMENTE (para a AI ver)
+        await addToHistory(userPhone, 'user', message);
+
         // 1. Registrar atividade no Redis (para nudges)
         redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
