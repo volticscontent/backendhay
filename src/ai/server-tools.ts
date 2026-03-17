@@ -251,6 +251,11 @@ export async function sendForm(phone: string, observacao: string): Promise<strin
     const jid = toWhatsAppJid(phone);
     await evolutionSendTextMessage(jid, message);
 
+    try {
+        const { addToHistory } = await import('../lib/chat-history');
+        await addToHistory(phone, 'assistant', message);
+    } catch (e) {}
+
     return JSON.stringify({ link, message: `Formulário gerado e enviado com sucesso. O link é: ${link}.` });
 }
 
@@ -267,11 +272,16 @@ export async function sendMeetingForm(phone: string): Promise<string> {
     const jid = toWhatsAppJid(phone);
     await evolutionSendTextMessage(jid, message);
 
+    try {
+        const { addToHistory } = await import('../lib/chat-history');
+        await addToHistory(phone, 'assistant', message);
+    } catch (e) {}
+
     return JSON.stringify({ link, message: `Link de agendamento gerado e enviado: ${link}.` });
 }
 
 export async function sendEnumeratedList(phone: string): Promise<string> {
-    const listText = `Olá! 👋 Como posso te ajudar? Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
+    const listText = `Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
     try {
         const jid = toWhatsAppJid(phone);
         const evoLog = await evolutionSendTextMessage(jid, listText);
@@ -722,6 +732,12 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
         }
 
         try {
+            const { addToHistory } = await import('../lib/chat-history');
+            let historyText = segment.content;
+            if (segment.type === 'link' && segment.metadata?.url) historyText += '\n' + segment.metadata.url;
+            if (segment.type === 'media') historyText = `[Midia: ${segment.metadata?.mediaKey || 'arquivo'}]`;
+            await addToHistory(phone, 'assistant', historyText);
+
             const { notifySocketServer } = await import('../lib/socket');
             let contentText = segment.content;
             if (segment.type === 'link' && segment.metadata?.url) contentText += '\n' + segment.metadata.url;

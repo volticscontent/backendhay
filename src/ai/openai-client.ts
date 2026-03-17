@@ -77,7 +77,7 @@ export async function runAgent(
             const message = choice.message;
 
             if (message.content) {
-                accumulatedContent += (accumulatedContent ? '\n' : '') + message.content;
+                accumulatedContent += (accumulatedContent ? ' ||| ' : '') + message.content;
             }
 
             // Se não tem tool calls, retornar o conteúdo acumulado

@@ -154,6 +154,20 @@ export function startMessageWorker(): Worker {
                     if (captionToSend) captionToSend = invisiblePrefix + captionToSend;
                 }
 
+                if (msg.type === 'text' || msg.type === 'link') {
+                    const msgHash = Buffer.from(textToSend).toString('base64');
+                    const lastMsgKey = `last_msg_sent:${phone}`;
+                    const lastMsgHash = await redis.get(lastMsgKey);
+                    
+                    if (lastMsgHash === msgHash) {
+                        workerLogger.warn(`🚫 Mensagem repetida detectada para ${phone}. Pulando envio.`);
+                        continue; // Pula esta mensagem
+                    }
+                    
+                    // Salvar hash da mensagem enviada por 30 segundos
+                    await redis.set(lastMsgKey, msgHash, 'EX', 30);
+                }
+
                 switch (msg.type) {
                     case 'text':
                     case 'link':
@@ -237,6 +251,15 @@ export function startFollowUpWorker(): Worker {
         }
 
         await evolutionSendTextMessage(jid, message);
+        
+        // Registrar nudge no histórico para a IA ter o contexto da resposta do usuário
+        try {
+            const { addToHistory } = await import('../lib/chat-history');
+            await addToHistory(phone, 'assistant', message);
+        } catch (histErr) {
+            followUpLogger.warn('Erro ao salvar nudge no histórico:', histErr);
+        }
+
         followUpLogger.info(`✅ ${type} enviado para ${phone}`);
     }, {
         connection: createRedisConnection() as any,

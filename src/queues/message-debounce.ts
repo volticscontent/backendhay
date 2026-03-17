@@ -122,16 +122,20 @@ async function clearPreviousJob(jobId: string, userPhone: string): Promise<'clea
         const state = await existing.getState();
 
         if (state === 'active') {
-            debounceLogger.info(`Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+            debounceLogger.info(`Job ${existing.id} ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
             return 'active';
         }
 
         // delayed, waiting, completed, failed — tudo removível
-        await existing.remove();
-        const label = state === 'delayed' || state === 'waiting' ? 'Timer resetado' : `Job antigo (${state}) removido`;
-        debounceLogger.debug(`${label} para ${userPhone}`);
+        try {
+            await existing.remove();
+            debounceLogger.debug(`Job ${existing.id} removido (${state}) para ${userPhone}`);
+        } catch (removeErr) {
+            debounceLogger.warn(`Falha ao remover job ${existing.id}:`, removeErr);
+        }
         return 'cleared';
-    } catch {
+    } catch (err) {
+        debounceLogger.error(`Erro ao limpar job para ${userPhone}:`, err);
         return 'none';
     }
 }
@@ -377,6 +381,10 @@ export function startDebounceWorker(): Worker {
 
             try {
                 const response = await log.timed(`AI ${label}`, () => runner(combinedMessage, context));
+                
+                // Salvar mensagem do usuário no histórico para as próximas rodadas
+                await addToHistory(userPhone, 'user', combinedMessage);
+                
                 await log.timed('sendAgentResponse', () => sendAgentResponse(response, metadata.sender, userPhone, label));
             } catch (aiError) {
                 log.error(`❌ Erro AI para ${userPhone}:`, aiError);
@@ -390,12 +398,15 @@ export function startDebounceWorker(): Worker {
             try {
                 const remainingCount = await redis.llen(`${BUFFER_KEY_PREFIX}${userPhone}`);
                 if (remainingCount > 0) {
-                    const recheckJobId = `debounce-${userPhone}`;
+                    // Usamos um ID único (timestamp) para o re-check evitar colisão com o job atual que ainda consta como 'active'
+                    const recheckJobId = `debounce-${userPhone}-${Date.now()}`;
                     await debounceQueue.add('process-buffered', { userPhone }, {
                         jobId: recheckJobId,
                         delay: DEBOUNCE_DELAY_MS,
-                    }).catch(() => { /* job já pode existir, ok */ });
-                    log.info(`🔄 Re-check: ${remainingCount} msg(s) pendentes para ${userPhone}, job re-agendado`);
+                    }).catch((err) => { 
+                        debounceLogger.error(`Erro ao adicionar job de re-check para ${userPhone}:`, err);
+                    });
+                    log.info(`🔄 Re-check: ${remainingCount} msg(s) pendentes para ${userPhone}, job re-agendado (${recheckJobId})`);
                 }
             } catch (recheckErr) {
                 log.error(`Erro no re-check de buffer:`, recheckErr);
