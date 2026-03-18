@@ -189,9 +189,12 @@ function startMessageWorker() {
                         break;
                     }
                 }
+                // Tentar obter o LID associado para notificar a sala correta no frontend
+                const associatedLid = await redis_1.default.get(`phone_lid:${phone}`).catch(() => null);
                 // Notificar Socket Server sobre mensagem enviada
                 (0, socket_1.notifySocketServer)('haylander-chat-updates', {
                     chatId: jid,
+                    altChatId: associatedLid || (0, utils_1.toWhatsAppJid)(phone), // Se tiver LID, avisa a sala do LID também
                     fromMe: true,
                     message: { conversation: textToSend },
                     messageTimestamp: Math.floor(Date.now() / 1000),

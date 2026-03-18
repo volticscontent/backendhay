@@ -52,13 +52,13 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
         socketLogger.error('Redis subscriber error:', err);
     });
 
-    subscriber.subscribe('haylander-bot-events', 'haylander-chat-updates', (err: Error | null) => {
-        if (err) {
-            socketLogger.error('Falha ao assinar canais Redis:', err);
-        } else {
+    subscriber.subscribe('haylander-bot-events', 'haylander-chat-updates')
+        .then(() => {
             socketLogger.info('✅ Assinados canais Redis: haylander-bot-events, haylander-chat-updates');
-        }
-    });
+        })
+        .catch((err) => {
+            socketLogger.error('Falha ao assinar canais Redis:', err);
+        });
 
     subscriber.on('message', (channel: string, message: string) => {
         if (channel === 'haylander-bot-events' || channel === 'haylander-chat-updates') {

@@ -25,6 +25,10 @@ router.get('/webhook/whatsapp', (_req, res) => {
     });
 });
 router.post('/webhook/whatsapp', async (req, res) => {
+    console.log('\n**************************************************');
+    console.log(`[${new Date().toISOString()}] 📥 WEBHOOK RECEBIDO!`);
+    console.log(`Headers: ${JSON.stringify(req.headers)}`);
+    console.log('**************************************************\n');
     const traceId = nextTraceId();
     const log = logger_1.webhookLogger.withTrace(traceId);
     const totalTimer = log.timer('Webhook total');
@@ -98,7 +102,8 @@ router.post('/webhook/whatsapp', async (req, res) => {
         redis_1.default.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
         // 2. Publish INCOMING message to Redis for Real-time using remoteJid as chatId
         const incomingSocketMsg = {
-            chatId,
+            chatId, // LID ou Phone (room principal)
+            altChatId: sender, // Phone (room secundária)
             senderPn: sender,
             userPhone,
             pushName,
@@ -108,7 +113,7 @@ router.post('/webhook/whatsapp', async (req, res) => {
         // 2. DEBOUNCE: acumular mensagem e agendar processamento
         const messageText = typeof message === 'string' ? message : JSON.stringify(message);
         await (0, message_debounce_1.bufferAndDebounce)(userPhone, messageText, {
-            sender: chatId, // Usar o JID correto para que o bot responda no chat certo
+            sender, // Usar o sender (Número Real) para que o bot responda para a pessoa certa
             pushName,
             userPhone,
         });

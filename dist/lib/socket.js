@@ -13,7 +13,9 @@ const SOCKET_SERVER_URL = process.env.SOCKET_SERVER_URL;
 async function notifySocketServer(channel, data) {
     try {
         // Pub/Sub (preferido — baixa latência)
-        await redis_1.default.publish(channel, JSON.stringify(data));
+        const payload = JSON.stringify(data);
+        logger_1.socketLogger.debug(`🚀 Publicando no Redis [${channel}]: ${payload.substring(0, 100)}...`);
+        await redis_1.default.publish(channel, payload);
     }
     catch (pubsubError) {
         logger_1.socketLogger.warn('Redis Pub/Sub falhou, tentando HTTP fallback:', pubsubError);

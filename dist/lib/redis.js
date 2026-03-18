@@ -17,9 +17,10 @@ function createRedisConnection() {
     return new ioredis_1.default(REDIS_URL, {
         maxRetriesPerRequest: null, // Required for BullMQ
         enableReadyCheck: false,
+        keepAlive: 10000,
         retryStrategy(times) {
             const delay = Math.min(times * 200, 5000);
-            logger_1.redisLogger.warn(`Reconectando... tentativa ${times}, delay ${delay}ms`);
+            logger_1.redisLogger.warn(`[BullMQ] Reconectando... tentativa ${times}, delay ${delay}ms`);
             return delay;
         },
     });
@@ -28,9 +29,10 @@ function createRedisConnection() {
 const redis = new ioredis_1.default(REDIS_URL, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    keepAlive: 10000,
     retryStrategy(times) {
         const delay = Math.min(times * 200, 5000);
-        logger_1.redisLogger.warn(`Reconectando... tentativa ${times}, delay ${delay}ms`);
+        logger_1.redisLogger.warn(`[Shared] Reconectando... tentativa ${times}, delay ${delay}ms`);
         return delay;
     },
 });
