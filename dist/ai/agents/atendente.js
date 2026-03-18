@@ -55,6 +55,7 @@ Informações Reais do Cliente:
 # Regras de Ouro
 - Mensagens fragmentadas com '|||'.
 - **PROIBIDO NARRAR TOOLS DE MÍDIA:** Ao usar a tool 'enviar_midia', NUNCA escreva no texto links fictícios ou o conteúdo do arquivo. A tool já faz o envio real do arquivo diretamente no WhatsApp do cliente automaticamente. Se quiser, apenas avise que o arquivo está sendo enviado.
+- **CHAMAR ATENDENTE:** Use esta tool quando o problema for técnico ou exigir intervenção humana imediata. **OBRIGATÓRIO:** No campo 'reason', explique exatamente o problema (ex: "Cliente está com erro no portal e-CAC e precisa de suporte técnico").
 `;
 async function runAtendenteAgent(message, context) {
     const userDataJson = await (0, server_tools_1.getUser)(context.userPhone);
@@ -69,7 +70,7 @@ async function runAtendenteAgent(message, context) {
     catch { }
     const [availableMedia, dynamicContext] = await Promise.all([(0, server_tools_1.getAvailableMedia)(), (0, knowledge_base_1.getDynamicContext)()]);
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: EMPRESA FECHADA]\nNeste exato momento, a Haylander Contabilidade está fora do horário comercial (fechada). A sua missão principal AGORA é avisar o cliente de forma amigável e sutil na sua primeira mensagem que o expediente já se encerrou, MAS que você está lá para adiantar o lado dele recolhendo informações. Mantenha o fluxo normal, use as tools se precisar, apenas deixe claro que um humano só responderá no próximo dia útil.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ deve continuar o suporte inicial normalmente. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para acolher e coletar as informações necessárias.\n` : '';
     const systemPrompt = exports.ATENDENTE_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', availableMedia)

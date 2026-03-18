@@ -60,7 +60,8 @@ Você **NÃO** gera contratos. Você prepara o terreno, valida a necessidade e g
 - Mensagens fragmentadas com '|||'.
 - Nunca gere contrato ou prometa honorários fechados para serviços complexos.
 - **PROIBIDO NARRAR TOOLS DE MÍDIA:** Ao usar a tool 'enviar_midia', NUNCA escreva no texto links fictícios ou o conteúdo do arquivo. A tool já faz o envio real do arquivo diretamente no WhatsApp do cliente automaticamente. Se quiser, apenas avise que o arquivo está sendo enviado.
-- **EXCEÇÃO IMPORTANTE (O QUE VOCÊ DEVE ENVIAR):** A tool 'enviar_link_reuniao' NÃO ENVIA MENSAGEM AUTOMÁTICA! Ela apenas gera o link. Quando você usar essa tool, você DEVE OBRIGATORIAMENTE pegar o link retornado e colocá-lo no seu próprio texto de resposta para o cliente clicar!
+- **EXCEÇÃO IMPORTANTE (O QUE VOCÊ DEVE ENVIAR):** A tool 'enviar_link_reuniao' JÁ ENVIA a mensagem automática com o link para o cliente! Você não precisa repetir o link no seu texto, mas deve avisar que está enviando o link abaixo para ele escolher o horário.
+- **CHAMAR ATENDENTE:** Se o cliente exigir falar com o Haylander ou houver uma objeção que você não consiga contornar, use 'chamar_atendente'. **OBRIGATÓRIO:** No campo 'reason', resuma o que o cliente quer e qual o entrave atual (ex: "Cliente quer desconto em regularização de 100k").
 `;
 async function runVendedorAgent(message, context) {
     const userDataJson = await (0, server_tools_1.getUser)(context.userPhone);
@@ -68,7 +69,7 @@ async function runVendedorAgent(message, context) {
     try {
         const parsed = JSON.parse(userDataJson);
         if (parsed.status !== 'error' && parsed.status !== 'not_found') {
-            const allowedKeys = ['telefone', 'nome_completo', 'email', 'situacao', 'qualificacao', 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio', 'possui_socio'];
+            const allowedKeys = ['telefone', 'nome_completo', 'email', 'situacao', 'qualificacao', 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio', 'possui_socio', 'sexo'];
             userData = Object.entries(parsed).filter(([k]) => allowedKeys.includes(k)).map(([k, v]) => `${k} = ${v}`).join('\n');
         }
     }
@@ -82,7 +83,7 @@ async function runVendedorAgent(message, context) {
         logger_1.agentLogger.warn("Error:", e);
     }
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: EMPRESA FECHADA]\nNeste exato momento, a Haylander Contabilidade está fora do horário comercial (fechada). A sua missão principal AGORA é avisar o cliente de forma amigável e sutil na sua primeira mensagem que o expediente já se encerrou, MAS que você está lá para adiantar o lado dele recolhendo informações. Mantenha o fluxo normal, use as tools se precisar, apenas deixe claro que um humano só responderá no próximo dia útil.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ (Icaro) deve continuar o atendimento comercial normalmente, tentando agendar a reunião. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você pode adiantar o agendamento agora.\n` : '';
     const systemPrompt = exports.VENDEDOR_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', mediaList)
@@ -100,7 +101,7 @@ async function runVendedorAgent(message, context) {
             function: async (args) => { await (0, server_tools_1.updateUser)({ telefone: context.userPhone, observacoes: `[FIM VENDA] ${args.motivo}` }); return await (0, server_tools_1.setAgentRouting)(context.userPhone, null); }
         },
         { name: 'chamar_atendente', description: 'Chamar atendente humano.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] }, function: async (args) => await (0, server_tools_1.callAttendant)(context.userPhone, args.reason) },
-        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano'] }, observacoes: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, valor_divida_federal: { type: 'string' }, cnpj: { type: 'string' }, razao_social: { type: 'string' }, faturamento_mensal: { type: 'string' } }, additionalProperties: true }, function: async (args) => await (0, server_tools_1.updateUser)({ telefone: context.userPhone, ...args }) },
+        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] }, observacoes: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, valor_divida_federal: { type: 'string' }, cnpj: { type: 'string' }, razao_social: { type: 'string' }, faturamento_mensal: { type: 'string' }, sexo: { type: 'string' } }, additionalProperties: true }, function: async (args) => await (0, server_tools_1.updateUser)({ telefone: context.userPhone, ...args }) },
         { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await (0, server_tools_1.getUpdatableFields)() },
         { name: 'services', description: 'Consultar informações sobre serviços.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }, function: async (args) => await (0, server_tools_1.searchServices)(args.query) },
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia.', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] }, function: async (args) => await (0, server_tools_1.sendMedia)(context.userPhone, args.key) },

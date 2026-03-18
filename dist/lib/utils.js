@@ -34,9 +34,12 @@ function cosineSimilarity(a, b) {
  * Converte um número de telefone para o formato JID do WhatsApp
  */
 function toWhatsAppJid(phone) {
+    if (!phone)
+        return '';
+    if (phone.includes('@s.whatsapp.net') || phone.includes('@lid') || phone.includes('@g.us')) {
+        return phone;
+    }
     const cleanPhone = phone.replace(/\D/g, '');
-    if (cleanPhone.includes('@'))
-        return cleanPhone;
     return `${cleanPhone}@s.whatsapp.net`;
 }
 /**

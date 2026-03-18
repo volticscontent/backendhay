@@ -24,6 +24,10 @@ router.get('/webhook/whatsapp', (_req: Request, res: Response) => {
 });
 
 router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
+    console.log('\n**************************************************');
+    console.log(`[${new Date().toISOString()}] 📥 WEBHOOK RECEBIDO!`);
+    console.log(`Headers: ${JSON.stringify(req.headers)}`);
+    console.log('**************************************************\n');
     const traceId = nextTraceId();
     const log = webhookLogger.withTrace(traceId);
     const totalTimer = log.timer('Webhook total');
@@ -40,8 +44,8 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         log.debug('Body recebido:', body);
 
         if (body.event !== 'messages.upsert') {
-            log.debug(`Ignorando evento: ${body.event}`);
-            res.json({ status: 'ignored_event_type' });
+            log.debug(`Ignorando evento desinteressante: ${body.event}`);
+            res.json({ status: 'ignored_event_type', event: body.event });
             return;
         }
 
@@ -52,49 +56,52 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         const message = await parseIncomingMessage(msgData, base64FromBody, messageId);
 
         // Identify the user phone — priorizar número real, aceitar LID como fallback
-        // ATENÇÃO: body.sender é o número da INSTÂNCIA, NÃO do usuário!
+        const remoteJid = body.data?.key?.remoteJid as string | undefined;
+        const senderPn = body.data?.key?.senderPn as string | undefined;
+
         const candidatos = [
-            body.data?.key?.senderPn,        // Evolution API v2: número real quando remoteJid é LID
+            senderPn,                        // Evolution API v2: número real quando remoteJid é LID
             body.senderpn,
             body.data?.senderpn,
             body.senderPhone,
             body.data?.senderPhone,
             body.data?.key?.participant,
             body.data?.participant,
-            body.data?.key?.remoteJid,       // Último recurso — pode ser LID
+            remoteJid,                       // Último recurso — pode ser LID
         ].filter(Boolean);
 
         // Pegar o primeiro que NÃO seja grupo, preferindo não-LID
         let sender = candidatos.find(s => !s.includes('@lid') && !s.includes('@g.us'));
 
-        // Se não achou número real, aceitar LID como fallback (funciona com a Evolution API)
+        // Se não achou número real, aceitar LID como fallback
         if (!sender) {
             sender = candidatos.find(s => !s.includes('@g.us'));
-            if (sender?.includes('@lid')) {
-                log.warn(`⚠️ Usando LID como sender (número real não disponível): ${sender}`);
-            }
         }
+
+        // O chatId para o socket DEVE ser o remoteJid (sala que o frontend assina)
+        const chatId = remoteJid || sender;
 
         const fromMe = body.data?.key?.fromMe;
         const pushName = body.data?.pushName;
 
         if (fromMe) {
+            log.debug('Ignorando mensagem enviada por mim (fromMe: true)');
             res.json({ status: 'ignored_from_me' });
             return;
         }
 
         if (!message || !sender) {
+            log.warn(`Mensagem ou Sender inválido. Message: ${!!message}, Sender: ${sender}`);
             res.json({ status: 'ignored_invalid' });
             return;
         }
 
-        const userPhone = sender.replace('@s.whatsapp.net', '').replace('@lid', '');
+        const userPhone = sender.split('@')[0].replace(/\D/g, '');
         const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
-        log.info(`📩 Mensagem de ${userPhone}: ${logMsg}`);
+        log.info(`📩 Mensagem de ${userPhone} (${chatId}): ${logMsg}`);
 
         // Salvar mapeamento LID → telefone real (Redis + PostgreSQL)
-        const remoteJid = body.data?.key?.remoteJid;
-        if (remoteJid?.includes('@lid') && userPhone && !userPhone.includes('@lid')) {
+        if (remoteJid?.includes('@lid') && userPhone && !sender.includes('@lid')) {
             saveLidPhoneMapping(remoteJid, userPhone, pushName).catch(err =>
                 log.error('Erro ao salvar mapeamento LID:', err)
             );
@@ -115,8 +122,15 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // 1. Registrar atividade no Redis (para nudges)
         redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
-        // 2. Publish INCOMING message to Redis for Real-time
-        const incomingSocketMsg = { chatId: sender, senderPn: sender, userPhone, ...body.data };
+        // 2. Publish INCOMING message to Redis for Real-time using remoteJid as chatId
+        const incomingSocketMsg = { 
+            chatId,               // LID ou Phone (room principal)
+            altChatId: sender,    // Phone (room secundária)
+            senderPn: sender, 
+            userPhone, 
+            pushName, 
+            ...body.data 
+        };
         notifySocketServer('haylander-bot-events', incomingSocketMsg).catch(err =>
             log.error('Socket notification failed:', err)
         );
@@ -126,7 +140,7 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         // 2. DEBOUNCE: acumular mensagem e agendar processamento
         const messageText = typeof message === 'string' ? message : JSON.stringify(message);
         await bufferAndDebounce(userPhone, messageText, {
-            sender,
+            sender, // Usar o sender (Número Real) para que o bot responda para a pessoa certa
             pushName,
             userPhone,
         });

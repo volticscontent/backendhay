@@ -13,12 +13,12 @@ import { isWithinBusinessHours } from '../lib/business-hours';
 
 // ==================== Constantes ====================
 
-const DEBOUNCE_DELAY_MS = 2500;
+const DEBOUNCE_DELAY_MS = 1500;
 const BUFFER_KEY_PREFIX = 'msg_buffer:';
 const META_KEY_PREFIX = 'msg_meta:';
 const LOCK_KEY_PREFIX = 'msg_lock:';
 const BUFFER_TTL = 120;
-const LOCK_TTL = 60;
+const LOCK_TTL = 180;
 const MAX_BUFFER_SIZE = 20;
 const RECHECK_FLAG_PREFIX = 'msg_recheck:';
 // ==================== Fila ====================
@@ -114,38 +114,18 @@ async function releaseLock(userPhone: string): Promise<void> {
 
 // ==================== Helpers de Negócio ====================
 
-/** Remove job anterior (qualquer estado exceto active) para liberar o jobId */
-async function clearPreviousJob(jobId: string, userPhone: string): Promise<'cleared' | 'active' | 'none'> {
-    const recheckId = `${jobId}-recheck`;
+/** Remove jobs pendentes/atrasados para o usuário, permitindo que o novo agendamento "resete" o timer */
+async function clearPendingJobs(userPhone: string): Promise<void> {
     try {
-        const [job, recheckJob] = await Promise.all([
-            debounceQueue.getJob(jobId),
-            debounceQueue.getJob(recheckId)
-        ]);
-
-        let isActive = false;
-
-        if (job) {
-            const state = await job.getState();
-            if (state === 'active') isActive = true;
-            else await job.remove().catch(() => {});
+        const delayed = await debounceQueue.getDelayed();
+        const waiting = await debounceQueue.getWaiting();
+        const jobs = [...delayed, ...waiting].filter(j => j.data.userPhone === userPhone);
+        
+        for (const job of jobs) {
+            await job.remove().catch(() => {});
         }
-
-        if (recheckJob) {
-            const state = await recheckJob.getState();
-            if (state === 'active') isActive = true;
-            else await recheckJob.remove().catch(() => {});
-        }
-
-        if (isActive) {
-            debounceLogger.info(`Job ativo para ${userPhone}, agendamento ignorado (worker fará recheck)`);
-            return 'active';
-        }
-
-        return (job || recheckJob) ? 'cleared' : 'none';
     } catch (err) {
-        debounceLogger.error(`Erro ao limpar job para ${userPhone}:`, err);
-        return 'none';
+        debounceLogger.error(`Erro ao limpar jobs para ${userPhone}:`, err);
     }
 }
 
@@ -226,15 +206,14 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
         ...(shouldUpdateName ? { nome_completo: pushName } : {}),
     });
 
-    // Verificar override de roteamento
-    const override = await getAgentRouting(userPhone);
-    if (override === 'vendedor') {
-        debounceLogger.info(`🔀 Override ativo → Vendas (${userPhone})`);
-        return 'qualified';
+    // Fora do horário comercial? apenas capturamos para passar para a IA
+    const isOutOfHours = !isWithinBusinessHours();
+    if (isOutOfHours) {
+        debounceLogger.info(`🕐 Fora do horário comercial para ${userPhone}. A IA continuará o atendimento.`);
     }
 
-    // if (user.needs_attendant) return 'attendant'; // Removido para permitir que o bot continue respondendo
-
+    // Se o usuário já estiver em atendimento humano, o AGENT_MAP['attendant'] retornará runner null,
+    // o que é tratado abaixo. Não precisamos de um if extra aqui.
     if (user.situacao === 'cliente') return 'customer';
     if (user.qualificacao) return 'qualified';
     return 'lead';
@@ -303,28 +282,29 @@ export async function bufferAndDebounce(
     const bufferLen = await atomicBufferPush(userPhone, serialized, metadata);
     debounceLogger.info(`+1 mensagem para ${userPhone} (buffer: ${bufferLen})`);
 
-    // 2. Proteção contra flood — se buffer muito grande, forçar processamento
+    // 2. Proteção contra flood
     if (bufferLen >= MAX_BUFFER_SIZE) {
         debounceLogger.warn(`⚠️ Buffer cheio (${bufferLen}) para ${userPhone}. Forçando processamento imediato.`);
-        const jobId = `debounce-${userPhone}`;
-        await clearPreviousJob(jobId, userPhone);
-        await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: 0 });
+        await clearPendingJobs(userPhone);
+        await debounceQueue.add('process-buffered', { userPhone }, { delay: 0 });
         return;
     }
 
-    // 3. Limpar job anterior e criar novo com delay (reseta o timer)
-    const jobId = `debounce-${userPhone}`;
-    const status = await clearPreviousJob(jobId, userPhone);
+    // 3. Verificar se já existe um worker ATIVO processando este usuário
+    const lockKey = `${LOCK_KEY_PREFIX}${userPhone}`;
+    const isProcessing = await redis.exists(lockKey);
 
-    if (status === 'active') {
+    if (isProcessing) {
         // Sinalizar que o worker atual deve fazer re-check ao terminar
         await redis.set(`${RECHECK_FLAG_PREFIX}${userPhone}`, '1', 'EX', 60);
-        debounceLogger.info(`Job ativo para ${userPhone}. Sinalizando re-check.`);
+        debounceLogger.info(`Worker ocupado para ${userPhone}. Sinalizando re-check.`);
         return;
     }
 
-    await debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
-    debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms para ${userPhone}`);
+    // 4. Limpar jobs pendentes (timer) e agendar novo com delay (reset do timer)
+    await clearPendingJobs(userPhone);
+    await debounceQueue.add('process-buffered', { userPhone }, { delay: DEBOUNCE_DELAY_MS });
+    debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms iniciado para ${userPhone}`);
 }
 
 // ==================== Worker ====================
@@ -360,14 +340,9 @@ export function startDebounceWorker(): Worker {
                 : `[Multimodal: ${rawMessages.length} parte(s)]`;
             log.info(`📨 ${rawMessages.length} msg(s) de ${userPhone}: ${logMsg}`);
 
-            // 4. Verificar horário comercial (Apenas capturar)
-            const isOutOfHours = !isWithinBusinessHours();
-            if (isOutOfHours) {
-                log.info(`🕐 Fora do horário comercial para ${userPhone}. A IA cuidará da mensagem.`);
-            }
-
             // 5. Resolver estado + roteamento
             const userState = await log.timed('resolveUserState', () => resolveUserState(userPhone, metadata.pushName));
+            const isOutOfHours = !isWithinBusinessHours(); // Mantemos o check para o contexto da IA
             const { runner, label } = AGENT_MAP[userState];
             log.info(`🤖 → ${label}`);
 

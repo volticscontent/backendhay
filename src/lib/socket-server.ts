@@ -2,6 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import Redis from 'ioredis';
 import { socketLogger } from './logger';
+import { createRedisConnection } from './redis';
 
 let io: SocketIOServer | null = null;
 
@@ -24,8 +25,13 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
 
         // Cliente entra na sala de um chat específico
         socket.on('join-chat', (chatId: string) => {
-            socket.join(`chat:${chatId}`);
-            socketLogger.debug(`Cliente ${socket.id} entrou na sala chat:${chatId}`);
+            const room = `chat:${chatId}`;
+            socket.join(room);
+            socketLogger.info(`👥 Cliente ${socket.id} entrou na sala ${room}`);
+            
+            // Logar quantas pessoas estão na sala (opcional para debug)
+            const clients = io?.sockets.adapter.rooms.get(room)?.size || 0;
+            socketLogger.debug(`Sala ${room} agora tem ${clients} cliente(s)`);
         });
 
         // Cliente sai da sala
@@ -40,14 +46,13 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
     });
 
     // ==================== Redis Pub/Sub Subscriber ====================
-    const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-    const subscriber = new Redis(redisUrl);
+    const subscriber = createRedisConnection();
 
-    subscriber.on('error', (err) => {
+    subscriber.on('error', (err: Error) => {
         socketLogger.error('Redis subscriber error:', err);
     });
 
-    subscriber.subscribe('haylander-bot-events', 'haylander-chat-updates', (err) => {
+    subscriber.subscribe('haylander-bot-events', 'haylander-chat-updates', (err: Error | null) => {
         if (err) {
             socketLogger.error('Falha ao assinar canais Redis:', err);
         } else {
@@ -55,15 +60,25 @@ export function initSocketServer(httpServer: HTTPServer): SocketIOServer {
         }
     });
 
-    subscriber.on('message', (channel, message) => {
+    subscriber.on('message', (channel: string, message: string) => {
         if (channel === 'haylander-bot-events' || channel === 'haylander-chat-updates') {
             try {
                 const data = JSON.parse(message);
                 const chatId = data.chatId;
+                const altChatId = data.altChatId; // JID alternativo (ex: CPF/LID vs Phone)
 
                 if (chatId) {
-                    // Enviar para a sala específica do chat
-                    io?.to(`chat:${chatId}`).emit('new-message', data);
+                    const room = `chat:${chatId}`;
+                    const clients = io?.sockets.adapter.rooms.get(room)?.size || 0;
+                    socketLogger.debug(`📢 Emitindo 'new-message' para ${room} (${clients} ouvintes)`);
+                    io?.to(room).emit('new-message', data);
+                }
+
+                if (altChatId && altChatId !== chatId) {
+                    const room = `chat:${altChatId}`;
+                    const clients = io?.sockets.adapter.rooms.get(room)?.size || 0;
+                    socketLogger.debug(`📢 Emitindo 'new-message' para ${room} (ALT) (${clients} ouvintes)`);
+                    io?.to(room).emit('new-message', data);
                 }
 
                 // Enviar update global (para a lista de atendimentos)

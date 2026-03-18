@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -16,7 +49,6 @@ const evolution_1 = require("../lib/evolution");
 const utils_1 = require("../lib/utils");
 const socket_1 = require("../lib/socket");
 const logger_1 = require("../lib/logger");
-const business_hours_1 = require("../lib/business-hours");
 // ==================== Filas ====================
 /** Fila de envio de mensagens com delay */
 exports.messageQueue = new bullmq_1.Queue('message-sending', {
@@ -169,10 +201,11 @@ function startMessageWorker() {
             }
             catch (sendError) {
                 logger_1.workerLogger.error(`Erro ao enviar mensagem ${i + 1}/${messages.length} para ${phone}:`, sendError);
-                // Continua tentando as próximas mensagens
+                // Propaga o erro para que o BullMQ possa realizar os 'attempts' (retentativas) configurados
+                throw sendError;
             }
         }
-        logger_1.workerLogger.info(`✅ Todas as ${messages.length} mensagens enviadas para ${phone}`);
+        logger_1.workerLogger.info(`✅ Todas as ${messages.length} mensagens processadas para ${phone}`);
     }, {
         connection: (0, redis_2.createRedisConnection)(),
         concurrency: 5, // Processa 5 jobs simultaneamente
@@ -196,12 +229,7 @@ function startFollowUpWorker() {
     const worker = new bullmq_1.Worker('follow-up', async (job) => {
         const { phone, message, type } = job.data;
         logger_1.followUpLogger.info(`Processando ${type} para ${phone}`);
-        // Nudges só devem ser enviados dentro do horário comercial
-        if (type === 'nudge' && !(0, business_hours_1.isWithinBusinessHours)()) {
-            logger_1.followUpLogger.info(`🕐 Fora do horário comercial. Cancelando nudge para ${phone}`);
-            return;
-        }
-        // Verificar se o cliente respondeu recentemente (evitar follow-up indesejado)
+        // Processando mensagem
         const jid = (0, utils_1.toWhatsAppJid)(phone);
         const lastActivity = await redis_1.default.get(`last_activity:${phone}`);
         if (lastActivity) {
@@ -214,6 +242,14 @@ function startFollowUpWorker() {
             }
         }
         await (0, evolution_1.evolutionSendTextMessage)(jid, message);
+        // Registrar nudge no histórico para a IA ter o contexto da resposta do usuário
+        try {
+            const { addToHistory } = await Promise.resolve().then(() => __importStar(require('../lib/chat-history')));
+            await addToHistory(phone, 'assistant', message);
+        }
+        catch (histErr) {
+            logger_1.followUpLogger.warn('Erro ao salvar nudge no histórico:', histErr);
+        }
         logger_1.followUpLogger.info(`✅ ${type} enviado para ${phone}`);
     }, {
         connection: (0, redis_2.createRedisConnection)(),

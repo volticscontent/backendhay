@@ -6,6 +6,7 @@ exports.evolutionFindMessages = evolutionFindMessages;
 exports.evolutionFetchInstances = evolutionFetchInstances;
 exports.evolutionGetProfilePic = evolutionGetProfilePic;
 exports.evolutionGetBase64FromMedia = evolutionGetBase64FromMedia;
+const logger_1 = require("./logger");
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const EVOLUTION_INSTANCE_NAME = process.env.EVOLUTION_INSTANCE_NAME || '';
@@ -26,6 +27,7 @@ async function evolutionRequest(path, method = 'GET', body) {
         });
         if (!response.ok) {
             const errorText = await response.text();
+            logger_1.evolutionLogger.error(`Evolution API Error ${response.status} em ${path}:`, errorText);
             throw new Error(`Evolution API Error ${response.status}: ${errorText}`);
         }
         return await response.json();

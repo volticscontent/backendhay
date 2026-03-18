@@ -25,6 +25,7 @@ const LOCK_KEY_PREFIX = 'msg_lock:';
 const BUFFER_TTL = 120;
 const LOCK_TTL = 60;
 const MAX_BUFFER_SIZE = 20;
+const RECHECK_FLAG_PREFIX = 'msg_recheck:';
 // ==================== Fila ====================
 exports.debounceQueue = new bullmq_1.Queue('message-debounce', {
     connection: (0, redis_2.createRedisConnection)(),
@@ -87,22 +88,35 @@ async function releaseLock(userPhone) {
 // ==================== Helpers de Negócio ====================
 /** Remove job anterior (qualquer estado exceto active) para liberar o jobId */
 async function clearPreviousJob(jobId, userPhone) {
+    const recheckId = `${jobId}-recheck`;
     try {
-        const existing = await exports.debounceQueue.getJob(jobId);
-        if (!existing)
-            return 'none';
-        const state = await existing.getState();
-        if (state === 'active') {
-            logger_1.debounceLogger.info(`Job ativo para ${userPhone}, mensagem será processada no próximo ciclo`);
+        const [job, recheckJob] = await Promise.all([
+            exports.debounceQueue.getJob(jobId),
+            exports.debounceQueue.getJob(recheckId)
+        ]);
+        let isActive = false;
+        if (job) {
+            const state = await job.getState();
+            if (state === 'active')
+                isActive = true;
+            else
+                await job.remove().catch(() => { });
+        }
+        if (recheckJob) {
+            const state = await recheckJob.getState();
+            if (state === 'active')
+                isActive = true;
+            else
+                await recheckJob.remove().catch(() => { });
+        }
+        if (isActive) {
+            logger_1.debounceLogger.info(`Job ativo para ${userPhone}, agendamento ignorado (worker fará recheck)`);
             return 'active';
         }
-        // delayed, waiting, completed, failed — tudo removível
-        await existing.remove();
-        const label = state === 'delayed' || state === 'waiting' ? 'Timer resetado' : `Job antigo (${state}) removido`;
-        logger_1.debounceLogger.debug(`${label} para ${userPhone}`);
-        return 'cleared';
+        return (job || recheckJob) ? 'cleared' : 'none';
     }
-    catch {
+    catch (err) {
+        logger_1.debounceLogger.error(`Erro ao limpar job para ${userPhone}:`, err);
         return 'none';
     }
 }
@@ -254,8 +268,9 @@ async function bufferAndDebounce(userPhone, message, metadata) {
     const jobId = `debounce-${userPhone}`;
     const status = await clearPreviousJob(jobId, userPhone);
     if (status === 'active') {
-        // Job ativo: a mensagem já está no buffer. O worker fará re-check ao terminar.
-        logger_1.debounceLogger.info(`Job ativo para ${userPhone}. Mensagem no buffer, será processada após conclusão.`);
+        // Sinalizar que o worker atual deve fazer re-check ao terminar
+        await redis_1.default.set(`${RECHECK_FLAG_PREFIX}${userPhone}`, '1', 'EX', 60);
+        logger_1.debounceLogger.info(`Job ativo para ${userPhone}. Sinalizando re-check.`);
         return;
     }
     await exports.debounceQueue.add('process-buffered', { userPhone }, { jobId, delay: DEBOUNCE_DELAY_MS });
@@ -323,22 +338,24 @@ function startDebounceWorker() {
             log.info(`✅ Concluído para ${userPhone}`);
         }
         finally {
-            // Re-check: se chegaram msgs durante o processamento, re-agendar
+            // Re-check: se chegaram msgs durante o processamento (verificado via flag ou buffer residual)
             try {
+                const recheckFlag = await redis_1.default.get(`${RECHECK_FLAG_PREFIX}${userPhone}`);
                 const remainingCount = await redis_1.default.llen(`${BUFFER_KEY_PREFIX}${userPhone}`);
-                if (remainingCount > 0) {
-                    const recheckJobId = `debounce-${userPhone}`;
+                if (recheckFlag === '1' || remainingCount > 0) {
+                    await redis_1.default.del(`${RECHECK_FLAG_PREFIX}${userPhone}`);
+                    const recheckJobId = `debounce-${userPhone}-recheck`;
                     await exports.debounceQueue.add('process-buffered', { userPhone }, {
                         jobId: recheckJobId,
-                        delay: DEBOUNCE_DELAY_MS,
+                        delay: 1000,
                     }).catch(() => { });
-                    log.info(`🔄 Re-check: ${remainingCount} msg(s) pendentes para ${userPhone}, job re-agendado`);
+                    log.info(`🔄 Re-agendando via RECHECK ID para ${userPhone}`);
                 }
             }
             catch (recheckErr) {
                 log.error(`Erro no re-check de buffer:`, recheckErr);
             }
-            // SEMPRE libera o lock, mesmo em caso de erro
+            // SEMPRE libera o lock
             await releaseLock(userPhone);
         }
     }, {

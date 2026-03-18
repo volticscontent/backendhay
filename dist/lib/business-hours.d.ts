@@ -19,6 +19,11 @@ export declare const BUSINESS_HOURS_CONFIG: BusinessHoursConfig;
  */
 export declare function isWithinBusinessHours(): boolean;
 /**
+ * Retorna a próxima data/hora disponível considerando um offset de minutos.
+ * Respeita o horário comercial e pula fins de semana.
+ */
+export declare function getNextAvailableSlot(baseDate: Date, offsetMinutes: number): Date;
+/**
  * Retorna a mensagem padronizada para fora do horário.
  */
 export declare function getOutOfHoursMessage(): string;

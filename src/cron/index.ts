@@ -76,10 +76,11 @@ export function registerCronJobs(): void {
                         context: 'cron-follow-up'
                     });
 
-                    // Atualizar data de follow-up
+                    // Atualizar data de follow-up (cria o registro se não existir)
                     await client.query(`
-            UPDATE leads_atendimento SET data_followup = NOW()
-            WHERE lead_id = (SELECT id FROM leads WHERE telefone = $1)
+            INSERT INTO leads_atendimento (lead_id, data_followup)
+            VALUES ((SELECT id FROM leads WHERE telefone = $1 LIMIT 1), NOW())
+            ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
           `, [lead.telefone]);
 
                     log.info(`Follow-up enviado para ${phone}`);

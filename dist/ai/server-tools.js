@@ -141,7 +141,7 @@ async function updateUser(data) {
         const leadId = resId.rows[0].id;
         let updatedData = {};
         const tableMappings = {
-            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
             leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
             leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
             leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
@@ -302,7 +302,16 @@ async function sendForm(phone, observacao) {
     baseUrl = baseUrl.replace(/\/$/, '');
     const link = `${baseUrl}/${phone}`;
     await updateUser({ telefone: phone, observacoes: `Interesse: ${observacao}` });
-    return JSON.stringify({ link, message: `Formulário gerado com sucesso. O link é: ${link}. Envie este link EXATO para o cliente.` });
+    // Enviar mensagem automaticamente para garantir entrega
+    const message = `Aqui está o link do seu formulário de qualificação: ${link}\n\nPor favor, preencha para que possamos te ajudar da melhor forma! 😊`;
+    const jid = (0, utils_1.toWhatsAppJid)(phone);
+    await (0, evolution_1.evolutionSendTextMessage)(jid, message);
+    try {
+        const { addToHistory } = await Promise.resolve().then(() => __importStar(require('../lib/chat-history')));
+        await addToHistory(phone, 'assistant', message);
+    }
+    catch (e) { }
+    return JSON.stringify({ link, message: `Formulário gerado e enviado com sucesso. O link é: ${link}.` });
 }
 async function sendMeetingForm(phone) {
     let baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://haylanderform.vercel.app';
@@ -311,10 +320,19 @@ async function sendMeetingForm(phone) {
     }
     baseUrl = baseUrl.replace(/\/$/, '');
     const link = `${baseUrl}/reuniao/${phone}`;
-    return JSON.stringify({ link, message: `Link de agendamento gerado: ${link}. Envie ao cliente.` });
+    // Enviar mensagem automaticamente para garantir entrega
+    const message = `Separei um link para você escolher o melhor horário para nossa reunião: ${link}\n\nFico no aguardo do seu agendamento! 👇`;
+    const jid = (0, utils_1.toWhatsAppJid)(phone);
+    await (0, evolution_1.evolutionSendTextMessage)(jid, message);
+    try {
+        const { addToHistory } = await Promise.resolve().then(() => __importStar(require('../lib/chat-history')));
+        await addToHistory(phone, 'assistant', message);
+    }
+    catch (e) { }
+    return JSON.stringify({ link, message: `Link de agendamento gerado e enviado: ${link}.` });
 }
 async function sendEnumeratedList(phone) {
-    const listText = `Olá! 👋 Como posso te ajudar? Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
+    const listText = `Escolha uma opção:\n\n1️⃣ Regularização MEI\n2️⃣ Abertura de MEI\n3️⃣ Falar com atendente\n4️⃣ Informações sobre os serviços\n5️⃣ Sair do atendimento`;
     try {
         const jid = (0, utils_1.toWhatsAppJid)(phone);
         const evoLog = await (0, evolution_1.evolutionSendTextMessage)(jid, listText);
@@ -342,7 +360,28 @@ async function sendEnumeratedList(phone) {
 // ==================== Atendente ====================
 async function callAttendant(phone, reason = 'Solicitação do cliente') {
     try {
+        const { getNextAvailableSlot } = await Promise.resolve().then(() => __importStar(require('../lib/business-hours')));
+        const now = new Date();
+        const scheduledDate = getNextAvailableSlot(now, 30);
+        const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+        // 1. Atualizar lead para sinalizar necessidade de humano
         await (0, db_2.query)(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
+        // 2. Tentar obter ID do lead para marcar na leads_vendas
+        const leadRes = await (0, db_2.query)(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
+        if (leadRes.rows.length > 0) {
+            const leadId = leadRes.rows[0].id;
+            // Upsert na leads_vendas com tag 'atendimento'
+            await (0, db_2.query)(`
+                INSERT INTO leads_vendas (lead_id, data_reuniao, status_atendimento, reuniao_agendada)
+                VALUES ($1, $2, 'atendimento', true)
+                ON CONFLICT (lead_id) DO UPDATE SET
+                    data_reuniao = EXCLUDED.data_reuniao,
+                    status_atendimento = 'atendimento',
+                    reuniao_agendada = true,
+                    updated_at = NOW()
+            `, [leadId, scheduledDate]);
+        }
         await redis_1.default.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
         // Notificar via WebSocket para o painel (ChatInterface/Frontend) atualizar realtime
         try {
@@ -358,10 +397,18 @@ async function callAttendant(phone, reason = 'Solicitação do cliente') {
         }
         const attendantNumber = process.env.ATTENDANT_PHONE;
         if (attendantNumber) {
-            const text = `🔔 *Solicitação de Atendimento*\n\nCliente *${phone}* solicitou atendente.\n📝 *Motivo:* ${reason}\n🔗 https://wa.me/${phone.replace(/\D/g, '')}`;
+            const text = `🔔 *Solicitação de Atendimento*\n\n` +
+                `👤 *Cliente:* ${phone}\n` +
+                `📝 *Motivo:* ${reason}\n` +
+                `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
+                `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
             const evoLog = await (0, evolution_1.evolutionSendTextMessage)((0, utils_1.toWhatsAppJid)(attendantNumber), text);
             log.info(`[callAttendant] Evolution response for notifying attendant (${attendantNumber}):`, { evolution_log: evoLog });
-            return JSON.stringify({ status: 'success', message: 'Atendente notificado. Aguarde um momento.', evolution_log: evoLog });
+            return JSON.stringify({
+                status: 'success',
+                message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`,
+                evolution_log: evoLog
+            });
         }
         log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
         return JSON.stringify({ status: 'success', message: 'Solicitação registrada. Aguarde um momento.' });
@@ -691,6 +738,13 @@ async function sendMessageSegment(phone, segment) {
                 break;
         }
         try {
+            const { addToHistory } = await Promise.resolve().then(() => __importStar(require('../lib/chat-history')));
+            let historyText = segment.content;
+            if (segment.type === 'link' && segment.metadata?.url)
+                historyText += '\n' + segment.metadata.url;
+            if (segment.type === 'media')
+                historyText = `[Midia: ${segment.metadata?.mediaKey || 'arquivo'}]`;
+            await addToHistory(phone, 'assistant', historyText);
             const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
             let contentText = segment.content;
             if (segment.type === 'link' && segment.metadata?.url)
@@ -712,7 +766,7 @@ async function sendMessageSegment(phone, segment) {
 }
 async function getUpdatableFields() {
     const tableMappings = {
-        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov'],
+        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
         leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
         leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
         leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],

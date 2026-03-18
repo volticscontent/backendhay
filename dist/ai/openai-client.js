@@ -6,15 +6,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runAgent = runAgent;
 const openai_1 = __importDefault(require("openai"));
 const logger_1 = require("../lib/logger");
+const chat_history_1 = require("../lib/chat-history");
 const openai = new openai_1.default({
     apiKey: process.env.OPENAI_API_KEY || 'dummy-key',
 });
 async function runAgent(systemPrompt, userMessage, context, tools) {
-    const messages = [
-        { role: 'system', content: systemPrompt },
-        ...context.history.map(h => ({ role: h.role, content: h.content })),
-        { role: 'user', content: userMessage }
-    ];
     const toolsConfig = tools.map(t => ({
         type: 'function',
         function: {
@@ -48,7 +44,24 @@ async function runAgent(systemPrompt, userMessage, context, tools) {
     };
     const MAX_TOOL_ROUNDS = 5;
     try {
+        // 1. Carregar histórico recente (últimas 15 mensagens)
+        const history = await (0, chat_history_1.getChatHistory)(context.userPhone, 15);
+        const messages = [
+            { role: 'system', content: systemPrompt }
+        ];
+        // 2. Adicionar histórico (evitando duplicar a mensagem atual se ela já foi salva no webhook)
+        const currentMsgText = typeof userMessage === 'string' ? userMessage : JSON.stringify(userMessage);
+        for (const h of history) {
+            // Se a última mensagem do histórico for idêntica à atual, ignoramos para não duplicar
+            if (h.role === 'user' && h.content === currentMsgText && h === history[history.length - 1]) {
+                continue;
+            }
+            messages.push({ role: h.role, content: h.content });
+        }
+        // 3. Adicionar a mensagem atual do usuário
+        messages.push({ role: 'user', content: currentMsgText });
         let round = 0;
+        let accumulatedContent = '';
         while (round < MAX_TOOL_ROUNDS) {
             round++;
             const aiTimer = logger_1.agentLogger.timer(`OpenAI request (round ${round})`);
@@ -57,9 +70,12 @@ async function runAgent(systemPrompt, userMessage, context, tools) {
             aiTimer.end(usage ? `tokens: ${usage.prompt_tokens}→${usage.completion_tokens} (total: ${usage.total_tokens})` : undefined);
             const choice = response.choices[0];
             const message = choice.message;
-            // Se não tem tool calls, retornar a resposta final
+            if (message.content) {
+                accumulatedContent += (accumulatedContent ? ' ||| ' : '') + message.content;
+            }
+            // Se não tem tool calls, retornar o conteúdo acumulado
             if (!message.tool_calls || message.tool_calls.length === 0) {
-                return message.content || '';
+                return accumulatedContent.trim();
             }
             // Processar tool calls
             messages.push(message);

@@ -9,6 +9,7 @@ const db_1 = __importDefault(require("../lib/db"));
 const message_queue_1 = require("../queues/message-queue");
 const logger_1 = require("../lib/logger");
 const business_hours_1 = require("../lib/business-hours");
+const utils_1 = require("../lib/utils");
 /**
  * Registra todos os CRON jobs do sistema
  */
@@ -56,11 +57,10 @@ function registerCronJobs() {
             let count = 0;
             for (const lead of res.rows) {
                 try {
-                    // Limpar telefone: remover @lid, @s.whatsapp.net etc
-                    const rawPhone = lead.telefone || '';
-                    const phone = rawPhone.split('@')[0].replace(/\D/g, '');
+                    // Limpar telefone usando utilitário robusto
+                    const phone = (0, utils_1.normalizePhone)(lead.telefone || '');
                     if (!phone || phone.length < 10) {
-                        log.debug(`Follow-up - Telefone inválido, pulando: ${rawPhone}`);
+                        log.debug(`Follow-up - Telefone inválido, pulando: ${lead.telefone}`);
                         continue;
                     }
                     const nome = lead.nome_completo || 'Cliente';
@@ -69,10 +69,11 @@ function registerCronJobs() {
                         messages: [{ content: `Olá ${nome}! 😊 Vi que você se interessou pelos nossos serviços. Posso te ajudar com alguma dúvida?`, type: 'text', delay: 0 }],
                         context: 'cron-follow-up'
                     });
-                    // Atualizar data de follow-up
+                    // Atualizar data de follow-up (cria o registro se não existir)
                     await client.query(`
-            UPDATE leads_atendimento SET data_followup = NOW()
-            WHERE lead_id = (SELECT id FROM leads WHERE telefone = $1)
+            INSERT INTO leads_atendimento (lead_id, data_followup)
+            VALUES ((SELECT id FROM leads WHERE telefone = $1 LIMIT 1), NOW())
+            ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
           `, [lead.telefone]);
                     log.info(`Follow-up enviado para ${phone}`);
                     count++;
