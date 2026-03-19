@@ -6,10 +6,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerCronJobs = registerCronJobs;
 const node_cron_1 = __importDefault(require("node-cron"));
 const db_1 = __importDefault(require("../lib/db"));
+const redis_1 = __importDefault(require("../lib/redis"));
 const message_queue_1 = require("../queues/message-queue");
 const logger_1 = require("../lib/logger");
 const business_hours_1 = require("../lib/business-hours");
 const utils_1 = require("../lib/utils");
+const evolution_1 = require("../lib/evolution");
 /**
  * Registra todos os CRON jobs do sistema
  */
@@ -155,6 +157,37 @@ function registerCronJobs() {
         }
         finally {
             client.release();
+        }
+    });
+    // ============================
+    // 5. Evolution API Keep-Alive — A cada 2 minutos
+    //    Mantém a instância sincronizada se estiver inativa há mais de 5 minutos
+    // ============================
+    node_cron_1.default.schedule('*/2 * * * *', async () => {
+        const log = logger_1.cronLogger.withTrace(`cron-keepalive-${Date.now().toString(36)}`);
+        try {
+            const JANELA_MINIMA_MS = 5 * 60 * 1000; // 5 minutos de silêncio
+            const lastActivity = await redis_1.default.get('evolution:last_activity');
+            const now = Date.now();
+            if (lastActivity) {
+                const diff = now - parseInt(lastActivity, 10);
+                if (diff < JANELA_MINIMA_MS) {
+                    log.debug(`Keep-alive pulado - Atividade recente há ${Math.round(diff / 1000)}s`);
+                    return;
+                }
+            }
+            // Margem de erro (Jitter): 0 a 30 segundos
+            const jitter = Math.floor(Math.random() * 30000);
+            log.info(`Keep-alive necessário - Aguardando jitter de ${Math.round(jitter / 1000)}s...`);
+            await new Promise(resolve => setTimeout(resolve, jitter));
+            log.info('Executando keep-alive na Evolution API...');
+            const state = await (0, evolution_1.evolutionGetConnectionState)();
+            log.info('Estado da instância:', state?.instance?.connectionStatus || 'desconhecido');
+            // Atualizar atividade após o poke bem-sucedido (evolutionRequest já faz isso, mas garantimos aqui)
+            await redis_1.default.set('evolution:last_activity', Date.now().toString());
+        }
+        catch (error) {
+            log.error('Erro no Keep-alive:', error);
         }
     });
     logger_1.cronLogger.info('✅ Todos os jobs registrados');

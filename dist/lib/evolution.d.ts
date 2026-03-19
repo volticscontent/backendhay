@@ -11,6 +11,7 @@ export declare function evolutionFindMessages(jid: string, limit?: number): Prom
     };
 }>;
 export declare function evolutionFetchInstances(): Promise<unknown>;
+export declare function evolutionGetConnectionState(): Promise<any>;
 export declare function evolutionGetProfilePic(jid: string): Promise<unknown>;
 /**
  * Baixa a mídia de uma mensagem em base64 usando o endpoint getBase64FromMediaMessage.

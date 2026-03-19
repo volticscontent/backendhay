@@ -7,6 +7,7 @@ import { startMessageWorker, startFollowUpWorker } from './queues/message-queue'
 import { startDebounceWorker } from './queues/message-debounce';
 import { registerCronJobs } from './cron';
 import { initSocketServer } from './lib/socket-server';
+import { initEvolutionWebSocket } from './lib/evolution-ws';
 import pool from './lib/db';
 import redis from './lib/redis';
 import { bootLogger } from './lib/logger';
@@ -64,9 +65,13 @@ async function bootstrap() {
     bootLogger.info('Registrando CRON Jobs...');
     registerCronJobs();
 
-    // 3. Socket.io Server
-    bootLogger.info('Iniciando Socket.io Server...');
+    // 3. Socket.io Server (Frontend)
+    bootLogger.info('Iniciando Socket.io Server (Frontend)...');
     initSocketServer(httpServer);
+
+    // 3.5 Evolution API WebSocket (Receiving)
+    bootLogger.info('Iniciando Cliente WebSocket (Evolution API)...');
+    initEvolutionWebSocket();
 
     // 4. Express + Socket Server
     httpServer.listen(PORT, '0.0.0.0', () => {

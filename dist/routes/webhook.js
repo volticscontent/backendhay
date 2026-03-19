@@ -41,6 +41,8 @@ router.post('/webhook/whatsapp', async (req, res) => {
         }
         const body = req.body;
         log.debug('Body recebido:', body);
+        // Registrar atividade global da instância no Redis ao receber qualquer evento do Webhook
+        redis_1.default.set('evolution:last_activity', Date.now().toString()).catch(() => { });
         if (body.event !== 'messages.upsert') {
             log.debug(`Ignorando evento desinteressante: ${body.event}`);
             res.json({ status: 'ignored_event_type', event: body.event });

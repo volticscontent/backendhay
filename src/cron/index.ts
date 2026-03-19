@@ -5,6 +5,7 @@ import { enqueueMessages } from '../queues/message-queue';
 import { cronLogger } from '../lib/logger';
 import { isWithinBusinessHours } from '../lib/business-hours';
 import { normalizePhone } from '../lib/utils';
+import { evolutionGetConnectionState, evolutionConnectInstance } from '../lib/evolution';
 
 /**
  * Registra todos os CRON jobs do sistema
@@ -165,6 +166,53 @@ export function registerCronJobs(): void {
             timer.end('Erro no relatório');
         } finally {
             client.release();
+        }
+    });
+
+    // ============================
+    // 5. Evolution API Keep-Alive — A cada 2 minutos
+    //    Mantém a instância sincronizada se estiver inativa há mais de 5 minutos
+    // ============================
+    cron.schedule('*/1 * * * *', async () => {
+        const log = cronLogger.withTrace(`cron-keepalive-${Date.now().toString(36)}`);
+        
+        try {
+            const JANELA_MINIMA_MS = 2 * 60 * 1000; // 2 minutos de silêncio
+            const lastActivity = await redis.get('evolution:last_activity');
+            const now = Date.now();
+
+            if (lastActivity) {
+                const diff = now - parseInt(lastActivity, 10);
+                if (diff < JANELA_MINIMA_MS) {
+                    log.debug(`Keep-alive pulado - Atividade recente há ${Math.round(diff / 1000)}s`);
+                    return;
+                }
+            }
+
+            // Margem de erro (Jitter): 0 a 15 segundos (reduzido para ser mais rápido)
+            const jitter = Math.floor(Math.random() * 15000);
+            log.info(`Keep-alive necessário - Aguardando jitter de ${Math.round(jitter / 1000)}s...`);
+            await new Promise(resolve => setTimeout(resolve, jitter));
+
+            log.info('Executando keep-alive na Evolution API...');
+            const state: any = await evolutionGetConnectionState();
+            
+            // Extrair status de forma robusta
+            const connectionStatus = state?.instance?.state || state?.state || state?.status || state?.instance?.connectionStatus;
+            log.info(`Estado da instância: ${connectionStatus || JSON.stringify(state)}`);
+
+            if (connectionStatus !== 'open') {
+                log.warn(`⚠️ Instância não está 'open' (status: ${connectionStatus}). Tentando reconectar...`);
+                await evolutionConnectInstance();
+                log.info('Chamada de reconexão enviada.');
+            } else {
+                log.info('✅ Instância saudável (open).');
+            }
+            
+            // Atualizar atividade após o poke bem-sucedido
+            await redis.set('evolution:last_activity', Date.now().toString());
+        } catch (error) {
+            log.error('Erro no Keep-alive:', error);
         }
     });
 

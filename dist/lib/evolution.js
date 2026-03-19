@@ -1,12 +1,17 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.evolutionSendTextMessage = evolutionSendTextMessage;
 exports.evolutionSendMediaMessage = evolutionSendMediaMessage;
 exports.evolutionFindMessages = evolutionFindMessages;
 exports.evolutionFetchInstances = evolutionFetchInstances;
+exports.evolutionGetConnectionState = evolutionGetConnectionState;
 exports.evolutionGetProfilePic = evolutionGetProfilePic;
 exports.evolutionGetBase64FromMedia = evolutionGetBase64FromMedia;
 const logger_1 = require("./logger");
+const redis_1 = __importDefault(require("./redis"));
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const EVOLUTION_INSTANCE_NAME = process.env.EVOLUTION_INSTANCE_NAME || '';
@@ -30,6 +35,8 @@ async function evolutionRequest(path, method = 'GET', body) {
             logger_1.evolutionLogger.error(`Evolution API Error ${response.status} em ${path}:`, errorText);
             throw new Error(`Evolution API Error ${response.status}: ${errorText}`);
         }
+        // Registrar atividade global da instância no Redis ao ter sucesso em qualquer requisição
+        redis_1.default.set('evolution:last_activity', Date.now().toString()).catch(() => { });
         return await response.json();
     }
     finally {
@@ -64,6 +71,9 @@ async function evolutionFindMessages(jid, limit = 30) {
 }
 async function evolutionFetchInstances() {
     return evolutionRequest(`/instance/fetchInstances`, 'GET');
+}
+async function evolutionGetConnectionState() {
+    return evolutionRequest(`/instance/connectionState/${EVOLUTION_INSTANCE_NAME}`, 'GET');
 }
 async function evolutionGetProfilePic(jid) {
     return evolutionRequest(`/chat/fetchProfilePictureUrl/${EVOLUTION_INSTANCE_NAME}`, 'POST', {

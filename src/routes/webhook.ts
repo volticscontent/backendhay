@@ -1,12 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { addToHistory } from '../lib/chat-history';
-import redis from '../lib/redis';
-import { notifySocketServer } from '../lib/socket';
-import { cancelPendingFollowUps } from '../queues/message-queue';
-import { bufferAndDebounce } from '../queues/message-debounce';
-import { parseIncomingMessage } from '../lib/message-parser';
 import { webhookLogger } from '../lib/logger';
-import { saveLidPhoneMapping } from '../lib/lid-map';
+import { processIncomingMessage } from '../lib/message-processor';
+import redis from '../lib/redis';
 
 let requestCounter = 0;
 function nextTraceId(): string {
@@ -43,110 +38,25 @@ router.post('/webhook/whatsapp', async (req: Request, res: Response) => {
         const body = req.body;
         log.debug('Body recebido:', body);
 
-        if (body.event !== 'messages.upsert') {
+        // Registrar atividade global da instância no Redis ao receber qualquer evento do Webhook
+        redis.set('evolution:last_activity', Date.now().toString()).catch(() => {});
+
+        const eventNormalized = (body.event as string)?.toLowerCase();
+        if (eventNormalized !== 'messages.upsert') {
             log.debug(`Ignorando evento desinteressante: ${body.event}`);
             res.json({ status: 'ignored_event_type', event: body.event });
             return;
         }
 
-        // Extrai a mensagem do payload usando o parser dedicado
-        const msgData = body.data?.message;
-        const base64FromBody = body.data?.base64;
-        const messageId = body.data?.key?.id as string | undefined;
-        const message = await parseIncomingMessage(msgData, base64FromBody, messageId);
-
-        // Identify the user phone — priorizar número real, aceitar LID como fallback
-        const remoteJid = body.data?.key?.remoteJid as string | undefined;
-        const senderPn = body.data?.key?.senderPn as string | undefined;
-
-        const candidatos = [
-            senderPn,                        // Evolution API v2: número real quando remoteJid é LID
-            body.senderpn,
-            body.data?.senderpn,
-            body.senderPhone,
-            body.data?.senderPhone,
-            body.data?.key?.participant,
-            body.data?.participant,
-            remoteJid,                       // Último recurso — pode ser LID
-        ].filter(Boolean);
-
-        // Pegar o primeiro que NÃO seja grupo, preferindo não-LID
-        let sender = candidatos.find(s => !s.includes('@lid') && !s.includes('@g.us'));
-
-        // Se não achou número real, aceitar LID como fallback
-        if (!sender) {
-            sender = candidatos.find(s => !s.includes('@g.us'));
-        }
-
-        // O chatId para o socket DEVE ser o remoteJid (sala que o frontend assina)
-        const chatId = remoteJid || sender;
-
-        const fromMe = body.data?.key?.fromMe;
-        const pushName = body.data?.pushName;
-
-        if (fromMe) {
-            log.debug('Ignorando mensagem enviada por mim (fromMe: true)');
-            res.json({ status: 'ignored_from_me' });
-            return;
-        }
-
-        if (!message || !sender) {
-            log.warn(`Mensagem ou Sender inválido. Message: ${!!message}, Sender: ${sender}`);
-            res.json({ status: 'ignored_invalid' });
-            return;
-        }
-
-        const userPhone = sender.split('@')[0].replace(/\D/g, '');
-        const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
-        log.info(`📩 Mensagem de ${userPhone} (${chatId}): ${logMsg}`);
-
-        // Salvar mapeamento LID → telefone real (Redis + PostgreSQL)
-        if (remoteJid?.includes('@lid') && userPhone && !sender.includes('@lid')) {
-            saveLidPhoneMapping(remoteJid, userPhone, pushName).catch(err =>
-                log.error('Erro ao salvar mapeamento LID:', err)
-            );
-            log.debug(`🗺️ Mapeamento LID salvo: ${remoteJid} → ${userPhone}`);
-        }
-
-        // 0. Cancelar follow-ups pendentes (cliente respondeu)
-        cancelPendingFollowUps(userPhone).catch(err =>
-            log.error('Erro ao cancelar follow-ups:', err)
-        );
-
-        // Registrar atividade no Redis
-        redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
-
-        // 1. Salvar mensagem do usuário no histórico IMEDIATAMENTE (para a AI ver)
-        await addToHistory(userPhone, 'user', message);
-
-        // 1. Registrar atividade no Redis (para nudges)
-        redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
-
-        // 2. Publish INCOMING message to Redis for Real-time using remoteJid as chatId
-        const incomingSocketMsg = { 
-            chatId,               // LID ou Phone (room principal)
-            altChatId: sender,    // Phone (room secundária)
-            senderPn: sender, 
-            userPhone, 
-            pushName, 
-            ...body.data 
-        };
-        notifySocketServer('haylander-bot-events', incomingSocketMsg).catch(err =>
-            log.error('Socket notification failed:', err)
-        );
-
-
-
-        // 2. DEBOUNCE: acumular mensagem e agendar processamento
-        const messageText = typeof message === 'string' ? message : JSON.stringify(message);
-        await bufferAndDebounce(userPhone, messageText, {
-            sender, // Usar o sender (Número Real) para que o bot responda para a pessoa certa
-            pushName,
-            userPhone,
+        // Delegar ao processador centralizado
+        const result = await processIncomingMessage({
+            event: body.event,
+            instance: body.instance,
+            data: body.data
         });
 
         totalTimer.end();
-        res.json({ status: 'buffered' });
+        res.json(result);
     } catch (error: unknown) {
         log.error('❌ Erro no Webhook:', error);
         res.status(500).json({

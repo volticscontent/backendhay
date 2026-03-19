@@ -9,7 +9,7 @@ const fetchSetWebhook = async () => {
             body: JSON.stringify({
                 webhook: {
                     enabled: true,
-                    url: "https://voltics-hayadmin.rzkso2.easypanel.host/api/webhook/whatsapp",
+                    url: "https://cf2345daea40f7.lhr.life/api/webhook/whatsapp",
                     webhookByEvents: false,
                     webhookBase64: true,
                     headers: {

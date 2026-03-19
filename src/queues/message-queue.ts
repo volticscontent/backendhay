@@ -5,6 +5,7 @@ import { evolutionSendTextMessage, evolutionSendMediaMessage } from '../lib/evol
 import { toWhatsAppJid } from '../lib/utils';
 import { notifySocketServer } from '../lib/socket';
 import { queueLogger, workerLogger, followUpLogger } from '../lib/logger';
+import { stopHighFrequencyPoke } from '../lib/poker';
 import { isWithinBusinessHours } from '../lib/business-hours';
 
 // ==================== Filas ====================
@@ -128,6 +129,9 @@ export function startMessageWorker(): Worker {
         const { phone, messages, context } = job.data;
         workerLogger.info(`Processando ${messages.length} mensagens para ${phone} (Context: ${context})`);
 
+        // Parar o Keep-alive de alta frequência se ele estiver ativo (bot começou a responder)
+        stopHighFrequencyPoke();
+
         const jid = toWhatsAppJid(phone);
 
         for (let i = 0; i < messages.length; i++) {
@@ -224,6 +228,9 @@ export function startFollowUpWorker(): Worker {
     const worker = new Worker<FollowUpJobData>('follow-up', async (job: Job<FollowUpJobData>) => {
         const { phone, message, type } = job.data;
         followUpLogger.info(`Processando ${type} para ${phone}`);
+
+        // Parar o Keep-alive de alta frequência se ele estiver ativo (job de follow-up iniciado)
+        stopHighFrequencyPoke();
 
         // Processando mensagem
         const jid = toWhatsAppJid(phone);
