@@ -52,7 +52,7 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
     if (sender?.includes('@lid')) {
         const resolvedPhone = await resolveLidToPhone(sender);
         if (resolvedPhone) {
-            log.debug(`🧩 LID ${sender} resolvido para número real: ${resolvedPhone}`);
+            log.debug(`🧩 LID ${sender} resolvido para número real no Processor: ${resolvedPhone}`);
             sender = `${resolvedPhone}@s.whatsapp.net`;
         }
     }
@@ -61,6 +61,14 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
     const chatId = remoteJid || sender;
     const fromMe = data.key?.fromMe;
     const pushName = data.pushName;
+    const userPhone = sender?.split('@')[0].replace(/\D/g, '');
+
+    // SALVAR MAPEAMENTO: Se recebemos remoteJid como LID e identificamos o telefone real no senderPn
+    if (remoteJid?.includes('@lid') && userPhone && sender && !sender.includes('@lid')) {
+        saveLidPhoneMapping(remoteJid, userPhone, pushName).catch(err =>
+            log.error('Erro ao salvar mapeamento LID:', err)
+        );
+    }
 
     if (fromMe) {
         log.debug('Ignorando mensagem enviada por mim (fromMe: true)');
@@ -72,7 +80,6 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
         return { status: 'ignored_invalid' };
     }
 
-    const userPhone = sender.split('@')[0].replace(/\D/g, '');
     const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
     log.info(`📩 [${payload.instance}] Mensagem de ${userPhone} (${chatId}): ${logMsg}`);
 

@@ -20,6 +20,9 @@ export function initEvolutionWebSocket() {
         query: {
             apikey: EVOLUTION_API_KEY
         },
+        extraHeaders: {
+            apikey: EVOLUTION_API_KEY
+        },
         transports: ['websocket'],
         reconnection: true,
         reconnectionAttempts: Infinity,
@@ -27,8 +30,18 @@ export function initEvolutionWebSocket() {
         reconnectionDelayMax: 5000,
     });
 
+    socket.onAny((event, ...args) => {
+        evolutionLogger.debug(`[WS Debug] Evento recebido: ${event}`, args);
+    });
+
     socket.on('connect', () => {
         evolutionLogger.info('✅ Conectado ao WebSocket da Evolution API');
+        
+        if (EVOLUTION_INSTANCE_NAME) {
+            evolutionLogger.info(`📡 Se inscrevendo na instância: ${EVOLUTION_INSTANCE_NAME}`);
+            socket?.emit('instance.subscribe', EVOLUTION_INSTANCE_NAME);
+            socket?.emit('subscribe', EVOLUTION_INSTANCE_NAME); // Manter fallback
+        }
     });
 
     socket.on('disconnect', (reason) => {
@@ -41,10 +54,12 @@ export function initEvolutionWebSocket() {
 
     // Escutar eventos de mensagens
     socket.on('messages.upsert', async (payload: any) => {
-        // Filtrar apenas a instância configurada, se necessário (Evolution pode enviar de todas as instâncias daquela apikey)
-        if (payload.instance && payload.instance !== EVOLUTION_INSTANCE_NAME) {
-            return;
-        }
+        evolutionLogger.info(`📩 Evento 'messages.upsert' capturado:`, JSON.stringify(payload).substring(0, 200));
+        
+        // Comentado para depuração: 
+        // if (payload.instance && payload.instance !== EVOLUTION_INSTANCE_NAME) {
+        //     return;
+        // }
 
         try {
             await processIncomingMessage(payload);
