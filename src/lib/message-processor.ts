@@ -101,6 +101,16 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
     // Registrar atividade no Redis
     redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
 
+    // 1. Deduplicação Atômica por Message ID para evitar processamento duplo (Webhook + WebSocket + Retries)
+    if (messageId) {
+        const msgKey = `msg_processed:${messageId}`;
+        const isNew = await redis.set(msgKey, '1', 'EX', 3600, 'NX');
+        if (!isNew) {
+            log.info(`♻️ [DEDUPLICADOR] Mensagem duplicada ignorada (ID: ${messageId})`);
+            return { status: 'ignored_duplicate', messageId };
+        }
+    }
+
     // Salvar mensagem no histórico
     await addToHistory(userPhone, 'user', message);
 

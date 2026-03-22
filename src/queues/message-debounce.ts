@@ -114,18 +114,17 @@ async function releaseLock(userPhone: string): Promise<void> {
 
 // ==================== Helpers de Negócio ====================
 
-/** Remove jobs pendentes/atrasados para o usuário, permitindo que o novo agendamento "resete" o timer */
+/** Remove job pendente para o usuário de forma eficiente (O(1)) via Job ID fixo */
 async function clearPendingJobs(userPhone: string): Promise<void> {
     try {
-        const delayed = await debounceQueue.getDelayed();
-        const waiting = await debounceQueue.getWaiting();
-        const jobs = [...delayed, ...waiting].filter(j => j.data.userPhone === userPhone);
-        
-        for (const job of jobs) {
+        const jobId = `debounce-${userPhone}`;
+        const job = await debounceQueue.getJob(jobId);
+        if (job) {
             await job.remove().catch(() => {});
+            debounceLogger.debug(`Timer resetado (Job removido) para ${userPhone}`);
         }
     } catch (err) {
-        debounceLogger.error(`Erro ao limpar jobs para ${userPhone}:`, err);
+        debounceLogger.error(`Erro ao limpar job ${userPhone}:`, err);
     }
 }
 
@@ -301,9 +300,13 @@ export async function bufferAndDebounce(
         return;
     }
 
-    // 4. Limpar jobs pendentes (timer) e agendar novo com delay (reset do timer)
+    // 4. Limpar job pendente (timer) e agendar novo com delay (reset do timer)
     await clearPendingJobs(userPhone);
-    await debounceQueue.add('process-buffered', { userPhone }, { delay: DEBOUNCE_DELAY_MS });
+    const jobId = `debounce-${userPhone}`;
+    await debounceQueue.add('process-buffered', { userPhone }, { 
+        jobId,
+        delay: DEBOUNCE_DELAY_MS 
+    });
     debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms iniciado para ${userPhone}`);
 }
 
