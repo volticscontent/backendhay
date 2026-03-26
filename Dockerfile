@@ -8,6 +8,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY certs ./certs
 
 RUN npm run build
 
@@ -20,8 +21,9 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-# Copiar build compilado
+# Copiar build compilado e certificados
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/certs ./certs
 
 # Criar usuário não-root
 RUN addgroup --system --gid 1001 botbackend && \
