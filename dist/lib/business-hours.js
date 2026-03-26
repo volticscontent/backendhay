@@ -2,7 +2,7 @@
 /**
  * Utilitário de Horário Comercial
  *
- * Horários da Haylander Contabilidade (timezone: America/Sao_Paulo):
+ * Horários da Haylander Martins Contabilidade (timezone: America/Sao_Paulo):
  * - Segunda a Quinta: 09:00 – 18:00
  * - Sexta: 09:00 – 17:00
  * - Sábado / Domingo: Fechado

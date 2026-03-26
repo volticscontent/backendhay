@@ -17,7 +17,7 @@ async function processMessageSegments(phone, segments, sender) {
 }
 exports.APOLO_PROMPT_TEMPLATE = `
 # Identidade e Propósito
-Você é o Apolo, o consultor especialista e SDR da Haylander Contabilidade.
+Você é o Apolo, o consultor especialista e SDR da Haylander Martins Contabilidade.
 Hoje é: {{CURRENT_DATE}}
 Sua missão é acolher o cliente, entender profundamente sua necessidade através de uma conversa natural e guiá-lo para a solução ideal (normalmente o preenchimento de um formulário de qualificação).
 
@@ -177,7 +177,7 @@ async function runApoloAgent(message, context) {
         logger_1.agentLogger.warn("Error fetching media/context:", e);
     }
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ (Apolo) deve continuar o atendimento normalmente, coletando dados e até oferecendo agendamento. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para agilizar tudo.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Martins Contabilidade está fora do horário comercial. VOCÊ (Apolo) deve continuar o atendimento normalmente, coletando dados e até oferecendo agendamento. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para agilizar tudo.\n` : '';
     const systemPrompt = exports.APOLO_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{USER_NAME}}', context.userName || 'Cliente')
@@ -192,88 +192,102 @@ async function runApoloAgent(message, context) {
         { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião.', parameters: { type: 'object', properties: {} }, function: async () => await (0, server_tools_1.sendMeetingForm)(context.userPhone) },
         { name: 'enviar_midia', description: 'Enviar um arquivo de mídia (PDF, Vídeo, Áudio).', parameters: { type: 'object', properties: { key: { type: 'string', description: 'A chave (ID) do arquivo de mídia.' } }, required: ['key'] }, function: async (args) => await (0, server_tools_1.sendMedia)(context.userPhone, args.key) },
         { name: 'select_User', description: 'Buscar informações atualizadas do lead no banco de dados.', parameters: { type: 'object', properties: {} }, function: async () => await (0, server_tools_1.getUser)(context.userPhone) },
-        { name: 'update_user', description: 'Atualizar dados do lead. OBRIGATÓRIO informar observacoes com resumo e motivo_qualificacao ao qualificar/desqualificar.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] }, qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] }, motivo_qualificacao: { type: 'string', description: 'Por que foi qualificado ou desqualificado?' }, observacoes: { type: 'string', description: 'Relato do contexto, escolhas (ex: autonomo) e histórico do lead para os humanos.' }, faturamento_mensal: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, tipo_divida: { type: 'string' }, possui_socio: { type: 'boolean' }, cpf: { type: 'string' }, sexo: { type: 'string' } }, additionalProperties: true }, function: async (args) => { const result = await (0, server_tools_1.updateUser)({ telefone: context.userPhone, ...args }); if (args.qualificacao) {
-                await (0, server_tools_1.setAgentRouting)(context.userPhone, 'vendedor');
-                logger_1.agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`);
-            } return result; } },
+        {
+            name: 'update_user', description: 'Atualizar dados do lead. OBRIGATÓRIO informar observacoes com resumo e motivo_qualificacao ao qualificar/desqualificar.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] }, qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] }, motivo_qualificacao: { type: 'string', description: 'Por que foi qualificado ou desqualificado?' }, observacoes: { type: 'string', description: 'Relato do contexto, escolhas (ex: autonomo) e histórico do lead para os humanos.' }, faturamento_mensal: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, tipo_divida: { type: 'string' }, possui_socio: { type: 'boolean' }, cpf: { type: 'string' }, sexo: { type: 'string' } }, additionalProperties: true }, function: async (args) => {
+                const result = await (0, server_tools_1.updateUser)({ telefone: context.userPhone, ...args }); if (args.qualificacao) {
+                    await (0, server_tools_1.setAgentRouting)(context.userPhone, 'vendedor');
+                    logger_1.agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`);
+                } return result;
+            }
+        },
         { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await (0, server_tools_1.getUpdatableFields)() },
         { name: 'chamar_atendente', description: 'Transferir o atendimento para um atendente humano. Forneça um resumo detalhado da necessidade no campo reason.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'Resumo detalhado: O que o cliente quer, qual a dor dele e o que já foi conversado.' } }, required: ['reason'] }, function: async (args) => await (0, server_tools_1.callAttendant)(context.userPhone, args.reason) },
         { name: 'interpreter', description: 'Ferramenta de memória compartilhada.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] }, function: async (args) => await (0, server_tools_1.interpreter)(context.userPhone, args.action, args.text, args.category) },
         {
             name: 'iniciar_fluxo_regularizacao', description: 'Inicia o fluxo de regularização fiscal aprimorado.', parameters: { type: 'object', properties: {} },
-            function: async () => { try {
-                const segments = (0, regularizacao_system_1.createRegularizacaoMessageSegments)();
-                await processMessageSegments(context.userPhone, segments, (segment) => (0, server_tools_1.sendMessageSegment)(context.userPhone, segment));
-                return JSON.stringify({ status: "success", message: "Fluxo de regularização iniciado" });
+            function: async () => {
+                try {
+                    const segments = (0, regularizacao_system_1.createRegularizacaoMessageSegments)();
+                    await processMessageSegments(context.userPhone, segments, (segment) => (0, server_tools_1.sendMessageSegment)(context.userPhone, segment));
+                    return JSON.stringify({ status: "success", message: "Fluxo de regularização iniciado" });
+                }
+                catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
             }
-            catch (error) {
-                return JSON.stringify({ status: "error", message: String(error) });
-            } }
         },
         {
             name: 'enviar_processo_autonomo', description: 'Envia o processo autônomo de regularização.', parameters: { type: 'object', properties: {} },
-            function: async () => { try {
-                const ud = await (0, server_tools_1.getUser)(context.userPhone);
-                let leadId = null;
-                if (ud) {
-                    const p = JSON.parse(ud);
-                    if (p.status !== 'error' && p.status !== 'not_found')
-                        leadId = p.id;
+            function: async () => {
+                try {
+                    const ud = await (0, server_tools_1.getUser)(context.userPhone);
+                    let leadId = null;
+                    if (ud) {
+                        const p = JSON.parse(ud);
+                        if (p.status !== 'error' && p.status !== 'not_found')
+                            leadId = p.id;
+                    }
+                    const segments = (0, regularizacao_system_1.createAutonomoMessageSegments)();
+                    await processMessageSegments(context.userPhone, segments, (s) => (0, server_tools_1.sendMessageSegment)(context.userPhone, s));
+                    if (leadId) {
+                        await (0, server_tools_1.trackResourceDelivery)(leadId, 'link-ecac', 'https://cav.receita.fazenda.gov.br/autenticacao/login');
+                        await (0, server_tools_1.trackResourceDelivery)(leadId, 'video-tutorial', 'video-tutorial-procuracao-ecac');
+                    }
+                    return JSON.stringify({ status: "success" });
                 }
-                const segments = (0, regularizacao_system_1.createAutonomoMessageSegments)();
-                await processMessageSegments(context.userPhone, segments, (s) => (0, server_tools_1.sendMessageSegment)(context.userPhone, s));
-                if (leadId) {
-                    await (0, server_tools_1.trackResourceDelivery)(leadId, 'link-ecac', 'https://cav.receita.fazenda.gov.br/autenticacao/login');
-                    await (0, server_tools_1.trackResourceDelivery)(leadId, 'video-tutorial', 'video-tutorial-procuracao-ecac');
+                catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
                 }
-                return JSON.stringify({ status: "success" });
             }
-            catch (error) {
-                return JSON.stringify({ status: "error", message: String(error) });
-            } }
         },
         {
             name: 'enviar_processo_assistido', description: 'Envia o processo assistido de regularização.', parameters: { type: 'object', properties: {} },
-            function: async () => { try {
-                const segments = (0, regularizacao_system_1.createAssistidoMessageSegments)();
-                await processMessageSegments(context.userPhone, segments, (s) => (0, server_tools_1.sendMessageSegment)(context.userPhone, s));
-                return await (0, server_tools_1.callAttendant)(context.userPhone, 'Processo assistido de regularização');
+            function: async () => {
+                try {
+                    const segments = (0, regularizacao_system_1.createAssistidoMessageSegments)();
+                    await processMessageSegments(context.userPhone, segments, (s) => (0, server_tools_1.sendMessageSegment)(context.userPhone, s));
+                    return await (0, server_tools_1.callAttendant)(context.userPhone, 'Processo assistido de regularização');
+                }
+                catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
             }
-            catch (error) {
-                return JSON.stringify({ status: "error", message: String(error) });
-            } }
         },
         {
             name: 'verificar_procuracao_status', description: 'Verifica se o cliente já concluiu a procuração.', parameters: { type: 'object', properties: {} },
-            function: async () => { try {
-                const ud = await (0, server_tools_1.getUser)(context.userPhone);
-                if (!ud)
-                    return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
-                const p = JSON.parse(ud);
-                if (p.status === 'error' || p.status === 'not_found')
-                    return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
-                const completed = await (0, server_tools_1.checkProcuracaoStatus)(p.id);
-                return JSON.stringify({ status: "success", completed, message: completed ? "Procuração já concluída" : "Procuração pendente" });
+            function: async () => {
+                try {
+                    const ud = await (0, server_tools_1.getUser)(context.userPhone);
+                    if (!ud)
+                        return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    const p = JSON.parse(ud);
+                    if (p.status === 'error' || p.status === 'not_found')
+                        return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    const completed = await (0, server_tools_1.checkProcuracaoStatus)(p.id);
+                    return JSON.stringify({ status: "success", completed, message: completed ? "Procuração já concluída" : "Procuração pendente" });
+                }
+                catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
             }
-            catch (error) {
-                return JSON.stringify({ status: "error", message: String(error) });
-            } }
         },
         {
             name: 'marcar_procuracao_concluida', description: 'Marca a procuração como concluída.', parameters: { type: 'object', properties: {} },
-            function: async () => { try {
-                const ud = await (0, server_tools_1.getUser)(context.userPhone);
-                if (!ud)
-                    return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
-                const p = JSON.parse(ud);
-                if (p.status === 'error' || p.status === 'not_found')
-                    return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
-                await (0, server_tools_1.markProcuracaoCompleted)(p.id);
-                return JSON.stringify({ status: "success" });
+            function: async () => {
+                try {
+                    const ud = await (0, server_tools_1.getUser)(context.userPhone);
+                    if (!ud)
+                        return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    const p = JSON.parse(ud);
+                    if (p.status === 'error' || p.status === 'not_found')
+                        return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    await (0, server_tools_1.markProcuracaoCompleted)(p.id);
+                    return JSON.stringify({ status: "success" });
+                }
+                catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
             }
-            catch (error) {
-                return JSON.stringify({ status: "error", message: String(error) });
-            } }
         },
         {
             name: 'verificar_serpro_pos_ecac', description: 'Verifica no Serpro se a procuração ou cadastro do cliente (por CNPJ) reflete no sistema governamental após ele afirmar conclusão no e-CAC.', parameters: { type: 'object', properties: {} },

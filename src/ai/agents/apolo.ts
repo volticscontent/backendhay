@@ -2,13 +2,12 @@ import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
 import { agentLogger } from '../../lib/logger';
 import {
-    sendForm, getUser, sendEnumeratedList, sendMedia, getAvailableMedia,
-    updateUser, callAttendant, contextRetrieve, interpreter, sendMessageSegment,
-    trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted, setAgentRouting, getUpdatableFields,
-    checkCnpjSerpro, sendMeetingForm
+    sendEnumeratedList, sendMessageSegment,
+    trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted,
+    checkCnpjSerpro, sendMeetingForm, getUser, callAttendant
 } from '../server-tools';
-import { getDynamicContext } from '../knowledge-base';
 import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, MessageSegment } from '../regularizacao-system';
+import { prepareAgentContext, getSharedTools } from '../shared-agent';
 
 async function processMessageSegments(phone: string, segments: MessageSegment[], sender: (segment: MessageSegment) => Promise<void>): Promise<void> {
     for (const segment of segments) {
@@ -21,7 +20,7 @@ async function processMessageSegments(phone: string, segments: MessageSegment[],
 
 export const APOLO_PROMPT_TEMPLATE = `
 # Identidade e Propósito
-Você é o Apolo, o consultor especialista e SDR da Haylander Contabilidade.
+Você é o Apolo, o consultor especialista e SDR da Haylander Martins Contabilidade.
 Hoje é: {{CURRENT_DATE}}
 Sua missão é acolher o cliente, entender profundamente sua necessidade através de uma conversa natural e guiá-lo para a solução ideal (normalmente o preenchimento de um formulário de qualificação).
 
@@ -160,44 +159,20 @@ Tudo isso é feito AUTOMATICAMENTE pelas TOOLS. Você NUNCA DEVE escrever textua
 `;
 
 export async function runApoloAgent(message: AgentMessage, context: AgentContext) {
-    let userDataJson = "{}";
-    try { userDataJson = await getUser(context.userPhone); } catch (error) { agentLogger.warn("Error fetching user data:", error); }
-
-    let userData = "Não encontrado";
-    try {
-        const parsed = JSON.parse(userDataJson);
-        if (parsed.status !== 'error' && parsed.status !== 'not_found') {
-            const allowedKeys = ['telefone', 'nome_completo', 'email', 'situacao', 'qualificacao', 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio', 'possui_socio', 'sexo'];
-            userData = Object.entries(parsed).filter(([k]) => allowedKeys.includes(k)).map(([k, v]) => `${k} = ${v}`).join('\n');
-        }
-    } catch { }
-
-    let mediaList = "Nenhuma mídia disponível.";
-    let dynamicContext = "";
-    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error fetching media/context:", e); }
-
-    const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ (Apolo) deve continuar o atendimento normalmente, coletando dados e até oferecendo agendamento. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para agilizar tudo.\n` : '';
+    const sharedCtx = await prepareAgentContext(context);
 
     const systemPrompt = APOLO_PROMPT_TEMPLATE
-        .replace('{{USER_DATA}}', userData)
+        .replace('{{USER_DATA}}', sharedCtx.userData)
         .replace('{{USER_NAME}}', context.userName || 'Cliente')
-        .replace('{{MEDIA_LIST}}', mediaList)
-        .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
-        .replace('{{ATTENDANT_WARNING}}', attendantWarning)
-        .replace('{{OUT_OF_HOURS_WARNING}}', outOfHoursWarning)
-        .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
+        .replace('{{MEDIA_LIST}}', sharedCtx.mediaList)
+        .replace('{{DYNAMIC_CONTEXT}}', sharedCtx.dynamicContext)
+        .replace('{{ATTENDANT_WARNING}}', sharedCtx.attendantWarning)
+        .replace('{{OUT_OF_HOURS_WARNING}}', sharedCtx.outOfHoursWarning)
+        .replace('{{CURRENT_DATE}}', sharedCtx.currentDate);
 
-    const tools: ToolDefinition[] = [
-        { name: 'context_retrieve', description: 'Buscar o contexto recente da conversa do cliente (Evolution API).', parameters: { type: 'object', properties: { limit: { type: 'number', description: 'Quantidade de mensagens a buscar (padrão 30).' } } }, function: async (args) => { const limit = typeof args.limit === 'number' ? args.limit : 30; return await contextRetrieve(context.userId, limit); } },
+    const customTools: ToolDefinition[] = [
         { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
         { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
-        { name: 'enviar_midia', description: 'Enviar um arquivo de mídia (PDF, Vídeo, Áudio).', parameters: { type: 'object', properties: { key: { type: 'string', description: 'A chave (ID) do arquivo de mídia.' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
-        { name: 'select_User', description: 'Buscar informações atualizadas do lead no banco de dados.', parameters: { type: 'object', properties: {} }, function: async () => await getUser(context.userPhone) },
-        { name: 'update_user', description: 'Atualizar dados do lead. OBRIGATÓRIO informar observacoes com resumo e motivo_qualificacao ao qualificar/desqualificar.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] }, qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] }, motivo_qualificacao: { type: 'string', description: 'Por que foi qualificado ou desqualificado?' }, observacoes: { type: 'string', description: 'Relato do contexto, escolhas (ex: autonomo) e histórico do lead para os humanos.' }, faturamento_mensal: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, tipo_divida: { type: 'string' }, possui_socio: { type: 'boolean' }, cpf: { type: 'string' }, sexo: { type: 'string' } }, additionalProperties: true }, function: async (args: Record<string, unknown>) => { const result = await updateUser({ telefone: context.userPhone, ...args }); if (args.qualificacao) { await setAgentRouting(context.userPhone, 'vendedor'); agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`); } return result; } },
-        { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await getUpdatableFields() },
-        { name: 'chamar_atendente', description: 'Transferir o atendimento para um atendente humano. Forneça um resumo detalhado da necessidade no campo reason.', parameters: { type: 'object', properties: { reason: { type: 'string', description: 'Resumo detalhado: O que o cliente quer, qual a dor dele e o que já foi conversado.' } }, required: ['reason'] }, function: async (args) => await callAttendant(context.userPhone, args.reason as string) },
-        { name: 'interpreter', description: 'Ferramenta de memória compartilhada.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] }, function: async (args) => await interpreter(context.userPhone, args.action as 'post' | 'get', args.text as string, args.category as 'qualificacao' | 'vendas' | 'atendimento') },
         {
             name: 'iniciar_fluxo_regularizacao', description: 'Inicia o fluxo de regularização fiscal aprimorado.', parameters: { type: 'object', properties: {} },
             function: async () => { try { const segments = createRegularizacaoMessageSegments(); await processMessageSegments(context.userPhone, segments, (segment) => sendMessageSegment(context.userPhone, segment)); return JSON.stringify({ status: "success", message: "Fluxo de regularização iniciado" }); } catch (error) { return JSON.stringify({ status: "error", message: String(error) }); } }
@@ -219,26 +194,28 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
             function: async () => { try { const ud = await getUser(context.userPhone); if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" }); const p = JSON.parse(ud); if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: "error", message: "Usuário não encontrado" }); await markProcuracaoCompleted(p.id); return JSON.stringify({ status: "success" }); } catch (error) { return JSON.stringify({ status: "error", message: String(error) }); } }
         },
         {
-            name: 'verificar_serpro_pos_ecac', description: 'Verifica no Serpro se a procuração ou cadastro do cliente (por CNPJ) reflete no sistema governamental após ele afirmar conclusão no e-CAC.', parameters: { type: 'object', properties: {} },
+            name: 'verificar_serpro_pos_ecac', description: 'Verifica no Serpro se a procuração ou cadastro do cliente reflete no sistema governamental após ele afirmar conclusão no e-CAC.', parameters: { type: 'object', properties: {} },
             function: async () => {
                 try {
                     const ud = await getUser(context.userPhone);
                     if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
                     const p = JSON.parse(ud);
-                    if (p.status === 'error' || p.status === 'not_found' || !p.cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado ou erro ao buscar. Peça o print da tela do e-CAC." });
-                    
+                    if (p.status === 'error' || p.status === 'not_found' || !p.cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado. Peça o print." });
+
                     try {
                         const serproResult = await checkCnpjSerpro(p.cnpj, 'CCMEI_DADOS');
                         return JSON.stringify({ status: "success", serpro_dados: JSON.parse(serproResult) });
                     } catch (serproError) {
-                        return JSON.stringify({ status: "error", message: "A validação no Serpro retornou erro ou os dados não refletiram ainda. Você DEVE pedir um print do cadastro do e-CAC para confirmação visual." });
+                        return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
                     }
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
                 }
             }
-        },
+        }
     ];
+
+    const tools = [...getSharedTools(context), ...customTools];
 
     return runAgent(systemPrompt, message, context, tools);
 }

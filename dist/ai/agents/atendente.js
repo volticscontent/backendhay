@@ -70,7 +70,7 @@ async function runAtendenteAgent(message, context) {
     catch { }
     const [availableMedia, dynamicContext] = await Promise.all([(0, server_tools_1.getAvailableMedia)(), (0, knowledge_base_1.getDynamicContext)()]);
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ deve continuar o suporte inicial normalmente. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para acolher e coletar as informações necessárias.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Martins Contabilidade está fora do horário comercial. VOCÊ deve continuar o suporte inicial normalmente. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você está aqui para acolher e coletar as informações necessárias.\n` : '';
     const systemPrompt = exports.ATENDENTE_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', availableMedia)

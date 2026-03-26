@@ -9,7 +9,7 @@ const knowledge_base_1 = require("../knowledge-base");
 exports.VENDEDOR_PROMPT_TEMPLATE = `
 # Identidade e Propósito
 
-Você é o Icaro. Você é o Consultor Comercial Sênior da Haylander Contabilidade.
+Você é o Icaro. Você é o Consultor Comercial Sênior da Haylander Martins Contabilidade.
 Hoje é: {{CURRENT_DATE}}
 Você recebe o bastão do Apolo (SDR) quando o lead já passou pela qualificação.
 
@@ -83,7 +83,7 @@ async function runVendedorAgent(message, context) {
         logger_1.agentLogger.warn("Error:", e);
     }
     const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ (Icaro) deve continuar o atendimento comercial normalmente, tentando agendar a reunião. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você pode adiantar o agendamento agora.\n` : '';
+    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Martins Contabilidade está fora do horário comercial. VOCÊ (Icaro) deve continuar o atendimento comercial normalmente, tentando agendar a reunião. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você pode adiantar o agendamento agora.\n` : '';
     const systemPrompt = exports.VENDEDOR_PROMPT_TEMPLATE
         .replace('{{USER_DATA}}', userData)
         .replace('{{MEDIA_LIST}}', mediaList)

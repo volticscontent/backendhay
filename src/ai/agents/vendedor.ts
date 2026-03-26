@@ -1,17 +1,15 @@
 import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
-import { agentLogger } from '../../lib/logger';
 import {
-    tryScheduleMeeting, callAttendant, updateUser, searchServices,
-    getUser, contextRetrieve, interpreter, sendMedia, getAvailableMedia,
-    setAgentRouting, sendMeetingForm, getUpdatableFields
+    tryScheduleMeeting, searchServices,
+    setAgentRouting, sendMeetingForm, updateUser
 } from '../server-tools';
-import { getDynamicContext } from '../knowledge-base';
+import { prepareAgentContext, getSharedTools } from '../shared-agent';
 
 export const VENDEDOR_PROMPT_TEMPLATE = `
 # Identidade e Propósito
 
-Você é o Icaro. Você é o Consultor Comercial Sênior da Haylander Contabilidade.
+Você é o Icaro. Você é o Consultor Comercial Sênior da Haylander Martins Contabilidade.
 Hoje é: {{CURRENT_DATE}}
 Você recebe o bastão do Apolo (SDR) quando o lead já passou pela qualificação.
 
@@ -68,33 +66,17 @@ Você **NÃO** gera contratos. Você prepara o terreno, valida a necessidade e g
 `;
 
 export async function runVendedorAgent(message: AgentMessage, context: AgentContext) {
-    const userDataJson = await getUser(context.userPhone);
-    let userData = "Não encontrado";
-    try {
-        const parsed = JSON.parse(userDataJson);
-        if (parsed.status !== 'error' && parsed.status !== 'not_found') {
-            const allowedKeys = ['telefone', 'nome_completo', 'email', 'situacao', 'qualificacao', 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio', 'possui_socio', 'sexo'];
-            userData = Object.entries(parsed).filter(([k]) => allowedKeys.includes(k)).map(([k, v]) => `${k} = ${v}`).join('\n');
-        }
-    } catch { }
-
-    let mediaList = "Nenhuma mídia disponível.";
-    let dynamicContext = "";
-    try { [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]); } catch (e) { agentLogger.warn("Error:", e); }
-
-    const attendantWarning = context.attendantRequestedReason ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n` : '';
-    const outOfHoursWarning = context.outOfHours ? `\n[ATENÇÃO: HUMANO INDISPONÍVEL]\nNeste exato momento, o time humano da Haylander Contabilidade está fora do horário comercial. VOCÊ (Icaro) deve continuar o atendimento comercial normalmente, tentando agendar a reunião. Avisar o cliente de forma amigável que o time humano responderá assim que retornar, mas que você pode adiantar o agendamento agora.\n` : '';
+    const sharedCtx = await prepareAgentContext(context);
 
     const systemPrompt = VENDEDOR_PROMPT_TEMPLATE
-        .replace('{{USER_DATA}}', userData)
-        .replace('{{MEDIA_LIST}}', mediaList)
-        .replace('{{DYNAMIC_CONTEXT}}', dynamicContext)
-        .replace('{{ATTENDANT_WARNING}}', attendantWarning)
-        .replace('{{OUT_OF_HOURS_WARNING}}', outOfHoursWarning)
-        .replace('{{CURRENT_DATE}}', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
+        .replace('{{USER_DATA}}', sharedCtx.userData)
+        .replace('{{MEDIA_LIST}}', sharedCtx.mediaList)
+        .replace('{{DYNAMIC_CONTEXT}}', sharedCtx.dynamicContext)
+        .replace('{{ATTENDANT_WARNING}}', sharedCtx.attendantWarning)
+        .replace('{{OUT_OF_HOURS_WARNING}}', sharedCtx.outOfHoursWarning)
+        .replace('{{CURRENT_DATE}}', sharedCtx.currentDate);
 
-    const tools: ToolDefinition[] = [
-        { name: 'context_retrieve', description: 'Buscar o contexto recente da conversa.', parameters: { type: 'object', properties: { limit: { type: 'number' } } }, function: async (args) => await contextRetrieve(context.userId, typeof args.limit === 'number' ? args.limit : 30) },
+    const customTools: ToolDefinition[] = [
         { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
         { name: 'tentar_agendar', description: 'Tentar agendar reunião (verifica disponibilidade).', parameters: { type: 'object', properties: { data_horario: { type: 'string', description: 'Data e hora (ex: 25/12/2023 14:00)' } }, required: ['data_horario'] }, function: async (args) => await tryScheduleMeeting(context.userPhone, args.data_horario as string) },
         {
@@ -102,13 +84,10 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
             parameters: { type: 'object', properties: { motivo: { type: 'string' } }, required: ['motivo'] },
             function: async (args) => { await updateUser({ telefone: context.userPhone, observacoes: `[FIM VENDA] ${args.motivo}` }); return await setAgentRouting(context.userPhone, null); }
         },
-        { name: 'chamar_atendente', description: 'Chamar atendente humano.', parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] }, function: async (args) => await callAttendant(context.userPhone, args.reason as string) },
-        { name: 'update_user', description: 'Atualizar dados do usuário.', parameters: { type: 'object', properties: { situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] }, observacoes: { type: 'string' }, tipo_negocio: { type: 'string' }, tem_divida: { type: 'boolean' }, valor_divida_federal: { type: 'string' }, cnpj: { type: 'string' }, razao_social: { type: 'string' }, faturamento_mensal: { type: 'string' }, sexo: { type: 'string' } }, additionalProperties: true }, function: async (args: Record<string, unknown>) => await updateUser({ telefone: context.userPhone, ...args }) },
-        { name: 'listar_tabelas_e_campos', description: 'Retorna a lista completa de todas as tabelas e os campos que você tem permissão para atualizar usando a ferramenta update_user. Use isto se quiser saber exatamente quais variáveis pode enviar e atualizar.', parameters: { type: 'object', properties: {} }, function: async () => await getUpdatableFields() },
-        { name: 'services', description: 'Consultar informações sobre serviços.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }, function: async (args) => await searchServices(args.query as string) },
-        { name: 'enviar_midia', description: 'Enviar um arquivo de mídia.', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] }, function: async (args) => await sendMedia(context.userPhone, args.key as string) },
-        { name: 'interpreter', description: 'Memória compartilhada (post/get).', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] }, function: async (args) => await interpreter(context.userPhone, args.action as 'post' | 'get', args.text as string, args.category as 'qualificacao' | 'vendas' | 'atendimento') },
+        { name: 'services', description: 'Consultar informações sobre serviços.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }, function: async (args) => await searchServices(args.query as string) }
     ];
+
+    const tools = [...getSharedTools(context), ...customTools];
 
     return runAgent(systemPrompt, message, context, tools);
 }

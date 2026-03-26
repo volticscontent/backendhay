@@ -68,8 +68,15 @@ export async function createUser(data: Record<string, unknown>): Promise<string>
 
 export async function updateUser(data: Record<string, unknown>): Promise<string> {
     try {
-        const { telefone, ...fields } = data;
+        const { telefone, ...rawFields } = data;
         if (!telefone) return JSON.stringify({ status: 'error', message: 'Telefone is required' });
+
+        const fields: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(rawFields)) {
+            if (v === 'true') fields[k] = true;
+            else if (v === 'false') fields[k] = false;
+            else fields[k] = v;
+        }
 
         const resId = await query('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
         if (resId.rows.length === 0) return JSON.stringify({ status: 'not_found', message: 'Usuário não encontrado' });

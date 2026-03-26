@@ -1,7 +1,7 @@
 /**
  * Utilitário de Horário Comercial
  * 
- * Horários da Haylander Contabilidade (timezone: America/Sao_Paulo):
+ * Horários da Haylander Martins Contabilidade (timezone: America/Sao_Paulo):
  * - Segunda a Quinta: 09:00 – 18:00
  * - Sexta: 09:00 – 17:00
  * - Sábado / Domingo: Fechado
@@ -55,7 +55,7 @@ export function getNextAvailableSlot(baseDate: Date, offsetMinutes: number): Dat
     // Fuso de São Paulo
     const nowStr = baseDate.toLocaleString('en-US', { timeZone: BUSINESS_HOURS_CONFIG.timezone });
     let date = new Date(nowStr);
-    
+
     // Adiciona o offset inicial
     date.setMinutes(date.getMinutes() + offsetMinutes);
 
