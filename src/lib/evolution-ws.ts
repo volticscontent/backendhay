@@ -17,6 +17,9 @@ export function initEvolutionWebSocket() {
     evolutionLogger.info(`🔌 Conectando ao WebSocket da Evolution API: ${EVOLUTION_API_URL}`);
 
     socket = io(EVOLUTION_API_URL, {
+        auth: {
+            apikey: EVOLUTION_API_KEY
+        },
         query: {
             apikey: EVOLUTION_API_KEY
         },

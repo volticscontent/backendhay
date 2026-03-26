@@ -188,6 +188,7 @@ export function startMessageWorker(): Worker {
                     altChatId: associatedLid || toWhatsAppJid(phone), // Se tiver LID, avisa a sala do LID também
                     fromMe: true,
                     message: { conversation: textToSend },
+                    id: `msg-${Date.now()}-${i}`,
                     messageTimestamp: Math.floor(Date.now() / 1000),
                 }).catch(() => { /* silencioso */ });
 
