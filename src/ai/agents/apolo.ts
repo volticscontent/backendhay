@@ -1,6 +1,7 @@
 import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
 import { agentLogger } from '../../lib/logger';
+import pool from '../../lib/db';
 import {
     sendEnumeratedList, sendMessageSegment,
     trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted,
@@ -200,11 +201,26 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
                     const ud = await getUser(context.userPhone);
                     if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
                     const p = JSON.parse(ud);
-                    if (p.status === 'error' || p.status === 'not_found' || !p.cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado. Peça o print." });
+                    if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+
+                    let cnpj = p.cnpj;
+                    if (!cnpj && p.id) {
+                        const resEmp = await pool.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
+                        if (resEmp.rows.length > 0) cnpj = resEmp.rows[0].cnpj;
+                    }
+
+                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não cadastrado. Peça o print." });
 
                     try {
-                        const serproResult = await checkCnpjSerpro(p.cnpj, 'CCMEI_DADOS');
-                        return JSON.stringify({ status: "success", serpro_dados: JSON.parse(serproResult) });
+                        const serproResult = await checkCnpjSerpro(cnpj, 'CCMEI_DADOS');
+                        const parsedResult = JSON.parse(serproResult);
+                        
+                        // Captura erro reportado pelo Serpro (como string json de erro ou mensagens de falha)
+                        if (parsedResult.status === 'error' || parsedResult.mensagens || parsedResult.erro) {
+                            return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
+                        }
+                        
+                        return JSON.stringify({ status: "success", serpro_dados: parsedResult });
                     } catch (serproError) {
                         return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
                     }

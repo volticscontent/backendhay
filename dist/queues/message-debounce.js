@@ -86,18 +86,18 @@ async function releaseLock(userPhone) {
     await redis_1.default.del(`${LOCK_KEY_PREFIX}${userPhone}`);
 }
 // ==================== Helpers de Negócio ====================
-/** Remove jobs pendentes/atrasados para o usuário, permitindo que o novo agendamento "resete" o timer */
+/** Remove job pendente para o usuário de forma eficiente (O(1)) via Job ID fixo */
 async function clearPendingJobs(userPhone) {
     try {
-        const delayed = await exports.debounceQueue.getDelayed();
-        const waiting = await exports.debounceQueue.getWaiting();
-        const jobs = [...delayed, ...waiting].filter(j => j.data.userPhone === userPhone);
-        for (const job of jobs) {
+        const jobId = `debounce-${userPhone}`;
+        const job = await exports.debounceQueue.getJob(jobId);
+        if (job) {
             await job.remove().catch(() => { });
+            logger_1.debounceLogger.debug(`Timer resetado (Job removido) para ${userPhone}`);
         }
     }
     catch (err) {
-        logger_1.debounceLogger.error(`Erro ao limpar jobs para ${userPhone}:`, err);
+        logger_1.debounceLogger.error(`Erro ao limpar job ${userPhone}:`, err);
     }
 }
 /** Concatena mensagens do buffer, preservando conteúdo multimodal (imagens) */
@@ -252,9 +252,13 @@ async function bufferAndDebounce(userPhone, message, metadata) {
         logger_1.debounceLogger.info(`Worker ocupado para ${userPhone}. Sinalizando re-check.`);
         return;
     }
-    // 4. Limpar jobs pendentes (timer) e agendar novo com delay (reset do timer)
+    // 4. Limpar job pendente (timer) e agendar novo com delay (reset do timer)
     await clearPendingJobs(userPhone);
-    await exports.debounceQueue.add('process-buffered', { userPhone }, { delay: DEBOUNCE_DELAY_MS });
+    const jobId = `debounce-${userPhone}`;
+    await exports.debounceQueue.add('process-buffered', { userPhone }, {
+        jobId,
+        delay: DEBOUNCE_DELAY_MS
+    });
     logger_1.debounceLogger.info(`Timer ${DEBOUNCE_DELAY_MS}ms iniciado para ${userPhone}`);
 }
 // ==================== Worker ====================

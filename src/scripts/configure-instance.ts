@@ -31,6 +31,26 @@ async function configureInstance() {
             reconnectOnError: true,
         });
 
+        evolutionLogger.info('⚙️ Ativando persistência de mensagens no Banco de Dados (SaveData)...');
+        const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'teste';
+        const apiKey = process.env.EVOLUTION_API_KEY;
+        const apiUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
+        
+        await fetch(`${apiUrl}/chat/updateSaveData/${instanceName}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': String(apiKey)
+            },
+            body: JSON.stringify({
+                message: true,
+                contacts: true,
+                chats: true,
+                labels: true,
+                historic: false
+            })
+        });
+
         evolutionLogger.info('✅ Configurações de comportamento aplicadas com sucesso!');
         evolutionLogger.info('ℹ️ Nota: As configurações de Hardware (Chrome/Windows) devem ser mantidas no .env do servidor Evolution API conforme configurado no Easy Panel.');
 

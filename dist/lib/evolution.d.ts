@@ -12,6 +12,7 @@ export declare function evolutionFindMessages(jid: string, limit?: number): Prom
 }>;
 export declare function evolutionFetchInstances(): Promise<unknown>;
 export declare function evolutionGetConnectionState(): Promise<any>;
+export declare function evolutionConnectInstance(): Promise<unknown>;
 export declare function evolutionGetProfilePic(jid: string): Promise<unknown>;
 /**
  * Baixa a mídia de uma mensagem em base64 usando o endpoint getBase64FromMediaMessage.
@@ -21,4 +22,29 @@ export declare function evolutionGetBase64FromMedia(messageId: string, convertTo
     base64: string;
     mimetype: string;
 } | null>;
+/**
+ * Atualiza as configurações da instância (Always Online, Reject Call, etc.)
+ * Rota padrão da v2: /settings/set/{instance}
+ */
+export declare function evolutionUpdateInstanceSettings(settings: {
+    rejectCall?: boolean;
+    msgCall?: string;
+    groupsIgnore?: boolean;
+    alwaysOnline?: boolean;
+    readMessages?: boolean;
+    readStatus?: boolean;
+    syncFullHistory?: boolean;
+    reconnectNetwork?: boolean;
+    reconnectOnError?: boolean;
+}): Promise<unknown>;
+/**
+ * Define as configurações de Webhook da instância
+ */
+export declare function evolutionSetWebhook(config: {
+    enabled: boolean;
+    url?: string;
+    webhookByEvents?: boolean;
+    webhookBase64?: boolean;
+    events?: string[];
+}): Promise<unknown>;
 //# sourceMappingURL=evolution.d.ts.map

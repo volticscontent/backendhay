@@ -49,6 +49,7 @@ const evolution_1 = require("../lib/evolution");
 const utils_1 = require("../lib/utils");
 const socket_1 = require("../lib/socket");
 const logger_1 = require("../lib/logger");
+const poker_1 = require("../lib/poker");
 // ==================== Filas ====================
 /** Fila de envio de mensagens com delay */
 exports.messageQueue = new bullmq_1.Queue('message-sending', {
@@ -135,6 +136,8 @@ function startMessageWorker() {
     const worker = new bullmq_1.Worker('message-sending', async (job) => {
         const { phone, messages, context } = job.data;
         logger_1.workerLogger.info(`Processando ${messages.length} mensagens para ${phone} (Context: ${context})`);
+        // Parar o Keep-alive de alta frequência se ele estiver ativo (bot começou a responder)
+        (0, poker_1.stopHighFrequencyPoke)();
         const jid = (0, utils_1.toWhatsAppJid)(phone);
         for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
@@ -197,6 +200,7 @@ function startMessageWorker() {
                     altChatId: associatedLid || (0, utils_1.toWhatsAppJid)(phone), // Se tiver LID, avisa a sala do LID também
                     fromMe: true,
                     message: { conversation: textToSend },
+                    id: `msg-${Date.now()}-${i}`,
                     messageTimestamp: Math.floor(Date.now() / 1000),
                 }).catch(() => { });
                 // Atualizar progresso do job
@@ -232,6 +236,8 @@ function startFollowUpWorker() {
     const worker = new bullmq_1.Worker('follow-up', async (job) => {
         const { phone, message, type } = job.data;
         logger_1.followUpLogger.info(`Processando ${type} para ${phone}`);
+        // Parar o Keep-alive de alta frequência se ele estiver ativo (job de follow-up iniciado)
+        (0, poker_1.stopHighFrequencyPoke)();
         // Processando mensagem
         const jid = (0, utils_1.toWhatsAppJid)(phone);
         const lastActivity = await redis_1.default.get(`last_activity:${phone}`);

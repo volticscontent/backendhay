@@ -12,6 +12,7 @@ const message_queue_1 = require("./queues/message-queue");
 const message_debounce_1 = require("./queues/message-debounce");
 const cron_1 = require("./cron");
 const socket_server_1 = require("./lib/socket-server");
+const evolution_ws_1 = require("./lib/evolution-ws");
 const db_1 = __importDefault(require("./lib/db"));
 const redis_1 = __importDefault(require("./lib/redis"));
 const logger_1 = require("./lib/logger");
@@ -60,9 +61,12 @@ async function bootstrap() {
     // 2. CRON Jobs
     logger_1.bootLogger.info('Registrando CRON Jobs...');
     (0, cron_1.registerCronJobs)();
-    // 3. Socket.io Server
-    logger_1.bootLogger.info('Iniciando Socket.io Server...');
+    // 3. Socket.io Server (Frontend)
+    logger_1.bootLogger.info('Iniciando Socket.io Server (Frontend)...');
     (0, socket_server_1.initSocketServer)(httpServer);
+    // 3.5 Evolution API WebSocket (Receiving)
+    logger_1.bootLogger.info('Iniciando Cliente WebSocket (Evolution API)...');
+    (0, evolution_ws_1.initEvolutionWebSocket)();
     // 4. Express + Socket Server
     httpServer.listen(PORT, '0.0.0.0', () => {
         logger_1.bootLogger.info(`✅ Servidor HTTP + WebSocket rodando em http://0.0.0.0:${PORT}`);

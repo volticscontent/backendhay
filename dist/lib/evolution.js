@@ -8,8 +8,11 @@ exports.evolutionSendMediaMessage = evolutionSendMediaMessage;
 exports.evolutionFindMessages = evolutionFindMessages;
 exports.evolutionFetchInstances = evolutionFetchInstances;
 exports.evolutionGetConnectionState = evolutionGetConnectionState;
+exports.evolutionConnectInstance = evolutionConnectInstance;
 exports.evolutionGetProfilePic = evolutionGetProfilePic;
 exports.evolutionGetBase64FromMedia = evolutionGetBase64FromMedia;
+exports.evolutionUpdateInstanceSettings = evolutionUpdateInstanceSettings;
+exports.evolutionSetWebhook = evolutionSetWebhook;
 const logger_1 = require("./logger");
 const redis_1 = __importDefault(require("./redis"));
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
@@ -75,6 +78,9 @@ async function evolutionFetchInstances() {
 async function evolutionGetConnectionState() {
     return evolutionRequest(`/instance/connectionState/${EVOLUTION_INSTANCE_NAME}`, 'GET');
 }
+async function evolutionConnectInstance() {
+    return evolutionRequest(`/instance/connect/${EVOLUTION_INSTANCE_NAME}`, 'GET');
+}
 async function evolutionGetProfilePic(jid) {
     return evolutionRequest(`/chat/fetchProfilePictureUrl/${EVOLUTION_INSTANCE_NAME}`, 'POST', {
         number: jid,
@@ -95,5 +101,18 @@ async function evolutionGetBase64FromMedia(messageId, convertToMp4 = false) {
     catch {
         return null;
     }
+}
+/**
+ * Atualiza as configurações da instância (Always Online, Reject Call, etc.)
+ * Rota padrão da v2: /settings/set/{instance}
+ */
+async function evolutionUpdateInstanceSettings(settings) {
+    return evolutionRequest(`/settings/set/${EVOLUTION_INSTANCE_NAME}`, 'POST', settings);
+}
+/**
+ * Define as configurações de Webhook da instância
+ */
+async function evolutionSetWebhook(config) {
+    return evolutionRequest(`/webhook/set/${EVOLUTION_INSTANCE_NAME}`, 'POST', { webhook: config });
 }
 //# sourceMappingURL=evolution.js.map
