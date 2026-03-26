@@ -215,11 +215,24 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
                         const serproResult = await checkCnpjSerpro(cnpj, 'CCMEI_DADOS');
                         const parsedResult = JSON.parse(serproResult);
                         
-                        // Captura erro reportado pelo Serpro (como string json de erro ou mensagens de falha)
-                        if (parsedResult.status === 'error' || parsedResult.mensagens || parsedResult.erro) {
-                            return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
+                        // 1. Se for erro capturado no catch da tool (status local 'error')
+                        if (parsedResult.status === 'error') {
+                           return JSON.stringify({ status: "error", message: `Erro na comunicação com o Serpro: ${parsedResult.message}` });
+                        }
+
+                        // 2. Analisar mensagens do Serpro. Se tiver status 200 mas sem dados e com avisos restritivos:
+                        const hasData = parsedResult.dados && parsedResult.dados !== "" && parsedResult.dados !== "[]";
+                        const messages = parsedResult.mensagens || [];
+                        
+                        // Lista de códigos que realmente indicam falta de acesso/procuração
+                        const criticalErrorCodes = ['[Aviso-DCTFWEB-MG02]', '[Aviso-DCTFWEB-MG08]'];
+                        const isCriticalError = messages.some((m: any) => criticalErrorCodes.includes(m.codigo));
+
+                        if (!hasData && (isCriticalError || parsedResult.erro)) {
+                            return JSON.stringify({ status: "error", message: "Erro de validação (Acesso Negado). Peça um print do e-CAC." });
                         }
                         
+                        // Se chegou aqui com dados ou apenas avisos informativos (ex: "Não é mais MEI"), é SUCESSO na conexão
                         return JSON.stringify({ status: "success", serpro_dados: parsedResult });
                     } catch (serproError) {
                         return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
