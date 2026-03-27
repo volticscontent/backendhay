@@ -12,10 +12,10 @@ export interface MessageSegment {
 
 export function createRegularizacaoMessageSegments(): MessageSegment[] {
     return [
-        { id: 'intro-regularizacao', content: 'Olá! 👋 Vi que você está interessado em regularização fiscal. Vou te explicar o processo passo a passo.', type: 'text', delay: 500 },
-        { id: 'explicacao-dividas', content: 'Para realizar a regularização, precisamos consultar suas dívidas no **PGMEI** e na **Dívida Ativa da União**.', type: 'text', delay: 1500 },
-        { id: 'explicacao-procuracao', content: 'Para isso, você precisa ter uma **procuração cadastrada no e-CAC**. Isso é obrigatório e garante nossa segurança para atuar em seu nome.', type: 'text', delay: 2000 },
-        { id: 'oferecer-opcoes', content: 'Você prefere fazer o processo de forma **autônoma** (você mesmo faz com nosso passo a passo), ou gostaria de ser **auxiliado por um de nossos especialistas**?', type: 'text', delay: 1500 },
+        { id: 'intro-regularizacao', content: 'Olá! 👋 Vi que você está interessado em regularização fiscal. Vou te explicar como funciona o nosso processo para resolver suas pendências com segurança.', type: 'text', delay: 500 },
+        { id: 'explicacao-fluxo', content: 'O primeiro passo é realizarmos uma consulta completa das dívidas no **PGMEI** e na **Dívida Ativa da União**. ||| Para isso, precisamos de sua autorização. Temos dois caminhos seguros:', type: 'text', delay: 1500 },
+        { id: 'opcoes-autorizacao', content: '*Opção A — Procuração Eletrônica (Recomendado)* \nÉ a forma mais segura. Você mesmo autoriza nosso escritório no portal e-CAC sem precisar nos passar sua senha pessoal. \n\n*Opção B — Acesso Direto (Consulta Imediata)* \nVocê nos envia seu CPF e Senha GOV através de um formulário seguro e nós realizamos a consulta técnica agora mesmo.', type: 'text', delay: 2000 },
+        { id: 'pergunta-escolha', content: 'Qual dessas opções você prefere para darmos continuidade?', type: 'text', delay: 1000 },
     ];
 }
 

@@ -704,10 +704,23 @@ export async function checkProcuracaoStatus(leadId: number): Promise<boolean> {
 
 export async function markProcuracaoCompleted(leadId: number): Promise<void> {
     try {
+        // 1. Atualiza no resource_tracking (histórico técnico)
         await query(`
       UPDATE resource_tracking SET status = 'completed', accessed_at = NOW()
       WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
     `, [leadId]);
+
+        // 2. Atualiza na leads_vendas (status oficial para o frontend)
+        await query(`
+            INSERT INTO leads_vendas (lead_id, procuracao, procuracao_ativa, updated_at)
+            VALUES ($1, true, true, NOW())
+            ON CONFLICT (lead_id) DO UPDATE SET
+                procuracao = true,
+                procuracao_ativa = true,
+                updated_at = NOW()
+        `, [leadId]);
+
+        log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO.`);
     } catch (error) {
         log.error('markProcuracaoCompleted error:', error);
     }
