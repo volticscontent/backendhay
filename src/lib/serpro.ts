@@ -2,6 +2,7 @@ import https from 'node:https';
 import querystring from 'node:querystring';
 import fs from 'node:fs';
 import path from 'node:path';
+import forge from 'node-forge';
 import { SERVICE_CONFIG, ServiceConfigItem } from './serpro-config';
 import { serproLogger } from './logger';
 
@@ -28,17 +29,60 @@ const getCertContent = (contentEnv: string | undefined, pathEnv: string | undefi
     return undefined;
 };
 
+/**
+ * Extrai certificado e chave privada de um buffer PFX usando node-forge (resiliente a formatos legados)
+ */
+const extractPfxData = (pfxBuffer: Buffer | undefined, passphrase?: string) => {
+    if (!pfxBuffer) return { cert: undefined, key: undefined };
+    try {
+        const p12Asn1 = forge.asn1.fromDer(pfxBuffer.toString('binary'));
+        const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, passphrase);
+        
+        // Extrair chave privada (pode estar em diferentes tipos de bags)
+        let keyPem: string | undefined;
+        const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag];
+        if (keyBags && keyBags.length > 0 && keyBags[0].key) {
+            keyPem = forge.pki.privateKeyToPem(keyBags[0].key);
+        } else {
+            const keyBagsAlt = p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag];
+            if (keyBagsAlt && keyBagsAlt.length > 0 && keyBagsAlt[0].key) {
+                keyPem = forge.pki.privateKeyToPem(keyBagsAlt[0].key);
+            }
+        }
+
+        // Extrair certificado
+        let certPem: string | undefined;
+        const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag];
+        if (certBags && certBags.length > 0 && certBags[0].cert) {
+            certPem = forge.pki.certificateToPem(certBags[0].cert);
+        }
+
+        return { cert: certPem, key: keyPem };
+    } catch (error) {
+        serproLogger.error('Erro ao extrair dados do PFX com node-forge:', error);
+        return { cert: undefined, key: undefined };
+    }
+};
+
 const SERPRO_CLIENT_ID = process.env.SERPRO_CLIENT_ID;
 const SERPRO_CLIENT_SECRET = process.env.SERPRO_CLIENT_SECRET;
-const SERPRO_CERT_PEM = getCertContent(process.env.SERPRO_CERT_PEM, process.env.SERPRO_CERT_PEM_PATH);
-const SERPRO_CERT_KEY = getCertContent(process.env.SERPRO_CERT_KEY, process.env.SERPRO_CERT_KEY_PATH);
+const SERPRO_CERT_PASS = process.env.CERTIFICADO_SENHA;
+
+const SERPRO_CERT_PEM_RAW = getCertContent(process.env.SERPRO_CERT_PEM, process.env.SERPRO_CERT_PEM_PATH);
+const SERPRO_CERT_KEY_RAW = getCertContent(process.env.SERPRO_CERT_KEY, process.env.SERPRO_CERT_KEY_PATH);
+
 const SERPRO_CERT_PFX_B64 = process.env.CERTIFICADO_BASE64 ? process.env.CERTIFICADO_BASE64.replace(/^"|"$/g, '').trim() : undefined;
 const SERPRO_CERT_PFX_PATH = process.env.SERPRO_CERT_PFX_PATH;
 const SERPRO_PFX_BUFFER = (SERPRO_CERT_PFX_PATH && fs.existsSync(SERPRO_CERT_PFX_PATH))
     ? fs.readFileSync(SERPRO_CERT_PFX_PATH)
     : (SERPRO_CERT_PFX_B64 ? Buffer.from(SERPRO_CERT_PFX_B64, 'base64') : undefined);
 
-const SERPRO_CERT_PASS = process.env.CERTIFICADO_SENHA;
+// Se tivermos PFX, extraímos os componentes para PEM para maior compatibilidade com Node.js https
+const pfxExtracted = extractPfxData(SERPRO_PFX_BUFFER, SERPRO_CERT_PASS);
+
+const FINAL_CERT = pfxExtracted.cert || SERPRO_CERT_PEM_RAW;
+const FINAL_KEY = pfxExtracted.key || SERPRO_CERT_KEY_RAW;
+
 const SERPRO_ROLE_TYPE = process.env.SERPRO_ROLE_TYPE || 'TERCEIROS';
 const SERPRO_AUTHENTICATE_URL = process.env.SERPRO_AUTHENTICATE_URL || 'https://autenticacao.sapi.serpro.gov.br/authenticate';
 
@@ -69,9 +113,9 @@ export async function request(
                 path: url.pathname + url.search,
                 method: options.method || 'GET',
                 headers: options.headers,
-                ...(SERPRO_PFX_BUFFER
-                    ? { pfx: SERPRO_PFX_BUFFER, passphrase: SERPRO_CERT_PASS }
-                    : { cert: SERPRO_CERT_PEM, key: SERPRO_CERT_KEY }
+                ...(FINAL_CERT && FINAL_KEY
+                    ? { cert: FINAL_CERT, key: FINAL_KEY, passphrase: SERPRO_CERT_PASS }
+                    : {}
                 ),
                 timeout: 30000,
             };
@@ -118,7 +162,7 @@ export async function getSerproTokens(): Promise<SerproTokens> {
     if (!SERPRO_CLIENT_ID || !SERPRO_CLIENT_SECRET) {
         throw new Error('Credenciais do SERPRO ausentes (ID ou SECRET)');
     }
-    if (!SERPRO_PFX_BUFFER && (!SERPRO_CERT_PEM || !SERPRO_CERT_KEY)) {
+    if (!FINAL_CERT || !FINAL_KEY) {
         throw new Error('Certificado do SERPRO ausente');
     }
 
