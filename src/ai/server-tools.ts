@@ -5,6 +5,7 @@ import { cosineSimilarity, toWhatsAppJid } from '../lib/utils';
 import { evolutionFindMessages, evolutionSendMediaMessage, evolutionSendTextMessage } from '../lib/evolution';
 import { generateEmbedding } from './embedding';
 import { consultarServico } from '../lib/serpro';
+import { SERVICE_CONFIG } from '../lib/serpro-config';
 import { saveConsultation } from '../lib/serpro-db';
 import logger from '../lib/logger';
 
@@ -543,9 +544,9 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
 
 // ==================== Serpro ====================
 
-export async function checkCnpjSerpro(cnpj: string, service: 'CCMEI_DADOS' | 'SIT_FISCAL' = 'CCMEI_DADOS'): Promise<string> {
+export async function checkCnpjSerpro(cnpj: string, service: keyof typeof SERVICE_CONFIG = 'CCMEI_DADOS', options: any = {}): Promise<string> {
     try {
-        const result = await consultarServico(service, cnpj);
+        const result = await consultarServico(service, cnpj, options);
         saveConsultation(cnpj, service, result, 200).catch(err =>
             log.error('[checkCnpjSerpro] Error saving:', err)
         );

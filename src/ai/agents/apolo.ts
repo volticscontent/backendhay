@@ -131,6 +131,11 @@ Tudo isso é feito AUTOMATICAMENTE pelas TOOLS. Você NUNCA DEVE escrever textua
 **PASSO 3B (Tool enviar_formulario):** Envia link do formulário de acesso direto se o cliente escolher a Opção B.
 **PASSO ALTERNATIVO (Tool chamar_atendente):** Use se o cliente estiver inseguro ou tiver dificuldades em ambas as opções.
 
+### 5. Consulta Proativa ao Serpro (Dívida e Situação Fiscal)
+- **REGRA DE OURO:** Você AGORA consegue consultar o Serpro de verdade. Se o cliente falar sobre dívida, use 'consultar_divida_ativa_serpro' ou 'consultar_situacao_fiscal_serpro'.
+- Se o retorno do Serpro mostrar débitos, use essa informação para qualificar o lead como MQL e oferecer o parcelamento.
+- Mencione os valores ou anos encontrados para passar confiança (Empatia e Autoridade).
+
 - **Cenário C: Material Comercial** — Use 'enviar_midia'.
 - **Cenário D: Resistência ou Recusa (Modo Manual)** — Colete dados manualmente com update_user e qualifique.
 
@@ -241,6 +246,48 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
                     } catch (serproError) {
                         return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
                     }
+                } catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
+            }
+        },
+        {
+            name: 'consultar_divida_ativa_serpro',
+            description: 'Consulta a Dívida Ativa da União para o CNPJ do cliente via Serpro.',
+            parameters: { type: 'object', properties: { ano: { type: 'string', description: 'Ano opcional (ex: 2024). Padrão é ano atual.' } } },
+            function: async (args) => {
+                try {
+                    const ud = await getUser(context.userPhone);
+                    const p = ud ? JSON.parse(ud) : null;
+                    let cnpj = p?.cnpj;
+                    if (!cnpj && p?.id) {
+                        const resEmp = await pool.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
+                        if (resEmp.rows.length > 0) cnpj = resEmp.rows[0].cnpj;
+                    }
+                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não encontrado para este cliente. Peça o CNPJ." });
+                    const options = { ano: args.ano || new Date().getFullYear().toString() };
+                    const result = await checkCnpjSerpro(cnpj, 'DIVIDA_ATIVA', options);
+                    return result;
+                } catch (error) {
+                    return JSON.stringify({ status: "error", message: String(error) });
+                }
+            }
+        },
+        {
+            name: 'consultar_situacao_fiscal_serpro',
+            description: 'Consulta a situação fiscal completa no Serpro via protocolo SITFIS.',
+            parameters: { type: 'object', properties: {} },
+            function: async () => {
+                try {
+                    const ud = await getUser(context.userPhone);
+                    const p = ud ? JSON.parse(ud) : null;
+                    let cnpj = p?.cnpj;
+                    if (!cnpj && p?.id) {
+                        const resEmp = await pool.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
+                        if (resEmp.rows.length > 0) cnpj = resEmp.rows[0].cnpj;
+                    }
+                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não encontrado." });
+                    return await checkCnpjSerpro(cnpj, 'SIT_FISCAL');
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
                 }
