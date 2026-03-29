@@ -1,9 +1,11 @@
 import * as dotenv from 'dotenv';
 import path from 'path';
-import { consultarServico } from './src/lib/serpro';
 
 // Carrega as credenciais do .env (deve estar em bot-backend)
+// Deve ser chamado ANTES dos outros imports que dependem de variáveis de ambiente
 dotenv.config({ path: path.join(__dirname, '.env') });
+
+import { consultarServico } from './src/lib/serpro';
 
 const CNPJ = '45175209000124'; // CNPJ solicitado
 
