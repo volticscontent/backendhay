@@ -546,13 +546,29 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
 
 export async function checkCnpjSerpro(cnpj: string, service: keyof typeof SERVICE_CONFIG = 'CCMEI_DADOS', options: any = {}): Promise<string> {
     try {
+        log.info(`[checkCnpjSerpro] Solicitando serviço ${service} para CNPJ ${cnpj}...`);
         const result = await consultarServico(service, cnpj, options);
         saveConsultation(cnpj, service, result, 200).catch(err =>
             log.error('[checkCnpjSerpro] Error saving:', err)
         );
+
+        // Se o status é 200, significa que temos conexão/procuração ativa.
+        // Vamos tentar encontrar o lead pelo CNPJ e marcar como procuração ativa.
+        try {
+            const cleanCnpj = cnpj.replace(/\D/g, '');
+            const resLead = await pool.query("SELECT lead_id FROM leads_empresarial WHERE REGEXP_REPLACE(cnpj, '\\D', 'g') = $1 LIMIT 1", [cleanCnpj]);
+            if (resLead.rows.length > 0) {
+                await markProcuracaoCompleted(resLead.rows[0].lead_id);
+                log.info(`[checkCnpjSerpro] Status de procuração sincronizado para CNPJ ${cleanCnpj}`);
+            }
+        } catch (syncErr) {
+            log.error('[checkCnpjSerpro] Erro ao sincronizar status de procuração:', syncErr);
+        }
+
         return JSON.stringify(result);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        log.error(`[checkCnpjSerpro] Falha crítica na consulta ${service} para CNPJ ${cnpj}:`, error);
         return JSON.stringify({ status: 'error', message: errorMessage });
     }
 }

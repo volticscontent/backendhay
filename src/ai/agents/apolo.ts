@@ -5,7 +5,7 @@ import pool from '../../lib/db';
 import {
     sendEnumeratedList, sendMessageSegment,
     trackResourceDelivery, checkProcuracaoStatus, markProcuracaoCompleted,
-    checkCnpjSerpro, sendMeetingForm, getUser, callAttendant
+    checkCnpjSerpro, sendMeetingForm, getUser, callAttendant, updateUser, interpreter
 } from '../server-tools';
 import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, MessageSegment } from '../regularizacao-system';
 import { prepareAgentContext, getSharedTools } from '../shared-agent';
@@ -224,27 +224,22 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
                         const serproResult = await checkCnpjSerpro(cnpj, 'CCMEI_DADOS');
                         const parsedResult = JSON.parse(serproResult);
                         
-                        // 1. Se for erro capturado no catch da tool (status local 'error')
                         if (parsedResult.status === 'error') {
                            return JSON.stringify({ status: "error", message: `Erro na comunicação com o Serpro: ${parsedResult.message}` });
                         }
 
-                        // 2. Analisar mensagens do Serpro. Se tiver status 200 mas sem dados e com avisos restritivos:
-                        const hasData = parsedResult.dados && parsedResult.dados !== "" && parsedResult.dados !== "[]";
+                        const hasData = (parsedResult.dados && parsedResult.dados !== "" && parsedResult.dados !== "[]");
                         const messages = parsedResult.mensagens || [];
-                        
-                        // Lista de códigos que realmente indicam falta de acesso/procuração
                         const criticalErrorCodes = ['[Aviso-DCTFWEB-MG02]', '[Aviso-DCTFWEB-MG08]'];
-                        const isCriticalError = messages.some((m: any) => criticalErrorCodes.includes(m.codigo));
+                        const isPermissionError = messages.some((m: any) => criticalErrorCodes.includes(m.codigo));
 
-                        if (!hasData && (isCriticalError || parsedResult.erro)) {
-                            return JSON.stringify({ status: "error", message: "Erro de validação (Acesso Negado). Peça um print do e-CAC." });
+                        if (!hasData && isPermissionError) {
+                            return JSON.stringify({ status: "error", message: "Acesso Negado no Serpro. O cliente pode não ter dado a procuração corretamente ou para todos os serviços." });
                         }
                         
-                        // Se chegou aqui com dados ou apenas avisos informativos (ex: "Não é mais MEI"), é SUCESSO na conexão
-                        return JSON.stringify({ status: "success", serpro_dados: parsedResult });
+                        return JSON.stringify({ status: "success", message: "Conexão com Serpro validada com sucesso.", serpro_dados: parsedResult });
                     } catch (serproError) {
-                        return JSON.stringify({ status: "error", message: "Erro de validação. Peça um print do e-CAC." });
+                        return JSON.stringify({ status: "error", message: "Erro técnico na comunicação com Serpro. Peça um print do e-CAC." });
                     }
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
@@ -252,21 +247,20 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
             }
         },
         {
-            name: 'consultar_divida_ativa_serpro',
-            description: 'Consulta a Dívida Ativa da União para o CNPJ do cliente via Serpro.',
-            parameters: { type: 'object', properties: { ano: { type: 'string', description: 'Ano opcional (ex: 2024). Padrão é ano atual.' } } },
-            function: async (args) => {
+            name: 'consultar_divida_ativa_serpro', description: 'Consulta débitos em Dívida Ativa da União via Serpro.', parameters: { type: 'object', properties: { ano: { type: 'string', description: 'Ano opcional (ex: 2024). Padrão é ano atual.' } } },
+            function: async (args: any) => {
                 try {
                     const ud = await getUser(context.userPhone);
-                    const p = ud ? JSON.parse(ud) : null;
-                    let cnpj = p?.cnpj;
-                    if (!cnpj && p?.id) {
+                    if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    const p = JSON.parse(ud);
+                    let cnpj = p.cnpj;
+                    if (!cnpj && p.id) {
                         const resEmp = await pool.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
                         if (resEmp.rows.length > 0) cnpj = resEmp.rows[0].cnpj;
                     }
-                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não encontrado para este cliente. Peça o CNPJ." });
-                    const options = { ano: args.ano || new Date().getFullYear().toString() };
-                    const result = await checkCnpjSerpro(cnpj, 'DIVIDA_ATIVA', options);
+                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não localizado." });
+
+                    const result = await checkCnpjSerpro(cnpj, 'DIVIDA_ATIVA', { ano: args.ano || new Date().getFullYear().toString() });
                     return result;
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
@@ -274,25 +268,29 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
             }
         },
         {
-            name: 'consultar_situacao_fiscal_serpro',
-            description: 'Consulta a situação fiscal completa no Serpro via protocolo SITFIS.',
-            parameters: { type: 'object', properties: {} },
+            name: 'consultar_situacao_fiscal_serpro', description: 'Solicita relatório de Situação Fiscal Completa via Serpro.', parameters: { type: 'object', properties: {} },
             function: async () => {
                 try {
                     const ud = await getUser(context.userPhone);
-                    const p = ud ? JSON.parse(ud) : null;
-                    let cnpj = p?.cnpj;
-                    if (!cnpj && p?.id) {
+                    if (!ud) return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
+                    const p = JSON.parse(ud);
+                    let cnpj = p.cnpj;
+                    if (!cnpj && p.id) {
                         const resEmp = await pool.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
                         if (resEmp.rows.length > 0) cnpj = resEmp.rows[0].cnpj;
                     }
-                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não encontrado." });
-                    return await checkCnpjSerpro(cnpj, 'SIT_FISCAL');
+                    if (!cnpj) return JSON.stringify({ status: "error", message: "CNPJ não localizado." });
+
+                    const result = await checkCnpjSerpro(cnpj, 'SIT_FISCAL');
+                    return result;
                 } catch (error) {
                     return JSON.stringify({ status: "error", message: String(error) });
                 }
             }
-        }
+        },
+        { name: 'update_user', description: 'Atualizar dados cadastrais ou status do lead no banco de dados.', parameters: { type: 'object', properties: { campos: { type: 'object', description: 'Objeto contendo os campos a serem atualizados (ex: { situacao: "qualificado" })' } } }, function: async (args: any) => await updateUser({ ...args.campos, telefone: context.userPhone }) },
+        { name: 'interpreter', description: 'Analista de memória e histórico de conversas do cliente.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['get', 'post'] }, text: { type: 'string' }, category: { type: 'string' } } }, function: async (args: any) => await interpreter(context.userPhone, args.action, args.text, args.category) },
+        { name: 'chamar_atendente', description: 'Transferir a conversa para um atendente humano.', parameters: { type: 'object', properties: { reason: { type: 'string' } } }, function: async (args: any) => await callAttendant(context.userPhone, args.reason) }
     ];
 
     const tools = [...getSharedTools(context), ...customTools];
