@@ -10,6 +10,8 @@ import adminRoutes from './routes/admin';
 import atendimentoRoutes from './routes/atendimento';
 import settingsRoutes from './routes/settings';
 import colaboradoresRoutes from './routes/colaboradores';
+import integraEmpresasRoutes from './routes/integra/empresas';
+import integraRobosRoutes from './routes/integra/robos';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { startDebounceWorker } from './queues/message-debounce';
 import { registerCronJobs } from './cron';
@@ -38,6 +40,8 @@ app.use('/api', adminRoutes);
 app.use('/api', atendimentoRoutes);
 app.use('/api', settingsRoutes);
 app.use('/api', colaboradoresRoutes);
+app.use('/api', integraEmpresasRoutes);
+app.use('/api', integraRobosRoutes);
 
 // Root health check
 app.get('/', (_req, res) => {
