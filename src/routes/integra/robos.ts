@@ -1,5 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../../lib/db';
+import { enqueueRoboPgmei } from '../../queues/integra/job-pgmei';
+import { enqueueRoboCnd } from '../../queues/integra/job-cnd';
+import { enqueueRoboCaixaPostal } from '../../queues/integra/job-caixa-postal';
+
+const ENQUEUE_MAP: Record<string, (id: number) => Promise<void>> = {
+    pgmei:        enqueueRoboPgmei,
+    cnd:          enqueueRoboCnd,
+    caixa_postal: enqueueRoboCaixaPostal,
+};
 
 const router = Router();
 
@@ -61,7 +70,8 @@ router.post('/integra/robos/:tipo/executar', async (req: Request, res: Response)
         [tipo]
     );
 
-    // TODO: enfileirar job BullMQ aqui (Fase 2)
+    const enqueue = ENQUEUE_MAP[tipo];
+    if (enqueue) await enqueue(exec.rows[0].id);
 
     res.status(202).json({ execucao_id: exec.rows[0].id, message: 'Execução iniciada' });
 });

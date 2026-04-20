@@ -14,6 +14,9 @@ import integraEmpresasRoutes from './routes/integra/empresas';
 import integraRobosRoutes from './routes/integra/robos';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { startDebounceWorker } from './queues/message-debounce';
+import { startPgmeiWorker } from './queues/integra/job-pgmei';
+import { startCndWorker } from './queues/integra/job-cnd';
+import { startCaixaPostalWorker } from './queues/integra/job-caixa-postal';
 import { registerCronJobs } from './cron';
 import { initSocketServer } from './lib/socket-server';
 import { initEvolutionWebSocket } from './lib/evolution-ws';
@@ -73,7 +76,10 @@ async function bootstrap() {
     const messageWorker = startMessageWorker();
     const followUpWorker = startFollowUpWorker();
     const debounceWorker = startDebounceWorker();
-    bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce)');
+    const pgmeiWorker = startPgmeiWorker();
+    const cndWorker = startCndWorker();
+    const caixaPostalWorker = startCaixaPostalWorker();
+    bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce, integra-pgmei, integra-cnd, integra-caixa-postal)');
 
     // 1.5 Aquecer cache de mapeamento LID → telefone
     bootLogger.info('Aquecendo cache LID...');
@@ -109,6 +115,9 @@ async function bootstrap() {
             await messageWorker.close();
             await followUpWorker.close();
             await debounceWorker.close();
+            await pgmeiWorker.close();
+            await cndWorker.close();
+            await caixaPostalWorker.close();
             bootLogger.info('Workers encerrados');
 
             await pool.end();
