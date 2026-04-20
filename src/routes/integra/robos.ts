@@ -4,7 +4,7 @@ import { enqueueRoboPgmei } from '../../queues/integra/job-pgmei';
 import { enqueueRoboCnd } from '../../queues/integra/job-cnd';
 import { enqueueRoboCaixaPostal } from '../../queues/integra/job-caixa-postal';
 
-const ENQUEUE_MAP: Record<string, (id: number) => Promise<void>> = {
+const ENQUEUE_MAP: { [key: string]: (id: number) => Promise<void> } = {
     pgmei:        enqueueRoboPgmei,
     cnd:          enqueueRoboCnd,
     caixa_postal: enqueueRoboCaixaPostal,
@@ -70,8 +70,8 @@ router.post('/integra/robos/:tipo/executar', async (req: Request, res: Response)
         [tipo]
     );
 
-    const enqueue = ENQUEUE_MAP[tipo];
-    if (enqueue) await enqueue(exec.rows[0].id);
+    const enqueue = ENQUEUE_MAP[tipo as string];
+    if (enqueue) await enqueue(exec.rows[0].id as number);
 
     res.status(202).json({ execucao_id: exec.rows[0].id, message: 'Execução iniciada' });
 });

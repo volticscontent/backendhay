@@ -72,7 +72,7 @@ export function startCaixaPostalWorker() {
             for (let i = 0; i < empresas.rows.length; i += CONCURRENCY) {
                 const lote = empresas.rows.slice(i, i + CONCURRENCY);
                 const resultados = await Promise.all(
-                    lote.map(e => processEmpresa(execucaoId, e.id, e.cnpj))
+                    lote.map(e => processEmpresa(execucaoId, e.id as number, e.cnpj as string))
                 );
                 for (const r of resultados) { if (r === 'success') sucesso++; else falhas++; }
                 if (i + CONCURRENCY < empresas.rows.length) {
