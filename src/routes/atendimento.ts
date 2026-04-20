@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import pool, { query, withClient } from '../lib/db';
+import pool, { query, withClient, evolutionPool } from '../lib/db';
 import {
-  evolutionFindChats, evolutionGetProfilePic, evolutionFindMessages,
+  evolutionFindChats, evolutionFindContacts, evolutionGetProfilePic, evolutionFindMessages,
   evolutionSendTextMessage, evolutionSendMediaMessage, evolutionSendWhatsAppAudio,
   evolutionGetBase64FromMediaMessage,
 } from '../lib/evolution';
@@ -15,29 +15,82 @@ router.get('/atendimento/chats', async (_req: Request, res: Response) => {
 
     try {
       const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'teste';
-      const instanceRes = await pool.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]);
+      const instanceRes = await evolutionPool.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]);
       const instanceId = instanceRes.rows[0]?.id;
 
       if (instanceId) {
-        const chatsQuery = await pool.query(`
-          SELECT c."remoteJid" as id, c."remoteJid" as "remoteJid", c."pushName", c."profilePicUrl",
-            ch."unreadMessages" as "unreadCount", m."message", m.key, m."messageTimestamp"
+        // Query 1: Evolution DB (systembots) — contacts + last message
+        const chatsQuery = await evolutionPool.query(`
+          SELECT
+            c."remoteJid" as id,
+            c."remoteJid" as "remoteJid",
+            COALESCE(c."pushName", ch.name) as "pushName",
+            c."profilePicUrl",
+            COALESCE(ch."unreadMessages", 0) as "unreadCount",
+            m.message, m.key, m."messageTimestamp"
           FROM "Contact" c
-          INNER JOIN "Chat" ch ON c."remoteJid" = ch."remoteJid" AND c."instanceId" = ch."instanceId"
-          LEFT JOIN LATERAL (
-            SELECT "message", "messageTimestamp", "key"
+          LEFT JOIN "Chat" ch ON c."remoteJid" = ch."remoteJid" AND c."instanceId" = ch."instanceId"
+          INNER JOIN LATERAL (
+            SELECT message, "messageTimestamp", key
             FROM "Message"
-            WHERE "remoteJid" = c."remoteJid" AND "instanceId" = c."instanceId"
+            WHERE "instanceId" = c."instanceId"
+              AND (
+                key->>'remoteJid' = c."remoteJid"
+                OR key->>'remoteJidAlt' = c."remoteJid"
+              )
             ORDER BY "messageTimestamp" DESC LIMIT 1
           ) m ON true
           WHERE c."instanceId" = $1 AND c."remoteJid" NOT LIKE '%@lid'
           ORDER BY m."messageTimestamp" DESC NULLS LAST LIMIT 300
         `, [instanceId]);
-        chatsArray = chatsQuery.rows;
+
+        // Query 2: App DB (n_db_pg) — lead names/status keyed by phone
+        const phones = chatsQuery.rows
+          .map((c) => String(c.remoteJid || '').split('@')[0])
+          .filter(Boolean);
+
+        const leadMap = new Map<string, Record<string, unknown>>();
+        if (phones.length > 0) {
+          const params = phones.map((_, i) => `$${i + 1}`).join(',');
+          const { rows: leadRows } = await pool.query(
+            `SELECT l.id, l.telefone, l.nome_completo, lv.status_atendimento, lv.data_reuniao
+             FROM leads l LEFT JOIN leads_vendas lv ON lv.lead_id = l.id
+             WHERE l.telefone = ANY(ARRAY[${params}])`,
+            phones,
+          ).catch(() => ({ rows: [] }));
+          for (const r of leadRows) leadMap.set(String(r.telefone), r);
+        }
+
+        chatsArray = chatsQuery.rows.map((c) => {
+          const phone = String(c.remoteJid || '').split('@')[0];
+          // Try exact phone, then without country code, then with 55 prefix
+          const lead = leadMap.get(phone) || leadMap.get(phone.replace(/^55/, '')) || leadMap.get(`55${phone}`);
+          return {
+            ...c,
+            leadName: (lead?.nome_completo as string) || (c.pushName as string) || null,
+            leadId: lead?.id || null,
+            leadStatus: lead?.status_atendimento || null,
+            leadDataReuniao: lead?.data_reuniao || null,
+          };
+        });
       }
     } catch {
-      const fallback = await evolutionFindChats();
-      chatsArray = Array.isArray(fallback) ? fallback as Array<Record<string, unknown>> : [];
+      // Fallback: REST API — enrich chats with contact names from findContacts
+      const [fallbackChats, contacts] = await Promise.all([
+        evolutionFindChats().catch(() => [] as unknown[]),
+        evolutionFindContacts().catch(() => []),
+      ]);
+      const contactMap = new Map(contacts.map(c => [c.remoteJid, c]));
+      chatsArray = (Array.isArray(fallbackChats) ? fallbackChats as Array<Record<string, unknown>> : []).map(c => {
+        const jid = String(c.remoteJid || c.id || '');
+        const contact = contactMap.get(jid);
+        return {
+          ...c,
+          pushName: contact?.pushName || (c.pushName as string) || null,
+          profilePicUrl: contact?.profilePicUrl || (c.profilePicUrl as string) || null,
+          leadName: contact?.pushName || (c.pushName as string) || null,
+        };
+      });
     }
 
     chatsArray = chatsArray.filter((c) => !String(c.remoteJid || c.id || '').includes('@lid'));
@@ -161,29 +214,35 @@ router.get('/atendimento/messages', async (req: Request, res: Response) => {
   if (!jid) return void res.status(400).json({ success: false, error: 'jid é obrigatório' });
 
   const jids = jid.split(',').filter(Boolean);
-  const jidsWithLids = new Set(jids);
+  const limit = 50;
 
   try {
+    // Expand JID set: phone→LID (incoming msgs stored under @lid in key.remoteJid)
+    // key.remoteJidAlt stores the phone JID for incoming LID messages
+    const jidsWithLids = new Set(jids);
     if (jids.length > 0) {
       const params = jids.map((_, i) => `$${i + 1}`).join(',');
-      const { rows } = await pool.query(
-        `SELECT DISTINCT key->>'remoteJid' as lid FROM "Message" WHERE key->>'remoteJidAlt' = ANY(ARRAY[${params}]) OR key->>'senderPn' = ANY(ARRAY[${params}])`,
+      const { rows } = await evolutionPool.query(
+        `SELECT DISTINCT key->>'remoteJid' as lid FROM "Message"
+         WHERE key->>'remoteJidAlt' = ANY(ARRAY[${params}])
+           AND key->>'remoteJid' LIKE '%@lid'`,
         jids,
       ).catch(() => ({ rows: [] }));
       for (const row of rows) { if (row.lid) jidsWithLids.add(row.lid); }
     }
 
-    type Message = Record<string, unknown>;
-    let allRecords: Message[] = [];
+    type Msg = Record<string, unknown>;
+    let allRecords: Msg[] = [];
+
     for (const singleJid of Array.from(jidsWithLids)) {
       try {
-        const response = await evolutionFindMessages(singleJid, 50, page);
-        const records = (response?.messages?.records || []) as Message[];
+        const response = await evolutionFindMessages(singleJid, limit, page);
+        const records = (response?.messages?.records || []) as Msg[];
         allRecords = [...allRecords, ...records];
       } catch { /* continue */ }
     }
 
-    const uniqueMap = new Map<string, Message>();
+    const uniqueMap = new Map<string, Msg>();
     for (const r of allRecords) {
       const id = String((r.key as Record<string, unknown>)?.id || r.id || '');
       if (id && !uniqueMap.has(id)) uniqueMap.set(id, r);
@@ -191,6 +250,35 @@ router.get('/atendimento/messages', async (req: Request, res: Response) => {
 
     let records = Array.from(uniqueMap.values());
     records.sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+
+    // If Evolution API returned nothing, try direct DB query on systembots as fallback
+    if (records.length === 0) {
+      const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'teste';
+      const instanceRes = await evolutionPool.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]).catch(() => ({ rows: [] }));
+      const instanceId = instanceRes.rows[0]?.id;
+      if (instanceId) {
+        const allJids = Array.from(jidsWithLids);
+        const placeholders = allJids.map((_, i) => `$${i + 1}`).join(',');
+        const offset = (page - 1) * limit;
+        const { rows: dbRows } = await evolutionPool.query(
+          `SELECT key, message, "messageTimestamp" FROM "Message"
+           WHERE "instanceId" = $${allJids.length + 1}
+             AND (key->>'remoteJid' = ANY(ARRAY[${placeholders}]) OR key->>'remoteJidAlt' = ANY(ARRAY[${placeholders}]))
+             AND message IS NOT NULL
+           ORDER BY "messageTimestamp" DESC LIMIT ${limit} OFFSET ${offset}`,
+          [...allJids, instanceId],
+        ).catch(() => ({ rows: [] }));
+        for (const r of dbRows) {
+          const keyObj = (typeof r.key === 'object' ? r.key : {}) as Record<string, unknown>;
+          const msgId = String(keyObj?.id || '');
+          if (msgId && !uniqueMap.has(msgId)) {
+            uniqueMap.set(msgId, { key: keyObj, message: r.message, messageTimestamp: Number(r.messageTimestamp) });
+          }
+        }
+        records = Array.from(uniqueMap.values());
+        records.sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+      }
+    }
 
     records = await Promise.all(records.map(async (msg) => {
       const content = (msg.message || msg) as Record<string, unknown>;
@@ -205,6 +293,7 @@ router.get('/atendimento/messages', async (req: Request, res: Response) => {
 
     res.json({ success: true, data: { messages: { records } } });
   } catch (err) {
+    console.error('[messages] error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch messages' });
   }
 });

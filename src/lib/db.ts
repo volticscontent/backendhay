@@ -12,6 +12,19 @@ pool.on('error', (err) => {
     dbLogger.error('Pool error:', err);
 });
 
+// Pool separado para o banco da Evolution API (systembots)
+// As tabelas Message, Contact, Chat, Instance vivem aqui
+export const evolutionPool = new Pool({
+    connectionString: process.env.EVOLUTION_DB_URL || process.env.DATABASE_URL,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+});
+
+evolutionPool.on('error', (err) => {
+    dbLogger.error('Evolution pool error:', err);
+});
+
 /**
  * Executa uma query simples usando o pool diretamente.
  * O pool gerencia automaticamente o acquire/release da conexão.

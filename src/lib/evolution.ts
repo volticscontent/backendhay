@@ -169,6 +169,11 @@ export async function evolutionFindChats(): Promise<unknown[]> {
     return Array.isArray(result) ? result : [];
 }
 
+export async function evolutionFindContacts(): Promise<Array<{ remoteJid: string; pushName: string | null; profilePicUrl?: string | null }>> {
+    const result = await evolutionRequest(`/chat/findContacts/${EVOLUTION_INSTANCE_NAME}`, 'POST', { where: {} });
+    return Array.isArray(result) ? result as Array<{ remoteJid: string; pushName: string | null; profilePicUrl?: string | null }> : [];
+}
+
 export async function checkWhatsAppNumbers(numbers: string[]): Promise<Array<{ exists: boolean; jid: string; number: string }>> {
     const result = await evolutionRequest(`/chat/whatsappNumbers/${EVOLUTION_INSTANCE_NAME}`, 'POST', { numbers });
     return Array.isArray(result) ? result as Array<{ exists: boolean; jid: string; number: string }> : [];

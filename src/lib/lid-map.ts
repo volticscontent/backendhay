@@ -1,4 +1,4 @@
-import pool from './db';
+import pool, { evolutionPool } from './db';
 import redis from './redis';
 import { webhookLogger } from './logger';
 
@@ -48,17 +48,16 @@ export async function resolveLidToPhone(lid: string): Promise<string | null> {
 
     // 2. Fallback: buscar senderPn na tabela Message da Evolution API
     try {
-        const { rows } = await pool.query(
-            `SELECT key->>'senderPn' as sender_pn 
-             FROM "Message" 
-             WHERE key->>'remoteJid' = $1 
-               AND key->>'senderPn' IS NOT NULL 
+        const { rows } = await evolutionPool.query(
+            `SELECT key->>'remoteJidAlt' as phone_jid
+             FROM "Message"
+             WHERE key->>'remoteJid' = $1
+               AND key->>'remoteJidAlt' IS NOT NULL
              LIMIT 1`,
             [lid]
         );
-        if (rows[0]?.sender_pn) {
-            const phone = rows[0].sender_pn.replace('@s.whatsapp.net', '');
-            // Re-popular o cache Redis
+        if (rows[0]?.phone_jid) {
+            const phone = rows[0].phone_jid.replace('@s.whatsapp.net', '');
             redis.set(`lid_map:${lid}`, phone, 'EX', 2592000).catch(() => { });
             redis.set(`phone_lid:${phone}`, lid, 'EX', 2592000).catch(() => { });
             return phone;
@@ -74,13 +73,13 @@ export async function resolveLidToPhone(lid: string): Promise<string | null> {
  */
 export async function warmLidCache(): Promise<void> {
     try {
-        const { rows } = await pool.query(`
-            SELECT DISTINCT 
-                key->>'remoteJid' as lid, 
-                key->>'senderPn' as sender_pn
+        const { rows } = await evolutionPool.query(`
+            SELECT DISTINCT
+                key->>'remoteJid' as lid,
+                key->>'remoteJidAlt' as phone_jid
             FROM "Message"
             WHERE key->>'remoteJid' LIKE '%@lid'
-              AND key->>'senderPn' IS NOT NULL
+              AND key->>'remoteJidAlt' IS NOT NULL
         `);
 
         if (rows.length === 0) {
@@ -90,7 +89,7 @@ export async function warmLidCache(): Promise<void> {
 
         const pipeline = redis.pipeline();
         for (const row of rows) {
-            const phone = row.sender_pn.replace('@s.whatsapp.net', '');
+            const phone = row.phone_jid.replace('@s.whatsapp.net', '');
             pipeline.set(`lid_map:${row.lid}`, phone, 'EX', 2592000);
             pipeline.set(`phone_lid:${phone}`, row.lid, 'EX', 2592000);
         }
