@@ -3,8 +3,13 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Força NODE_ENV=development no build para garantir que devDependencies
+# (@types/*, typescript) sejam instaladas — NODE_ENV=production do EasyPanel
+# causaria npm ci a pular devDeps e quebrar a compilação TypeScript.
+ENV NODE_ENV=development
+
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY src ./src
