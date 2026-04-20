@@ -21,7 +21,7 @@ export interface FollowUpJobData {
     metadata?: Record<string, unknown>;
 }
 /**
- * Substitui o sendToN8nHandler — enfileira mensagens para envio sequencial com delay
+ * Enfileira mensagens para envio sequencial com delay
  */
 export declare function enqueueMessages(payload: MessageJobData): Promise<string>;
 /**
@@ -34,7 +34,6 @@ export declare function scheduleFollowUp(phone: string, message: string, delayMs
 export declare function cancelPendingFollowUps(phone: string): Promise<void>;
 /**
  * Worker que processa envio de mensagens sequenciais com delay
- * Substitui COMPLETAMENTE o n8n para envio de mensagens
  */
 export declare function startMessageWorker(): Worker;
 /**

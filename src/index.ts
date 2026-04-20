@@ -3,6 +3,13 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import webhookRoutes from './routes/webhook';
+import leadsRoutes from './routes/leads';
+import serproRoutes from './routes/serpro-api';
+import servicesRoutes from './routes/services';
+import adminRoutes from './routes/admin';
+import atendimentoRoutes from './routes/atendimento';
+import settingsRoutes from './routes/settings';
+import colaboradoresRoutes from './routes/colaboradores';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { startDebounceWorker } from './queues/message-debounce';
 import { registerCronJobs } from './cron';
@@ -24,6 +31,13 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ==================== Rotas ====================
 app.use('/api', webhookRoutes);
+app.use('/api', leadsRoutes);
+app.use('/api', serproRoutes);
+app.use('/api', servicesRoutes);
+app.use('/api', adminRoutes);
+app.use('/api', atendimentoRoutes);
+app.use('/api', settingsRoutes);
+app.use('/api', colaboradoresRoutes);
 
 // Root health check
 app.get('/', (_req, res) => {

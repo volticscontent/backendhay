@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import forge from 'node-forge';
 import { SERVICE_CONFIG, ServiceConfigItem } from './serpro-config';
+import { SerproTokens, SerproPayload, SerproParte, SerproOptions, TipoContribuinte } from './serpro-types';
 import { serproLogger } from './logger';
 
 export { SERVICE_CONFIG };
@@ -90,21 +91,21 @@ const INTEGRA_BASE_URLS = {
     Consultar: process.env.SERPRO_INTEGRA_CONSULTAR_URL || 'https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Consultar',
     Emitir: 'https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Emitir',
     Solicitar: 'https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Solicitar',
+    Apoiar: 'https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Apoiar',
 };
 
 const onlyDigits = (v: string) => v.replace(/\D/g, '');
 
-interface SerproTokens {
-    access_token: string;
-    jwt_token: string;
-}
+
+const RETRY_SENTINEL = Symbol('retry');
 
 export async function request(
     urlStr: string,
     options: https.RequestOptions,
-    body?: string
+    body?: string,
+    retries: number = 2
 ): Promise<unknown> {
-    return new Promise((resolve, reject) => {
+    const execute = (): Promise<unknown> => new Promise((resolve, reject) => {
         try {
             const url = new URL(urlStr);
             const reqOptions: https.RequestOptions = {
@@ -124,8 +125,8 @@ export async function request(
                 let data = '';
                 res.on('data', (chunk) => (data += chunk));
                 res.on('end', () => {
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+                    if (res.statusCode && (res.statusCode >= 200 && res.statusCode < 300 || res.statusCode === 304)) {
+                        try { resolve(JSON.parse(data)); } catch { resolve(data || null); }
                     } else {
                         let errorMessage = `HTTP ${res.statusCode}`;
                         try {
@@ -141,7 +142,14 @@ export async function request(
                         } catch {
                             errorMessage += `: ${data.substring(0, 1000)}`;
                         }
-                        reject(new Error(errorMessage));
+                        
+                        // Retry on 500/502/503/504
+                        if (retries > 0 && res.statusCode && res.statusCode >= 500) {
+                            serproLogger.warn(`Retrying request to ${urlStr} due to ${res.statusCode}. Retries left: ${retries}. Error: ${errorMessage}`);
+                            resolve(RETRY_SENTINEL);
+                        } else {
+                            reject(new Error(errorMessage));
+                        }
                     }
                 });
             });
@@ -152,12 +160,32 @@ export async function request(
             reject(e);
         }
     });
+
+    for (let i = 0; i <= retries; i++) {
+        const result = await execute();
+        if (result !== RETRY_SENTINEL) return result;
+        await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Exponential backoff
+    }
+    throw new Error(`Max retries reached for ${urlStr}`);
 }
 
 let cachedTokens: SerproTokens | null = null;
 
-export async function getSerproTokens(): Promise<SerproTokens> {
-    if (cachedTokens) return cachedTokens;
+/** Retorna o timestamp (ms) da próxima meia-noite no fuso de Brasília (UTC-3). */
+function nextMidnightBRT(): number {
+    const BRT_OFFSET_MS = 3 * 60 * 60 * 1000; // BRT = UTC-3
+    // Representa "agora" como se fosse UTC em BRT
+    const nowAsBRT = new Date(Date.now() - BRT_OFFSET_MS);
+    // Avança para meia-noite do próximo dia BRT
+    nowAsBRT.setUTCHours(0, 0, 0, 0);
+    nowAsBRT.setUTCDate(nowAsBRT.getUTCDate() + 1);
+    // Devolve em UTC real
+    return nowAsBRT.getTime() + BRT_OFFSET_MS;
+}
+
+export async function getSerproTokens(forceRefresh: boolean = false): Promise<SerproTokens> {
+    const now = Date.now();
+    if (cachedTokens && !forceRefresh && now < cachedTokens.expiresAt) return cachedTokens;
 
     if (!SERPRO_CLIENT_ID || !SERPRO_CLIENT_SECRET) {
         throw new Error('Credenciais do SERPRO ausentes (ID ou SECRET)');
@@ -179,23 +207,20 @@ export async function getSerproTokens(): Promise<SerproTokens> {
         },
     }, postData);
 
-    if ((response as SerproTokens).access_token && (response as SerproTokens).jwt_token) {
+    const raw = response as { access_token?: string; jwt_token?: string };
+    if (raw.access_token && raw.jwt_token) {
         cachedTokens = {
-            access_token: (response as SerproTokens).access_token,
-            jwt_token: (response as SerproTokens).jwt_token,
+            access_token: raw.access_token,
+            jwt_token: raw.jwt_token,
+            expiresAt: nextMidnightBRT(),
         };
+        serproLogger.info(`Tokens Serpro renovados. Expiram em: ${new Date(cachedTokens.expiresAt).toISOString()}`);
         return cachedTokens;
     }
     throw new Error('Falha ao recuperar tokens do SERPRO');
 }
 
-export interface SerproOptions {
-    ano?: string;
-    mes?: string;
-    numeroRecibo?: string;
-    codigoReceita?: string;
-    categoria?: string;
-}
+export type { SerproOptions, SerproTokens, TipoContribuinte } from './serpro-types';
 
 export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG, cnpj: string, options: SerproOptions = {}) {
     const config = SERVICE_CONFIG[nomeServico];
@@ -215,73 +240,150 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
     const cnpjNumero = onlyDigits(cnpj);
     if (cnpjNumero.length !== 14) throw new Error('CNPJ inválido: envie 14 dígitos');
 
-    const dadosServico: Record<string, unknown> = { cnpj: cnpjNumero };
+    // Inicialização base do objeto de dados - O CNPJ já vai no cabeçalho 'contribuinte' do Integra Contador
+    // Muitos serviços (como PGMEI/DIVIDAATIVA24) dão erro 400 se o CNPJ for repetido no JSON 'dados'.
+    const dadosServico: Record<string, unknown> = {};
 
-    if (['PGMEI', 'SIMEI', 'DIVIDA_ATIVA', 'PGDASD', 'DCTFWEB', 'CAIXA_POSTAL'].includes(nomeServico)) {
-        if (options.ano) {
-            if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD'].includes(nomeServico)) {
-                dadosServico.anoCalendario = options.ano;
-            } else if (nomeServico === 'DCTFWEB') {
-                dadosServico.anoPA = options.ano;
-            } else {
-                dadosServico.ano = options.ano;
-            }
-        } else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD'].includes(nomeServico)) {
-            dadosServico.anoCalendario = new Date().getFullYear().toString();
+    // SITFIS: SOLICITARPROTOCOLO91 exige dados="" (vazio). RELATORIOSITFIS92 exige {"protocoloRelatorio":"..."}
+    // CAIXA_POSTAL: exige cnpjReferencia (tratado abaixo)
+
+    // Tratamento de parâmetros temporais (Ano/Mês/PA)
+    if (options.ano) {
+        if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico)) {
+            dadosServico.anoCalendario = options.ano;
+        } else if (nomeServico === 'DCTFWEB') {
+            dadosServico.anoPA = options.ano;
+        } else {
+            dadosServico.ano = options.ano;
         }
+    } else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'DCTFWEB'].includes(nomeServico)) {
+        const currentYear = new Date().getFullYear().toString();
+        if (nomeServico === 'DCTFWEB') dadosServico.anoPA = currentYear;
+        else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico)) dadosServico.anoCalendario = currentYear;
+        else dadosServico.ano = currentYear;
+    }
 
-        if (options.mes) {
-            if (nomeServico === 'PGMEI') {
-                const anoParaMes = options.ano || new Date().getFullYear().toString();
-                dadosServico.periodoApuracao = `${options.mes.padStart(2, '0')}${anoParaMes}`;
-            } else if (nomeServico === 'DCTFWEB') {
-                dadosServico.mesPA = options.mes.padStart(2, '0');
-            }
-        }
-
+    if (options.mes) {
+        const mesPad = options.mes.padStart(2, '0');
+        const anoParaMes = options.ano || new Date().getFullYear().toString();
         if (nomeServico === 'DCTFWEB') {
-            dadosServico.categoria = options.categoria || 'GERAL_MENSAL';
-            if (!dadosServico.anoPA) dadosServico.anoPA = new Date().getFullYear().toString();
-            delete dadosServico.cnpj;
+            dadosServico.mesPA = mesPad;
+        } else if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico)) {
+            // Serpro exige formato YYYYMM
+            dadosServico.periodoApuracao = `${anoParaMes}${mesPad}`;
         }
+    }
 
-        if (nomeServico === 'CAIXA_POSTAL') {
-            delete dadosServico.cnpj;
-        }
+    // Exceções e Campos Específicos por Serviço
+    if (nomeServico === 'DCTFWEB') {
+        dadosServico.categoria = options.categoria || 'GERAL_MENSAL';
+    }
+
+    if (nomeServico === 'CAIXA_POSTAL') {
+        // Doc exige cnpjReferencia e NÃO aceita campo cnpj simples em muitas versões
+        // E 2024/2025: campo 'ano' gera erro se presente.
+        delete dadosServico.cnpj;
+        delete dadosServico.ano;
+        dadosServico.cnpjReferencia = cnpjNumero;
+    }
+
+    if (options.numeroDas) {
+        dadosServico.numeroDas = options.numeroDas; // Obrigatório para PGDASD CONSEXTRATO16
     }
 
     if (options.numeroRecibo) dadosServico.numeroRecibo = options.numeroRecibo;
     if (options.codigoReceita) dadosServico.codigoReceita = options.codigoReceita;
-
-    const contratanteCnpj = onlyDigits(process.env.CONTRATANTE_CNPJ || '51564549000140');
-
-    if (['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico)) {
-        for (const key in dadosServico) delete dadosServico[key];
+    
+    // Parcela para emissão — formato YYYYMM obrigatório (ex: "202601")
+    if (['PARCELAMENTO_SN_EMITIR', 'PARCELAMENTO_MEI_EMITIR'].includes(nomeServico)) {
+        if (options.parcelaParaEmitir) {
+            dadosServico.parcelaParaEmitir = options.parcelaParaEmitir;
+        } else if (options.mes && options.ano) {
+            dadosServico.parcelaParaEmitir = `${options.ano}${options.mes.padStart(2, '0')}`;
+        } else {
+            const now = new Date();
+            dadosServico.parcelaParaEmitir = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+        }
     }
 
-    const payload = {
-        contratante: { numero: contratanteCnpj, tipo: 2 },
-        autorPedidoDados: { numero: contratanteCnpj, tipo: 2 },
-        contribuinte: { numero: cnpjNumero, tipo: 2 },
+    const contratanteCnpj = onlyDigits(process.env.CONTRATANTE_CNPJ || process.env.SERPRO_CNPJ_BASE || '51564549000140');
+    const isParcelamentoConsulta = ['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico);
+
+    // Serviços que usam CPF do empresário como contribuinte
+    const isSitfis = ['SIT_FISCAL_SOLICITAR', 'SIT_FISCAL_RELATORIO', 'CND'].includes(nomeServico);
+    const isProcuracao = nomeServico === 'PROCURACAO';
+    const cpfNumero = options.cpf ? onlyDigits(options.cpf) : undefined;
+    const contribuinteNumero = ((isSitfis || isProcuracao) && cpfNumero) ? cpfNumero : cnpjNumero;
+    const contribuinteTipo = ((isSitfis || isProcuracao) && cpfNumero && cpfNumero.length === 11)
+        ? TipoContribuinte.CPF
+        : TipoContribuinte.CNPJ;
+
+    // Montar campo 'dados' por tipo de serviço
+    let dadosField: string;
+    if (nomeServico === 'SIT_FISCAL_SOLICITAR') {
+        dadosField = '';
+    } else if (nomeServico === 'SIT_FISCAL_RELATORIO' || nomeServico === 'CND') {
+        if (!options.protocoloRelatorio) throw new Error('SIT_FISCAL_RELATORIO exige options.protocoloRelatorio');
+        dadosField = JSON.stringify({ protocoloRelatorio: options.protocoloRelatorio });
+    } else if (isProcuracao) {
+        // OBTERPROCURACAO41: outorgante = CNPJ da empresa cliente, outorgado = CNPJ do contador
+        dadosField = JSON.stringify({
+            outorgante: cnpjNumero,
+            tipoOutorgante: '2',
+            outorgado: contratanteCnpj,
+            tipoOutorgado: '2',
+        });
+    } else if (isParcelamentoConsulta) {
+        dadosField = '';
+    } else {
+        dadosField = JSON.stringify(dadosServico);
+    }
+
+    const contratante: SerproParte = { numero: contratanteCnpj, tipo: TipoContribuinte.CNPJ };
+    const payload: SerproPayload = {
+        contratante,
+        autorPedidoDados: contratante,
+        contribuinte: { numero: contribuinteNumero, tipo: contribuinteTipo },
         pedidoDados: {
             idSistema,
             idServico,
-            versaoSistema: config.versao || '1.0',
-            dados: ['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico) ? '' : JSON.stringify(dadosServico),
+            versaoSistema: config.versaoSistema || '1.0',
+            dados: dadosField,
         },
     };
-
-    serproLogger.info(`Consultando ${nomeServico} para CNPJ ${cnpjNumero}`);
 
     const serviceType = config.tipo as keyof typeof INTEGRA_BASE_URLS;
     const baseUrl = INTEGRA_BASE_URLS[serviceType] || INTEGRA_BASE_URLS['Consultar'];
 
-    return request(baseUrl, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${tokens.access_token}`,
-            'jwt_token': tokens.jwt_token,
-            'Content-Type': 'application/json',
-        },
-    }, JSON.stringify(payload));
+    const payloadStr = JSON.stringify(payload);
+    serproLogger.info(`Consultando ${nomeServico} para CNPJ ${cnpjNumero}`, { idSistema, idServico, payload: payloadStr });
+
+    const firstAttempt = async () => {
+        return request(baseUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${tokens.access_token}`,
+                'jwt_token': tokens.jwt_token,
+                'Content-Type': 'application/json',
+            },
+        }, JSON.stringify(payload));
+    };
+
+    try {
+        return await firstAttempt();
+    } catch (error: any) {
+        if (error.message && error.message.includes('HTTP 401')) {
+            serproLogger.warn('Token expirado (401). Recarregando tokens e tentando novamente...');
+            const newTokens = await getSerproTokens(true);
+            return await request(baseUrl, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${newTokens.access_token}`,
+                    'jwt_token': newTokens.jwt_token,
+                    'Content-Type': 'application/json',
+                },
+            }, JSON.stringify(payload));
+        }
+        throw error;
+    }
 }

@@ -56,7 +56,7 @@ export interface FollowUpJobData {
 // ==================== Funções de Enfileiramento ====================
 
 /**
- * Substitui o sendToN8nHandler — enfileira mensagens para envio sequencial com delay
+ * Enfileira mensagens para envio sequencial com delay
  */
 export async function enqueueMessages(payload: MessageJobData): Promise<string> {
     try {
@@ -122,7 +122,6 @@ export async function cancelPendingFollowUps(phone: string): Promise<void> {
 
 /**
  * Worker que processa envio de mensagens sequenciais com delay
- * Substitui COMPLETAMENTE o n8n para envio de mensagens
  */
 export function startMessageWorker(): Worker {
     const worker = new Worker<MessageJobData>('message-sending', async (job: Job<MessageJobData>) => {

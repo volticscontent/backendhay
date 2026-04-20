@@ -62,17 +62,34 @@ export async function evolutionSendMediaMessage(
     });
 }
 
-export async function evolutionFindMessages(jid: string, limit: number = 30): Promise<{
+export async function evolutionFindMessages(jid: string, limit: number = 30, page: number = 1): Promise<{
     messages?: { records?: Array<{ key: { fromMe: boolean }; message: unknown }> };
 }> {
-    return evolutionRequest(`/chat/findMessages/${EVOLUTION_INSTANCE_NAME}`, 'POST', {
-        where: {
-            key: {
-                remoteJid: jid,
-            },
-        },
-        limit,
+    return evolutionRequest(`/chat/findMessages/${EVOLUTION_INSTANCE_NAME}?page=${page}&limit=${limit}`, 'POST', {
+        where: { key: { remoteJid: jid } },
+        orderBy: { createdAt: 'desc' },
     }) as Promise<{ messages?: { records?: Array<{ key: { fromMe: boolean }; message: unknown }> } }>;
+}
+
+export async function evolutionSendWhatsAppAudio(jid: string, audio: string): Promise<unknown> {
+    return evolutionRequest(`/message/sendWhatsAppAudio/${EVOLUTION_INSTANCE_NAME}`, 'POST', {
+        number: jid,
+        audio,
+    });
+}
+
+export async function evolutionGetBase64FromMediaMessage(message: unknown): Promise<{ base64: string; mimetype: string } | null> {
+    try {
+        const result = await evolutionRequest(
+            `/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE_NAME}`,
+            'POST',
+            { message, convertToMp4: false },
+        ) as { base64?: string; mimetype?: string };
+        if (result?.base64) return { base64: result.base64, mimetype: result.mimetype || 'application/octet-stream' };
+        return null;
+    } catch {
+        return null;
+    }
 }
 
 export async function evolutionFetchInstances(): Promise<unknown> {
@@ -145,4 +162,19 @@ export async function evolutionSetWebhook(config: {
     events?: string[];
 }): Promise<unknown> {
     return evolutionRequest(`/webhook/set/${EVOLUTION_INSTANCE_NAME}`, 'POST', { webhook: config });
+}
+
+export async function evolutionFindChats(): Promise<unknown[]> {
+    const result = await evolutionRequest(`/chat/findChats/${EVOLUTION_INSTANCE_NAME}`, 'POST', {});
+    return Array.isArray(result) ? result : [];
+}
+
+export async function checkWhatsAppNumbers(numbers: string[]): Promise<Array<{ exists: boolean; jid: string; number: string }>> {
+    const result = await evolutionRequest(`/chat/whatsappNumbers/${EVOLUTION_INSTANCE_NAME}`, 'POST', { numbers });
+    return Array.isArray(result) ? result as Array<{ exists: boolean; jid: string; number: string }> : [];
+}
+
+export function toWhatsAppJid(phone: string): string {
+    const clean = phone.replace(/\D/g, '');
+    return clean.includes('@') ? clean : `${clean}@s.whatsapp.net`;
 }

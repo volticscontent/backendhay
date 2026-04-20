@@ -3,8 +3,9 @@ export interface ServiceConfigItem {
     env_servico: string;
     default_sistema?: string;
     default_servico?: string;
-    tipo: 'Consultar' | 'Emitir' | 'Solicitar';
-    versao?: string;
+    /** Versão do serviço a ser enviada em `versaoSistema` no payload. Default: '1.0' */
+    versaoSistema?: string;
+    tipo: 'Consultar' | 'Emitir' | 'Solicitar' | 'Apoiar';
     descricao?: string;
     uso?: string;
     finalidade?: string;

@@ -1,6 +1,6 @@
 export declare function evolutionSendTextMessage(jid: string, text: string): Promise<unknown>;
 export declare function evolutionSendMediaMessage(jid: string, mediaUrl: string, mediatype: 'image' | 'video' | 'audio' | 'document', caption: string, fileName: string, mimetype: string): Promise<unknown>;
-export declare function evolutionFindMessages(jid: string, limit?: number): Promise<{
+export declare function evolutionFindMessages(jid: string, limit?: number, page?: number): Promise<{
     messages?: {
         records?: Array<{
             key: {
@@ -10,6 +10,11 @@ export declare function evolutionFindMessages(jid: string, limit?: number): Prom
         }>;
     };
 }>;
+export declare function evolutionSendWhatsAppAudio(jid: string, audio: string): Promise<unknown>;
+export declare function evolutionGetBase64FromMediaMessage(message: unknown): Promise<{
+    base64: string;
+    mimetype: string;
+} | null>;
 export declare function evolutionFetchInstances(): Promise<unknown>;
 export declare function evolutionGetConnectionState(): Promise<any>;
 export declare function evolutionConnectInstance(): Promise<unknown>;
@@ -47,4 +52,11 @@ export declare function evolutionSetWebhook(config: {
     webhookBase64?: boolean;
     events?: string[];
 }): Promise<unknown>;
+export declare function evolutionFindChats(): Promise<unknown[]>;
+export declare function checkWhatsAppNumbers(numbers: string[]): Promise<Array<{
+    exists: boolean;
+    jid: string;
+    number: string;
+}>>;
+export declare function toWhatsAppJid(phone: string): string;
 //# sourceMappingURL=evolution.d.ts.map

@@ -6,6 +6,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.evolutionSendTextMessage = evolutionSendTextMessage;
 exports.evolutionSendMediaMessage = evolutionSendMediaMessage;
 exports.evolutionFindMessages = evolutionFindMessages;
+exports.evolutionSendWhatsAppAudio = evolutionSendWhatsAppAudio;
+exports.evolutionGetBase64FromMediaMessage = evolutionGetBase64FromMediaMessage;
 exports.evolutionFetchInstances = evolutionFetchInstances;
 exports.evolutionGetConnectionState = evolutionGetConnectionState;
 exports.evolutionConnectInstance = evolutionConnectInstance;
@@ -13,6 +15,9 @@ exports.evolutionGetProfilePic = evolutionGetProfilePic;
 exports.evolutionGetBase64FromMedia = evolutionGetBase64FromMedia;
 exports.evolutionUpdateInstanceSettings = evolutionUpdateInstanceSettings;
 exports.evolutionSetWebhook = evolutionSetWebhook;
+exports.evolutionFindChats = evolutionFindChats;
+exports.checkWhatsAppNumbers = checkWhatsAppNumbers;
+exports.toWhatsAppJid = toWhatsAppJid;
 const logger_1 = require("./logger");
 const redis_1 = __importDefault(require("./redis"));
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
@@ -62,15 +67,28 @@ async function evolutionSendMediaMessage(jid, mediaUrl, mediatype, caption, file
         mimetype,
     });
 }
-async function evolutionFindMessages(jid, limit = 30) {
-    return evolutionRequest(`/chat/findMessages/${EVOLUTION_INSTANCE_NAME}`, 'POST', {
-        where: {
-            key: {
-                remoteJid: jid,
-            },
-        },
-        limit,
+async function evolutionFindMessages(jid, limit = 30, page = 1) {
+    return evolutionRequest(`/chat/findMessages/${EVOLUTION_INSTANCE_NAME}?page=${page}&limit=${limit}`, 'POST', {
+        where: { key: { remoteJid: jid } },
+        orderBy: { createdAt: 'desc' },
     });
+}
+async function evolutionSendWhatsAppAudio(jid, audio) {
+    return evolutionRequest(`/message/sendWhatsAppAudio/${EVOLUTION_INSTANCE_NAME}`, 'POST', {
+        number: jid,
+        audio,
+    });
+}
+async function evolutionGetBase64FromMediaMessage(message) {
+    try {
+        const result = await evolutionRequest(`/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE_NAME}`, 'POST', { message, convertToMp4: false });
+        if (result?.base64)
+            return { base64: result.base64, mimetype: result.mimetype || 'application/octet-stream' };
+        return null;
+    }
+    catch {
+        return null;
+    }
 }
 async function evolutionFetchInstances() {
     return evolutionRequest(`/instance/fetchInstances`, 'GET');
@@ -114,5 +132,17 @@ async function evolutionUpdateInstanceSettings(settings) {
  */
 async function evolutionSetWebhook(config) {
     return evolutionRequest(`/webhook/set/${EVOLUTION_INSTANCE_NAME}`, 'POST', { webhook: config });
+}
+async function evolutionFindChats() {
+    const result = await evolutionRequest(`/chat/findChats/${EVOLUTION_INSTANCE_NAME}`, 'POST', {});
+    return Array.isArray(result) ? result : [];
+}
+async function checkWhatsAppNumbers(numbers) {
+    const result = await evolutionRequest(`/chat/whatsappNumbers/${EVOLUTION_INSTANCE_NAME}`, 'POST', { numbers });
+    return Array.isArray(result) ? result : [];
+}
+function toWhatsAppJid(phone) {
+    const clean = phone.replace(/\D/g, '');
+    return clean.includes('@') ? clean : `${clean}@s.whatsapp.net`;
 }
 //# sourceMappingURL=evolution.js.map

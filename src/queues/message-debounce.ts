@@ -1,7 +1,7 @@
 import { Queue, Worker, Job } from 'bullmq';
 import redis from '../lib/redis';
 import { createRedisConnection } from '../lib/redis';
-import { runApoloAgent } from '../ai/agents/apolo';
+import { runApoloAgent } from '../ai/agents/apolo/index';
 import { runVendedorAgent } from '../ai/agents/vendedor';
 import { runAtendenteAgent } from '../ai/agents/atendente';
 import { AgentContext, AgentMessage } from '../ai/types';
@@ -172,6 +172,12 @@ function combineMessages(rawMessages: string[]): AgentMessage {
 
 /** Resolve o estado do usuário a partir do DB */
 async function resolveUserState(userPhone: string, pushName?: string): Promise<UserState> {
+    // 1. Check for routing override in Redis
+    const routingOverride = await getAgentRouting(userPhone);
+    if (routingOverride === 'vendedor') return 'qualified';
+    if (routingOverride === 'atendente') return 'customer';
+    if (routingOverride === 'atendimento') return 'attendant';
+
     const userJson = await getUser(userPhone);
     let user: Record<string, unknown> | null = null;
 
@@ -211,10 +217,10 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
         debounceLogger.info(`🕐 Fora do horário comercial para ${userPhone}. A IA continuará o atendimento.`);
     }
 
-    // Se o usuário já estiver em atendimento humano, o AGENT_MAP['attendant'] retornará runner null,
-    // o que é tratado abaixo. Não precisamos de um if extra aqui.
-    if (user.situacao === 'cliente') return 'customer';
-    if (user.qualificacao) return 'qualified';
+    // Se o usuário já estiver em atendimento humano, o AGENT_MAP['attendant'] retornará runner null
+    if (user.situacao === 'cliente' || user.cliente === true) return 'customer';
+    if (user.situacao === 'qualificado' || user.qualificacao) return 'qualified';
+    
     return 'lead';
 }
 

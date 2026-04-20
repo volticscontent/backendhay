@@ -9,7 +9,7 @@ exports.startDebounceWorker = startDebounceWorker;
 const bullmq_1 = require("bullmq");
 const redis_1 = __importDefault(require("../lib/redis"));
 const redis_2 = require("../lib/redis");
-const apolo_1 = require("../ai/agents/apolo");
+const index_1 = require("../ai/agents/apolo/index");
 const vendedor_1 = require("../ai/agents/vendedor");
 const atendente_1 = require("../ai/agents/atendente");
 const server_tools_1 = require("../ai/server-tools");
@@ -39,7 +39,7 @@ exports.debounceQueue = new bullmq_1.Queue('message-debounce', {
 const AGENT_MAP = {
     qualified: { runner: vendedor_1.runVendedorAgent, label: 'VENDEDOR (Icaro)' },
     customer: { runner: atendente_1.runAtendenteAgent, label: 'ATENDENTE (Apolo Customer)' },
-    lead: { runner: apolo_1.runApoloAgent, label: 'APOLO (SDR)' },
+    lead: { runner: index_1.runApoloAgent, label: 'APOLO (SDR)' },
     attendant: { runner: null, label: 'ATENDIMENTO HUMANO' },
 };
 // ==================== Helpers Redis (atômico via pipeline) ====================
@@ -144,6 +144,14 @@ function combineMessages(rawMessages) {
 }
 /** Resolve o estado do usuário a partir do DB */
 async function resolveUserState(userPhone, pushName) {
+    // 1. Check for routing override in Redis
+    const routingOverride = await (0, server_tools_1.getAgentRouting)(userPhone);
+    if (routingOverride === 'vendedor')
+        return 'qualified';
+    if (routingOverride === 'atendente')
+        return 'customer';
+    if (routingOverride === 'atendimento')
+        return 'attendant';
     const userJson = await (0, server_tools_1.getUser)(userPhone);
     let user = null;
     try {
@@ -181,11 +189,10 @@ async function resolveUserState(userPhone, pushName) {
     if (isOutOfHours) {
         logger_1.debounceLogger.info(`🕐 Fora do horário comercial para ${userPhone}. A IA continuará o atendimento.`);
     }
-    // Se o usuário já estiver em atendimento humano, o AGENT_MAP['attendant'] retornará runner null,
-    // o que é tratado abaixo. Não precisamos de um if extra aqui.
-    if (user.situacao === 'cliente')
+    // Se o usuário já estiver em atendimento humano, o AGENT_MAP['attendant'] retornará runner null
+    if (user.situacao === 'cliente' || user.cliente === true)
         return 'customer';
-    if (user.qualificacao)
+    if (user.situacao === 'qualificado' || user.qualificacao)
         return 'qualified';
     return 'lead';
 }

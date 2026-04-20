@@ -8,6 +8,13 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const http_1 = require("http");
 const webhook_1 = __importDefault(require("./routes/webhook"));
+const leads_1 = __importDefault(require("./routes/leads"));
+const serpro_api_1 = __importDefault(require("./routes/serpro-api"));
+const services_1 = __importDefault(require("./routes/services"));
+const admin_1 = __importDefault(require("./routes/admin"));
+const atendimento_1 = __importDefault(require("./routes/atendimento"));
+const settings_1 = __importDefault(require("./routes/settings"));
+const colaboradores_1 = __importDefault(require("./routes/colaboradores"));
 const message_queue_1 = require("./queues/message-queue");
 const message_debounce_1 = require("./queues/message-debounce");
 const cron_1 = require("./cron");
@@ -26,6 +33,13 @@ app.use(express_1.default.json({ limit: '50mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '50mb' }));
 // ==================== Rotas ====================
 app.use('/api', webhook_1.default);
+app.use('/api', leads_1.default);
+app.use('/api', serpro_api_1.default);
+app.use('/api', services_1.default);
+app.use('/api', admin_1.default);
+app.use('/api', atendimento_1.default);
+app.use('/api', settings_1.default);
+app.use('/api', colaboradores_1.default);
 // Root health check
 app.get('/', (_req, res) => {
     res.json({

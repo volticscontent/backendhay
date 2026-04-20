@@ -54,6 +54,8 @@ exports.getAvailableMedia = getAvailableMedia;
 exports.sendMedia = sendMedia;
 exports.sendCommercialPresentation = sendCommercialPresentation;
 exports.checkCnpjSerpro = checkCnpjSerpro;
+exports.consultarProcuracaoSerpro = consultarProcuracaoSerpro;
+exports.consultarDividaAtivaGeralSerpro = consultarDividaAtivaGeralSerpro;
 exports.interpreter = interpreter;
 exports.trackResourceDelivery = trackResourceDelivery;
 exports.checkProcuracaoStatus = checkProcuracaoStatus;
@@ -154,7 +156,7 @@ async function updateUser(data) {
             leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
             leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
             leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
-            leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'vendido'],
+            leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'cliente'],
             leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
         };
         for (const [tableName, validFields] of Object.entries(tableMappings)) {
@@ -593,16 +595,44 @@ async function sendCommercialPresentation(phone, type = 'apc') {
     }
 }
 // ==================== Serpro ====================
-async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS') {
+async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS', options = {}) {
     try {
-        const result = await (0, serpro_1.consultarServico)(service, cnpj);
+        log.info(`[checkCnpjSerpro] Solicitando serviço ${service} para CNPJ ${cnpj}...`);
+        const result = await (0, serpro_1.consultarServico)(service, cnpj, options);
         (0, serpro_db_1.saveConsultation)(cnpj, service, result, 200).catch(err => log.error('[checkCnpjSerpro] Error saving:', err));
+        // Se o status é 200, significa que temos conexão/procuração ativa.
+        try {
+            const cleanCnpj = cnpj.replace(/\D/g, '');
+            const resLead = await db_1.default.query("SELECT lead_id FROM leads_empresarial WHERE REGEXP_REPLACE(cnpj, '\\D', 'g') = $1 LIMIT 1", [cleanCnpj]);
+            if (resLead.rows.length > 0) {
+                await markProcuracaoCompleted(resLead.rows[0].lead_id);
+                log.info(`[checkCnpjSerpro] Status de procuração sincronizado para CNPJ ${cleanCnpj}`);
+            }
+        }
+        catch (syncErr) {
+            log.error('[checkCnpjSerpro] Erro ao sincronizar status de procuração:', syncErr);
+        }
         return JSON.stringify(result);
     }
     catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        // Detecção inteligente de falta de procuração no Serpro
+        if (errorMessage.includes('40011') || errorMessage.includes('AUT-403') || errorMessage.includes('AutorizacaoNegada')) {
+            return JSON.stringify({
+                status: 'error',
+                error_type: 'procuracao_ausente',
+                message: 'Acesso negado. O contribuinte não outorgou procuração para este serviço no e-CAC.'
+            });
+        }
+        log.error(`[checkCnpjSerpro] Falha na consulta ${service} para CNPJ ${cnpj}:`, error);
         return JSON.stringify({ status: 'error', message: errorMessage });
     }
+}
+async function consultarProcuracaoSerpro(cnpj) {
+    return checkCnpjSerpro(cnpj, 'PROCURACAO');
+}
+async function consultarDividaAtivaGeralSerpro(cnpj) {
+    return checkCnpjSerpro(cnpj, 'PGFN_CONSULTAR');
 }
 // ==================== Interpreter (Memory) ====================
 async function interpreter(phone, action, text, category = 'atendimento') {
@@ -721,10 +751,21 @@ async function checkProcuracaoStatus(leadId) {
 }
 async function markProcuracaoCompleted(leadId) {
     try {
+        // 1. Atualiza no resource_tracking (histórico técnico)
         await (0, db_2.query)(`
       UPDATE resource_tracking SET status = 'completed', accessed_at = NOW()
       WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
     `, [leadId]);
+        // 2. Atualiza na leads_vendas (status oficial para o frontend)
+        await (0, db_2.query)(`
+            INSERT INTO leads_vendas (lead_id, procuracao, procuracao_ativa, updated_at)
+            VALUES ($1, true, true, NOW())
+            ON CONFLICT (lead_id) DO UPDATE SET
+                procuracao = true,
+                procuracao_ativa = true,
+                updated_at = NOW()
+        `, [leadId]);
+        log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO.`);
     }
     catch (error) {
         log.error('markProcuracaoCompleted error:', error);
@@ -779,7 +820,7 @@ async function getUpdatableFields() {
         leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
         leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
         leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
-        leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'vendido'],
+        leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'cliente'],
         leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
     };
     return JSON.stringify({

@@ -73,7 +73,7 @@ exports.followUpQueue = new bullmq_1.Queue('follow-up', {
 });
 // ==================== Funções de Enfileiramento ====================
 /**
- * Substitui o sendToN8nHandler — enfileira mensagens para envio sequencial com delay
+ * Enfileira mensagens para envio sequencial com delay
  */
 async function enqueueMessages(payload) {
     try {
@@ -130,7 +130,6 @@ async function cancelPendingFollowUps(phone) {
 // ==================== Workers ====================
 /**
  * Worker que processa envio de mensagens sequenciais com delay
- * Substitui COMPLETAMENTE o n8n para envio de mensagens
  */
 function startMessageWorker() {
     const worker = new bullmq_1.Worker('message-sending', async (job) => {
