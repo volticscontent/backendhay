@@ -219,6 +219,48 @@ router.put('/leads/user/:phone', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /leads/list ──────────────────────────────────────────────────────────
+
+router.get('/leads/list', async (req: Request, res: Response) => {
+  const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+  const limit = Math.min(200, parseInt(req.query.limit as string) || 50);
+  const offset = (page - 1) * limit;
+
+  try {
+    const [countRes, dataRes] = await Promise.all([
+      query('SELECT COUNT(*) FROM leads'),
+      query(`
+        SELECT
+          l.id, l.telefone, l.nome_completo, l.email, l.data_cadastro, l.atualizado_em,
+          l.needs_attendant, l.attendant_requested_at,
+          l.razao_social, l.cnpj, l.tipo_negocio, l.faturamento_mensal,
+          l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
+          l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
+          l.calculo_parcelamento, l.tipo_divida,
+          l.valor_divida_municipal, l.valor_divida_estadual, l.valor_divida_federal,
+          l.valor_divida_pgfn AS valor_divida_ativa,
+          lp.observacoes, lp.data_controle_24h, lp.envio_disparo,
+          lp.servico AS servico_negociado, lp.servico AS servico_escolhido,
+          lp.procuracao, lp.status_atendimento, lp.cliente, lp.data_reuniao,
+          (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
+          NULL::text        AS cartao_cnpj,
+          NULL::timestamptz AS data_ultima_consulta
+        FROM leads l
+        LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+        ORDER BY l.atualizado_em DESC
+        LIMIT $1 OFFSET $2
+      `, [limit, offset]),
+    ]);
+
+    res.json({
+      data:  dataRes.rows,
+      total: parseInt(countRes.rows[0].count as string),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar leads' });
+  }
+});
+
 // ─── GET /leads/unique-values ─────────────────────────────────────────────────
 
 router.get('/leads/unique-values', async (req: Request, res: Response) => {
