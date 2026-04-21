@@ -44,10 +44,10 @@ function registerCronJobs() {
             const res = await log.timed('Query leads inativos', () => client.query(`
         SELECT l.telefone, l.nome_completo
         FROM leads l
-        LEFT JOIN leads_atendimento la ON l.id = la.lead_id
+        LEFT JOIN leads_processo lp ON l.id = lp.lead_id
         WHERE l.situacao = 'nao_respondido'
           AND l.data_cadastro < NOW() - INTERVAL '2 hours'
-          AND (la.data_followup IS NULL OR la.data_followup < NOW() - INTERVAL '24 hours')
+          AND (lp.data_followup IS NULL OR lp.data_followup < NOW() - INTERVAL '24 hours')
         LIMIT 10
       `));
             if (res.rows.length === 0) {
@@ -73,7 +73,7 @@ function registerCronJobs() {
                     });
                     // Atualizar data de follow-up (cria o registro se não existir)
                     await client.query(`
-            INSERT INTO leads_atendimento (lead_id, data_followup)
+            INSERT INTO leads_processo (lead_id, data_followup)
             VALUES ((SELECT id FROM leads WHERE telefone = $1 LIMIT 1), NOW())
             ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
           `, [lead.telefone]);
@@ -128,8 +128,8 @@ function registerCronJobs() {
             yesterday.setDate(yesterday.getDate() - 1);
             const [newLeads, qualifiedLeads, meetings] = await log.timed('Monitoramento de leads e reuniões', () => Promise.all([
                 client.query(`SELECT COUNT(*) as count FROM leads WHERE data_cadastro > $1`, [yesterday]),
-                client.query(`SELECT COUNT(*) as count FROM leads WHERE situacao = 'qualificado' AND data_cadastro > $1`, [yesterday]),
-                client.query(`SELECT COUNT(*) as count FROM leads_vendas WHERE data_reuniao > $1`, [yesterday]),
+                client.query(`SELECT COUNT(*) as count FROM leads WHERE situacao = 'qualificado' AND atualizado_em > $1`, [yesterday]),
+                client.query(`SELECT COUNT(*) as count FROM leads_processo WHERE data_reuniao > $1`, [yesterday]),
             ]));
             const report = `📊 *Relatório Diário Haylander*\n\n` +
                 `📥 Novos Leads: ${newLeads.rows[0].count}\n` +

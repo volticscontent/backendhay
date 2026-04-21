@@ -15,8 +15,13 @@ const admin_1 = __importDefault(require("./routes/admin"));
 const atendimento_1 = __importDefault(require("./routes/atendimento"));
 const settings_1 = __importDefault(require("./routes/settings"));
 const colaboradores_1 = __importDefault(require("./routes/colaboradores"));
+const empresas_1 = __importDefault(require("./routes/integra/empresas"));
+const robos_1 = __importDefault(require("./routes/integra/robos"));
 const message_queue_1 = require("./queues/message-queue");
 const message_debounce_1 = require("./queues/message-debounce");
+const job_pgmei_1 = require("./queues/integra/job-pgmei");
+const job_cnd_1 = require("./queues/integra/job-cnd");
+const job_caixa_postal_1 = require("./queues/integra/job-caixa-postal");
 const cron_1 = require("./cron");
 const socket_server_1 = require("./lib/socket-server");
 const evolution_ws_1 = require("./lib/evolution-ws");
@@ -40,6 +45,8 @@ app.use('/api', admin_1.default);
 app.use('/api', atendimento_1.default);
 app.use('/api', settings_1.default);
 app.use('/api', colaboradores_1.default);
+app.use('/api', empresas_1.default);
+app.use('/api', robos_1.default);
 // Root health check
 app.get('/', (_req, res) => {
     res.json({
@@ -68,7 +75,10 @@ async function bootstrap() {
     const messageWorker = (0, message_queue_1.startMessageWorker)();
     const followUpWorker = (0, message_queue_1.startFollowUpWorker)();
     const debounceWorker = (0, message_debounce_1.startDebounceWorker)();
-    logger_1.bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce)');
+    const pgmeiWorker = (0, job_pgmei_1.startPgmeiWorker)();
+    const cndWorker = (0, job_cnd_1.startCndWorker)();
+    const caixaPostalWorker = (0, job_caixa_postal_1.startCaixaPostalWorker)();
+    logger_1.bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce, integra-pgmei, integra-cnd, integra-caixa-postal)');
     // 1.5 Aquecer cache de mapeamento LID → telefone
     logger_1.bootLogger.info('Aquecendo cache LID...');
     await (0, lid_map_1.warmLidCache)();
@@ -97,6 +107,9 @@ async function bootstrap() {
             await messageWorker.close();
             await followUpWorker.close();
             await debounceWorker.close();
+            await pgmeiWorker.close();
+            await cndWorker.close();
+            await caixaPostalWorker.close();
             logger_1.bootLogger.info('Workers encerrados');
             await db_1.default.end();
             logger_1.bootLogger.info('Conexão com banco de dados encerrada');

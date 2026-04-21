@@ -95,6 +95,7 @@ const INTEGRA_BASE_URLS = {
     Apoiar: 'https://gateway.apiserpro.serpro.gov.br/integra-contador/v1/Apoiar',
 };
 const onlyDigits = (v) => v.replace(/\D/g, '');
+const RETRY_SENTINEL = Symbol('retry');
 async function request(urlStr, options, body, retries = 2) {
     const execute = () => new Promise((resolve, reject) => {
         try {
@@ -114,12 +115,12 @@ async function request(urlStr, options, body, retries = 2) {
                 let data = '';
                 res.on('data', (chunk) => (data += chunk));
                 res.on('end', () => {
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    if (res.statusCode && (res.statusCode >= 200 && res.statusCode < 300 || res.statusCode === 304)) {
                         try {
                             resolve(JSON.parse(data));
                         }
                         catch {
-                            resolve(data);
+                            resolve(data || null);
                         }
                     }
                     else {
@@ -142,8 +143,8 @@ async function request(urlStr, options, body, retries = 2) {
                         }
                         // Retry on 500/502/503/504
                         if (retries > 0 && res.statusCode && res.statusCode >= 500) {
-                            logger_1.serproLogger.warn(`Retrying request to ${urlStr} due to ${res.statusCode}. Retries left: ${retries}`);
-                            resolve(null); // Signal retry
+                            logger_1.serproLogger.warn(`Retrying request to ${urlStr} due to ${res.statusCode}. Retries left: ${retries}. Error: ${errorMessage}`);
+                            resolve(RETRY_SENTINEL);
                         }
                         else {
                             reject(new Error(errorMessage));
@@ -162,7 +163,7 @@ async function request(urlStr, options, body, retries = 2) {
     });
     for (let i = 0; i <= retries; i++) {
         const result = await execute();
-        if (result !== null)
+        if (result !== RETRY_SENTINEL)
             return result;
         await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Exponential backoff
     }
@@ -259,15 +260,13 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
     }
     if (options.mes) {
         const mesPad = options.mes.padStart(2, '0');
-        if (['PGDASD', 'DCTFWEB', 'PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico)) {
-            // PGMEI_EXTRATO/BOLETO aceitam periodoApuracao MMYYYY
-            if (nomeServico === 'DCTFWEB') {
-                dadosServico.mesPA = mesPad;
-            }
-            else {
-                const anoParaMes = options.ano || new Date().getFullYear().toString();
-                dadosServico.periodoApuracao = `${mesPad}${anoParaMes}`;
-            }
+        const anoParaMes = options.ano || new Date().getFullYear().toString();
+        if (nomeServico === 'DCTFWEB') {
+            dadosServico.mesPA = mesPad;
+        }
+        else if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico)) {
+            // Serpro exige formato YYYYMM
+            dadosServico.periodoApuracao = `${anoParaMes}${mesPad}`;
         }
     }
     // Exceções e Campos Específicos por Serviço
@@ -288,29 +287,47 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
         dadosServico.numeroRecibo = options.numeroRecibo;
     if (options.codigoReceita)
         dadosServico.codigoReceita = options.codigoReceita;
-    // Parcela para emissão (obrigatório para Emitir Parcelamento)
+    // Parcela para emissão — formato YYYYMM obrigatório (ex: "202601")
     if (['PARCELAMENTO_SN_EMITIR', 'PARCELAMENTO_MEI_EMITIR'].includes(nomeServico)) {
-        dadosServico.parcelaParaEmitir = options.parcelaParaEmitir || options.mes || '01';
+        if (options.parcelaParaEmitir) {
+            dadosServico.parcelaParaEmitir = options.parcelaParaEmitir;
+        }
+        else if (options.mes && options.ano) {
+            dadosServico.parcelaParaEmitir = `${options.ano}${options.mes.padStart(2, '0')}`;
+        }
+        else {
+            const now = new Date();
+            dadosServico.parcelaParaEmitir = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+        }
     }
     const contratanteCnpj = onlyDigits(process.env.CONTRATANTE_CNPJ || process.env.SERPRO_CNPJ_BASE || '51564549000140');
     const isParcelamentoConsulta = ['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico);
-    // SITFIS consulta por CPF do empresário (tipo 1). Se não fornecido, tenta usar CNPJ mesmo.
+    // Serviços que usam CPF do empresário como contribuinte
     const isSitfis = ['SIT_FISCAL_SOLICITAR', 'SIT_FISCAL_RELATORIO', 'CND'].includes(nomeServico);
+    const isProcuracao = nomeServico === 'PROCURACAO';
     const cpfNumero = options.cpf ? onlyDigits(options.cpf) : undefined;
-    const contribuinteNumero = (isSitfis && cpfNumero) ? cpfNumero : cnpjNumero;
-    const contribuinteTipo = (isSitfis && cpfNumero && cpfNumero.length === 11)
+    const contribuinteNumero = ((isSitfis || isProcuracao) && cpfNumero) ? cpfNumero : cnpjNumero;
+    const contribuinteTipo = ((isSitfis || isProcuracao) && cpfNumero && cpfNumero.length === 11)
         ? serpro_types_1.TipoContribuinte.CPF
         : serpro_types_1.TipoContribuinte.CNPJ;
     // Montar campo 'dados' por tipo de serviço
     let dadosField;
     if (nomeServico === 'SIT_FISCAL_SOLICITAR') {
-        dadosField = ''; // SOLICITARPROTOCOLO91: sem dados
+        dadosField = '';
     }
     else if (nomeServico === 'SIT_FISCAL_RELATORIO' || nomeServico === 'CND') {
-        // RELATORIOSITFIS92: exige protocoloRelatorio retornado pelo passo anterior
         if (!options.protocoloRelatorio)
             throw new Error('SIT_FISCAL_RELATORIO exige options.protocoloRelatorio');
         dadosField = JSON.stringify({ protocoloRelatorio: options.protocoloRelatorio });
+    }
+    else if (isProcuracao) {
+        // OBTERPROCURACAO41: outorgante = CNPJ da empresa cliente, outorgado = CNPJ do contador
+        dadosField = JSON.stringify({
+            outorgante: cnpjNumero,
+            tipoOutorgante: '2',
+            outorgado: contratanteCnpj,
+            tipoOutorgado: '2',
+        });
     }
     else if (isParcelamentoConsulta) {
         dadosField = '';

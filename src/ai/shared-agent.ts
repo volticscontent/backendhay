@@ -7,6 +7,7 @@ import {
 } from './server-tools';
 import { getDynamicContext } from './knowledge-base';
 import { agentLogger } from '../lib/logger';
+import redis from '../lib/redis';
 
 export interface SharedAgentContext {
     userData: string;
@@ -48,6 +49,20 @@ export async function prepareAgentContext(context: AgentContext): Promise<Shared
         [mediaList, dynamicContext] = await Promise.all([getAvailableMedia(), getDynamicContext()]);
     } catch (e) {
         agentLogger.warn("Error fetching media/context:", e);
+    }
+
+    // Inject proactive context sent by the frontend (e.g., "client attended meeting")
+    try {
+        const frontendCtxRaw = await redis.get(`bot_context:${context.userPhone}`);
+        if (frontendCtxRaw) {
+            const frontendCtx = JSON.parse(frontendCtxRaw);
+            const lines = Object.entries(frontendCtx)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('\n');
+            dynamicContext += `\n\n[CONTEXTO DO PAINEL ADMIN]\n${lines}`;
+        }
+    } catch (e) {
+        agentLogger.warn("Error loading frontend context from Redis:", e);
     }
 
     const attendantWarning = context.attendantRequestedReason

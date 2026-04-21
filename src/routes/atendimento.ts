@@ -44,31 +44,38 @@ router.get('/atendimento/chats', async (_req: Request, res: Response) => {
           ORDER BY m."messageTimestamp" DESC NULLS LAST LIMIT 300
         `, [instanceId]);
 
-        // Query 2: App DB (n_db_pg) — lead names/status keyed by phone
+        // Query 2: App DB (n_db_pg) — lead names/status keyed by normalized phone
         const phones = chatsQuery.rows
-          .map((c) => String(c.remoteJid || '').split('@')[0])
+          .map((c) => String(c.remoteJid || '').split('@')[0].replace(/\D/g, ''))
           .filter(Boolean);
 
+        // Build leadMap keyed by all normalized variants so format differences don't break lookup
         const leadMap = new Map<string, Record<string, unknown>>();
         if (phones.length > 0) {
-          const params = phones.map((_, i) => `$${i + 1}`).join(',');
           const { rows: leadRows } = await pool.query(
             `SELECT l.id, l.telefone, l.nome_completo, lv.status_atendimento, lv.data_reuniao
              FROM leads l LEFT JOIN leads_vendas lv ON lv.lead_id = l.id
-             WHERE l.telefone = ANY(ARRAY[${params}])`,
-            phones,
+             WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+                OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+                OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`,
+            [phones],
           ).catch(() => ({ rows: [] }));
-          for (const r of leadRows) leadMap.set(String(r.telefone), r);
+          for (const r of leadRows) {
+            const clean = String(r.telefone).replace(/\D/g, '');
+            leadMap.set(clean, r);
+            leadMap.set(`55${clean}`, r);
+            leadMap.set(clean.replace(/^55/, ''), r);
+          }
         }
 
         chatsArray = chatsQuery.rows.map((c) => {
-          const phone = String(c.remoteJid || '').split('@')[0];
-          // Try exact phone, then without country code, then with 55 prefix
-          const lead = leadMap.get(phone) || leadMap.get(phone.replace(/^55/, '')) || leadMap.get(`55${phone}`);
+          const phone = String(c.remoteJid || '').split('@')[0].replace(/\D/g, '');
+          const lead = leadMap.get(phone);
           return {
             ...c,
             leadName: (lead?.nome_completo as string) || (c.pushName as string) || null,
             leadId: lead?.id || null,
+            isRegistered: !!lead?.id,
             leadStatus: lead?.status_atendimento || null,
             leadDataReuniao: lead?.data_reuniao || null,
           };
@@ -81,14 +88,44 @@ router.get('/atendimento/chats', async (_req: Request, res: Response) => {
         evolutionFindContacts().catch(() => []),
       ]);
       const contactMap = new Map(contacts.map(c => [c.remoteJid, c]));
-      chatsArray = (Array.isArray(fallbackChats) ? fallbackChats as Array<Record<string, unknown>> : []).map(c => {
+      const rawChats = Array.isArray(fallbackChats) ? fallbackChats as Array<Record<string, unknown>> : [];
+
+      // Enrich with lead data so isRegistered is correct
+      const fallbackPhones = rawChats
+        .map((c) => String(c.remoteJid || c.id || '').split('@')[0].replace(/\D/g, ''))
+        .filter(Boolean);
+      const fallbackLeadMap = new Map<string, Record<string, unknown>>();
+      if (fallbackPhones.length > 0) {
+        const { rows: leadRows } = await pool.query(
+          `SELECT l.id, l.telefone, l.nome_completo, lv.status_atendimento, lv.data_reuniao
+           FROM leads l LEFT JOIN leads_vendas lv ON lv.lead_id = l.id
+           WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+              OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+              OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`,
+          [fallbackPhones],
+        ).catch(() => ({ rows: [] }));
+        for (const r of leadRows) {
+          const clean = String(r.telefone).replace(/\D/g, '');
+          fallbackLeadMap.set(clean, r);
+          fallbackLeadMap.set(`55${clean}`, r);
+          fallbackLeadMap.set(clean.replace(/^55/, ''), r);
+        }
+      }
+
+      chatsArray = rawChats.map(c => {
         const jid = String(c.remoteJid || c.id || '');
+        const phone = jid.split('@')[0].replace(/\D/g, '');
         const contact = contactMap.get(jid);
+        const lead = fallbackLeadMap.get(phone);
         return {
           ...c,
           pushName: contact?.pushName || (c.pushName as string) || null,
           profilePicUrl: contact?.profilePicUrl || (c.profilePicUrl as string) || null,
-          leadName: contact?.pushName || (c.pushName as string) || null,
+          leadName: (lead?.nome_completo as string) || contact?.pushName || (c.pushName as string) || null,
+          leadId: lead?.id || null,
+          isRegistered: !!lead?.id,
+          leadStatus: lead?.status_atendimento || null,
+          leadDataReuniao: lead?.data_reuniao || null,
         };
       });
     }
@@ -107,7 +144,7 @@ router.get('/atendimento/profile-pic', async (req: Request, res: Response) => {
   try {
     const url = await evolutionGetProfilePic(jid.split('@')[0]);
     const data = url as Record<string, unknown> | null;
-    res.json({ success: true, url: data?.profilePictureUrl || null });
+    res.json({ success: true, url: data?.profilePictureUrl || data?.pictureUrl || data?.url || null });
   } catch {
     res.json({ success: false, url: null });
   }

@@ -12,6 +12,11 @@ import settingsRoutes from './routes/settings';
 import colaboradoresRoutes from './routes/colaboradores';
 import integraEmpresasRoutes from './routes/integra/empresas';
 import integraRobosRoutes from './routes/integra/robos';
+import intregraDashboardRoutes from './routes/integra/dashboard';
+import integraGuiasRoutes from './routes/integra/guias';
+import intregraCaixaPostalRoutes from './routes/integra/caixa-postal';
+import intregraBillingRoutes from './routes/integra/billing';
+import botContextRoutes from './routes/bot-context';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { startDebounceWorker } from './queues/message-debounce';
 import { startPgmeiWorker } from './queues/integra/job-pgmei';
@@ -45,6 +50,11 @@ app.use('/api', settingsRoutes);
 app.use('/api', colaboradoresRoutes);
 app.use('/api', integraEmpresasRoutes);
 app.use('/api', integraRobosRoutes);
+app.use('/api', intregraDashboardRoutes);
+app.use('/api', integraGuiasRoutes);
+app.use('/api', intregraCaixaPostalRoutes);
+app.use('/api', intregraBillingRoutes);
+app.use('/api', botContextRoutes);
 
 // Root health check
 app.get('/', (_req, res) => {
@@ -63,6 +73,51 @@ app.get('/', (_req, res) => {
     });
 });
 
+async function runMigrations() {
+    // integra_precos — tabela de preços Serpro por robô (Fase 4 Billing)
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS integra_precos (
+            id            SERIAL PRIMARY KEY,
+            tipo_robo     VARCHAR(30) NOT NULL UNIQUE,
+            preco_unitario DECIMAL(10, 4) NOT NULL DEFAULT 0,
+            descricao     TEXT,
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        );
+        -- Seed preços padrão (estimativa — ajustar conforme contrato Serpro)
+        INSERT INTO integra_precos (tipo_robo, preco_unitario, descricao) VALUES
+            ('pgmei',        0.05, 'PGMEI — por empresa consultada'),
+            ('pgdas',        0.05, 'PGDAS — por empresa consultada'),
+            ('cnd',          0.10, 'CND — por empresa consultada'),
+            ('caixa_postal', 0.03, 'Caixa Postal — por empresa consultada')
+        ON CONFLICT (tipo_robo) DO NOTHING;
+
+        -- custo_estimado em integra_execucao_itens (caso não exista ainda)
+        ALTER TABLE integra_execucao_itens
+            ADD COLUMN IF NOT EXISTS custo_estimado DECIMAL(10, 4);
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS serpro_documentos (
+            id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            cnpj          VARCHAR(14)  NOT NULL,
+            tipo_servico  VARCHAR(50)  NOT NULL,
+            protocolo     VARCHAR(100),
+            r2_key        TEXT         NOT NULL,
+            r2_url        TEXT         NOT NULL,
+            tamanho_bytes INTEGER,
+            valido_ate    TIMESTAMPTZ,
+            gerado_por    VARCHAR(20)  NOT NULL DEFAULT 'admin',
+            lead_id       INTEGER      REFERENCES leads(id) ON DELETE SET NULL,
+            metadata      JSONB,
+            deletado_em   TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_cnpj   ON serpro_documentos(cnpj);
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_tipo   ON serpro_documentos(tipo_servico);
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_valido ON serpro_documentos(valido_ate) WHERE deletado_em IS NULL;
+    `);
+}
+
 // ==================== Inicialização ====================
 async function bootstrap() {
     bootLogger.info('='.repeat(50));
@@ -70,6 +125,11 @@ async function bootstrap() {
     bootLogger.info(`🔗 Ambiente: ${process.env.NODE_ENV || 'development'}`);
     bootLogger.info(`📝 Log Level: ${process.env.LOG_LEVEL || 'INFO'}`);
     bootLogger.info('='.repeat(50));
+
+    // 0. Migrations
+    bootLogger.info('Executando migrations...');
+    await runMigrations();
+    bootLogger.info('✅ Migrations aplicadas');
 
     // 1. Workers BullMQ
     bootLogger.info('Iniciando workers BullMQ...');

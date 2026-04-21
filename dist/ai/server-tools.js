@@ -151,81 +151,71 @@ async function updateUser(data) {
             return JSON.stringify({ status: 'not_found', message: 'Usuário não encontrado' });
         const leadId = resId.rows[0].id;
         let updatedData = {};
-        const tableMappings = {
-            leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
-            leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
-            leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
-            leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
-            leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'cliente'],
-            leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
+        const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
+        // Aliases de campos legados → nomes novos
+        const fieldAliases = {
+            servico_negociado: 'servico',
+            servico_escolhido: 'servico',
+            valor_divida_ativa: 'valor_divida_pgfn',
         };
-        for (const [tableName, validFields] of Object.entries(tableMappings)) {
-            const updateFields = [];
-            const values = [];
-            let i = 1;
-            if (tableName === 'leads') {
-                for (const field of validFields) {
-                    if (fields[field] !== undefined) {
-                        updateFields.push(`${field} = $${i}`);
-                        values.push(fields[field]);
-                        i++;
-                    }
-                }
-                if (updateFields.length > 0) {
-                    values.push(telefone);
-                    const updateRes = await (0, db_2.query)(`UPDATE leads SET ${updateFields.join(', ')}, atualizado_em = NOW() WHERE telefone = $${i} RETURNING *`, values);
-                    if (updateRes.rows.length > 0) {
-                        updatedData = { ...updatedData, ...updateRes.rows[0] };
-                    }
-                }
+        const normalizedFields = {};
+        for (const [k, v] of Object.entries(fields)) {
+            normalizedFields[fieldAliases[k] ?? k] = v;
+        }
+        const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
+            'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
+            'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
+            'tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual',
+            'valor_divida_federal', 'valor_divida_pgfn', 'tempo_divida', 'calculo_parcelamento'];
+        const processoFields = ['servico', 'status_atendimento', 'data_reuniao', 'procuracao',
+            'procuracao_ativa', 'procuracao_validade', 'cliente', 'atendente_id',
+            'envio_disparo', 'observacoes'];
+        // --- Update leads ---
+        const leadsSetClauses = [];
+        const leadsValues = [];
+        if (normalizedFields['senha_gov'] !== undefined) {
+            const idx = leadsValues.length + 1;
+            leadsSetClauses.push(`senha_gov_enc = CASE WHEN $${idx}::text IS NULL THEN senha_gov_enc ELSE pgp_sym_encrypt($${idx}::text, $${idx + 1}::text) END`);
+            leadsValues.push(normalizedFields['senha_gov'], cryptoKey);
+        }
+        for (const field of leadsFields) {
+            if (normalizedFields[field] !== undefined) {
+                leadsSetClauses.push(`${field} = $${leadsValues.length + 1}`);
+                leadsValues.push(normalizedFields[field]);
             }
-            else {
-                for (const field of validFields) {
-                    if (fields[field] !== undefined) {
-                        if (tableName === 'leads_atendimento' && field === 'observacoes') {
-                            updateFields.push(`${field} = CASE WHEN ${field} IS NULL OR ${field} = '' THEN $${i} ELSE ${field} || E'\\n' || $${i} END`);
-                        }
-                        else {
-                            updateFields.push(`${field} = $${i}`);
-                        }
-                        values.push(fields[field]);
-                        i++;
-                    }
+        }
+        if (leadsSetClauses.length > 0) {
+            leadsValues.push(telefone);
+            const updateRes = await (0, db_2.query)(`UPDATE leads SET ${leadsSetClauses.join(', ')}, atualizado_em = NOW() WHERE telefone = $${leadsValues.length} RETURNING *`, leadsValues);
+            if (updateRes.rows.length > 0)
+                updatedData = { ...updatedData, ...updateRes.rows[0] };
+        }
+        // --- Upsert leads_processo ---
+        const processoSetFields = [];
+        const processoVals = [leadId];
+        for (const field of processoFields) {
+            if (normalizedFields[field] !== undefined) {
+                if (field === 'observacoes') {
+                    processoSetFields.push(`${field} = CASE WHEN ${field} IS NULL OR ${field} = '' THEN $${processoVals.length + 1} ELSE ${field} || E'\\n' || $${processoVals.length + 1} END`);
                 }
-                if (tableName === 'leads_atendimento' && fields.situacao !== undefined) {
-                    updateFields.push(`data_controle_24h = NOW()`);
+                else {
+                    processoSetFields.push(`${field} = $${processoVals.length + 1}`);
                 }
-                if (updateFields.length > 0) {
-                    const check = await (0, db_2.query)(`SELECT id FROM ${tableName} WHERE lead_id = $1`, [leadId]);
-                    if (check.rows.length > 0) {
-                        values.push(leadId);
-                        await (0, db_2.query)(`UPDATE ${tableName} SET ${updateFields.join(', ')}, updated_at = NOW() WHERE lead_id = $${i}`, values);
-                        updatedData = { ...updatedData, ...fields };
-                    }
-                    else {
-                        const insertCols = ['lead_id'];
-                        const insertVals = [leadId];
-                        const insertPlaceholders = ['$1'];
-                        let paramIdx = 2;
-                        for (const field of validFields) {
-                            if (fields[field] !== undefined) {
-                                insertCols.push(field);
-                                insertVals.push(fields[field]);
-                                insertPlaceholders.push(`$${paramIdx}`);
-                                paramIdx++;
-                            }
-                        }
-                        if (tableName === 'leads_atendimento' && fields.situacao !== undefined) {
-                            insertCols.push('data_controle_24h');
-                            insertVals.push(new Date());
-                            insertPlaceholders.push(`$${paramIdx}`);
-                            paramIdx++;
-                        }
-                        await (0, db_2.query)(`INSERT INTO ${tableName} (${insertCols.join(', ')}) VALUES (${insertPlaceholders.join(', ')})`, insertVals);
-                        updatedData = { ...updatedData, ...fields };
-                    }
-                }
+                processoVals.push(normalizedFields[field]);
             }
+        }
+        if (normalizedFields['situacao'] !== undefined) {
+            processoSetFields.push(`data_controle_24h = NOW()`);
+        }
+        if (processoSetFields.length > 0) {
+            const insertCols = ['lead_id', ...processoFields.filter(f => normalizedFields[f] !== undefined)];
+            const insertVals = [leadId, ...processoFields.filter(f => normalizedFields[f] !== undefined).map(f => normalizedFields[f])];
+            const insertPlaceholders = insertVals.map((_, i) => `$${i + 1}`);
+            await (0, db_2.query)(`INSERT INTO leads_processo (${insertCols.join(', ')}) VALUES (${insertPlaceholders.join(', ')})
+                 ON CONFLICT (lead_id) DO UPDATE SET ${processoSetFields.join(', ')}, updated_at = NOW()`, insertVals);
+            updatedData = { ...updatedData, ...normalizedFields };
         }
         log.info(`[updateUser] Success: ${telefone}`);
         return JSON.stringify({ status: 'success', message: 'User updated', result: updatedData });
@@ -271,7 +261,7 @@ async function checkAvailability(dateStr) {
         const parsedDate = parseDateStr(dateStr);
         if (!parsedDate)
             return JSON.stringify({ available: false, message: 'Data inválida.' });
-        const res = await (0, db_2.query)(`SELECT l.nome_completo FROM leads l JOIN leads_vendas lv ON l.id = lv.lead_id WHERE lv.data_reuniao = $1`, [parsedDate]);
+        const res = await (0, db_2.query)(`SELECT l.nome_completo FROM leads l JOIN leads_processo lp ON l.id = lp.lead_id WHERE lp.data_reuniao = $1`, [parsedDate]);
         return JSON.stringify({ available: res.rows.length === 0, message: res.rows.length > 0 ? 'Horário indisponível.' : 'Horário disponível.' });
     }
     catch (error) {
@@ -285,11 +275,14 @@ async function scheduleMeeting(phone, dateStr) {
         if (userRes.rows.length === 0)
             return JSON.stringify({ status: 'error', message: 'Usuário não encontrado.' });
         const leadId = userRes.rows[0].id;
-        await (0, db_2.query)(`INSERT INTO leads_vendas (lead_id) VALUES ($1) ON CONFLICT (lead_id) DO NOTHING`, [leadId]);
         const parsedDate = parseDateStr(dateStr);
         if (!parsedDate)
             return JSON.stringify({ status: 'error', message: 'Data inválida.' });
-        await (0, db_2.query)(`UPDATE leads_vendas SET data_reuniao = $1 WHERE lead_id = $2`, [parsedDate, leadId]);
+        await (0, db_2.query)(`
+            INSERT INTO leads_processo (lead_id, data_reuniao)
+            VALUES ($1, $2)
+            ON CONFLICT (lead_id) DO UPDATE SET data_reuniao = $2, updated_at = NOW()
+        `, [leadId, parsedDate]);
         return JSON.stringify({ status: 'success', message: `Reunião agendada para ${dateStr}` });
     }
     catch (error) {
@@ -378,19 +371,17 @@ async function callAttendant(phone, reason = 'Solicitação do cliente') {
         const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
         // 1. Atualizar lead para sinalizar necessidade de humano
         await (0, db_2.query)(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
-        // 2. Tentar obter ID do lead para marcar na leads_vendas
+        // 2. Tentar obter ID do lead para marcar na leads_processo
         const leadRes = await (0, db_2.query)(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
         if (leadRes.rows.length > 0) {
             const leadId = leadRes.rows[0].id;
-            // Upsert na leads_vendas com tag 'atendimento'
             await (0, db_2.query)(`
-                INSERT INTO leads_vendas (lead_id, data_reuniao, status_atendimento, reuniao_agendada)
-                VALUES ($1, $2, 'atendimento', true)
+                INSERT INTO leads_processo (lead_id, data_reuniao, status_atendimento)
+                VALUES ($1, $2, 'atendimento')
                 ON CONFLICT (lead_id) DO UPDATE SET
-                    data_reuniao = EXCLUDED.data_reuniao,
+                    data_reuniao       = EXCLUDED.data_reuniao,
                     status_atendimento = 'atendimento',
-                    reuniao_agendada = true,
-                    updated_at = NOW()
+                    updated_at         = NOW()
             `, [leadId, scheduledDate]);
         }
         await redis_1.default.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
@@ -452,10 +443,10 @@ async function contextRetrieve(phone, limit = 30) {
 }
 async function searchServices(searchQuery) {
     try {
-        const res = await (0, db_2.query)('SELECT nome as name, descricao as description, price_info FROM services WHERE active = true AND nome ILIKE $1', [`%${searchQuery}%`]);
+        const res = await (0, db_2.query)(`SELECT id, name, value, description FROM services WHERE name ILIKE $1 ORDER BY name ASC`, [`%${searchQuery}%`]);
         if (res.rows.length > 0)
             return JSON.stringify(res.rows);
-        const all = await (0, db_2.query)('SELECT nome as name, descricao as description, price_info FROM services WHERE active = true');
+        const all = await (0, db_2.query)(`SELECT id, name, value, description FROM services ORDER BY name ASC`);
         return JSON.stringify(all.rows);
     }
     catch (error) {
@@ -600,10 +591,11 @@ async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS', options = {}) {
         log.info(`[checkCnpjSerpro] Solicitando serviço ${service} para CNPJ ${cnpj}...`);
         const result = await (0, serpro_1.consultarServico)(service, cnpj, options);
         (0, serpro_db_1.saveConsultation)(cnpj, service, result, 200).catch(err => log.error('[checkCnpjSerpro] Error saving:', err));
+        (0, serpro_db_1.maybeSavePdfFromBotResult)(cnpj, service, result, options.protocoloRelatorio).catch(err => log.error('[checkCnpjSerpro] Error saving PDF to R2:', err));
         // Se o status é 200, significa que temos conexão/procuração ativa.
         try {
             const cleanCnpj = cnpj.replace(/\D/g, '');
-            const resLead = await db_1.default.query("SELECT lead_id FROM leads_empresarial WHERE REGEXP_REPLACE(cnpj, '\\D', 'g') = $1 LIMIT 1", [cleanCnpj]);
+            const resLead = await db_1.default.query("SELECT id AS lead_id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1", [cleanCnpj]);
             if (resLead.rows.length > 0) {
                 await markProcuracaoCompleted(resLead.rows[0].lead_id);
                 log.info(`[checkCnpjSerpro] Status de procuração sincronizado para CNPJ ${cleanCnpj}`);
@@ -724,48 +716,63 @@ async function interpreter(phone, action, text, category = 'atendimento') {
     }
 }
 // ==================== Tracking ====================
+// Registra um recurso entregue no JSONB recursos_entregues de leads_processo
 async function trackResourceDelivery(leadId, resourceType, resourceKey, metadata) {
     try {
+        const entry = {
+            delivered_at: new Date().toISOString(),
+            status: 'delivered',
+            ...(metadata || {}),
+        };
         await (0, db_2.query)(`
-      INSERT INTO resource_tracking (lead_id, resource_type, resource_key, delivered_at, status, metadata)
-      VALUES ($1, $2, $3, NOW(), 'delivered', $4)
-    `, [leadId, resourceType, resourceKey, JSON.stringify(metadata || {})]);
+            INSERT INTO leads_processo (lead_id, recursos_entregues)
+            VALUES ($1, $2::jsonb)
+            ON CONFLICT (lead_id) DO UPDATE SET
+                recursos_entregues = leads_processo.recursos_entregues || $2::jsonb,
+                updated_at = NOW()
+        `, [leadId, JSON.stringify({ [`${resourceType}:${resourceKey}`]: entry })]);
     }
     catch (error) {
         log.error('trackResourceDelivery error:', error);
     }
 }
+// Verifica se a procuração foi confirmada via leads_processo (fonte única de verdade)
 async function checkProcuracaoStatus(leadId) {
     try {
         const result = await (0, db_2.query)(`
-      SELECT status FROM resource_tracking
-      WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
-      ORDER BY delivered_at DESC LIMIT 1
-    `, [leadId]);
-        return result.rows.length > 0 && result.rows[0].status === 'completed';
+            SELECT procuracao_ativa FROM leads_processo
+            WHERE lead_id = $1 AND procuracao_ativa = true
+            LIMIT 1
+        `, [leadId]);
+        return result.rows.length > 0;
     }
     catch (error) {
         log.error('checkProcuracaoStatus error:', error);
         return false;
     }
 }
+// Marca procuração como confirmada — única escrita, em leads_processo
 async function markProcuracaoCompleted(leadId) {
     try {
-        // 1. Atualiza no resource_tracking (histórico técnico)
+        const validoAte = new Date(Date.now() + 365 * 86_400_000).toISOString().split('T')[0];
+        const recursoEntry = {
+            'video-tutorial:video-tutorial-procuracao-ecac': {
+                delivered_at: new Date().toISOString(),
+                accessed_at: new Date().toISOString(),
+                status: 'completed',
+            },
+        };
         await (0, db_2.query)(`
-      UPDATE resource_tracking SET status = 'completed', accessed_at = NOW()
-      WHERE lead_id = $1 AND resource_type = 'video-tutorial' AND resource_key = 'video-tutorial-procuracao-ecac'
-    `, [leadId]);
-        // 2. Atualiza na leads_vendas (status oficial para o frontend)
-        await (0, db_2.query)(`
-            INSERT INTO leads_vendas (lead_id, procuracao, procuracao_ativa, updated_at)
-            VALUES ($1, true, true, NOW())
+            INSERT INTO leads_processo (lead_id, procuracao, procuracao_ativa, procuracao_validade, recursos_entregues)
+            VALUES ($1, true, true, $2, $3::jsonb)
             ON CONFLICT (lead_id) DO UPDATE SET
-                procuracao = true,
-                procuracao_ativa = true,
-                updated_at = NOW()
-        `, [leadId]);
-        log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO.`);
+                procuracao           = true,
+                procuracao_ativa     = true,
+                procuracao_validade  = $2,
+                recursos_entregues   = leads_processo.recursos_entregues || $3::jsonb,
+                updated_at           = NOW()
+        `, [leadId, validoAte, JSON.stringify(recursoEntry)]);
+        log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO (válida até ${validoAte}).`);
     }
     catch (error) {
         log.error('markProcuracaoCompleted error:', error);
@@ -816,15 +823,19 @@ async function sendMessageSegment(phone, segment) {
 }
 async function getUpdatableFields() {
     const tableMappings = {
-        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo'],
-        leads_empresarial: ['cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep', 'cartao_cnpj'],
-        leads_qualificacao: ['situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda', 'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao'],
-        leads_financeiro: ['tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual', 'valor_divida_federal', 'valor_divida_ativa', 'tempo_divida', 'calculo_parcelamento'],
-        leads_vendas: ['servico_negociado', 'status_atendimento', 'data_reuniao', 'procuracao', 'procuracao_ativa', 'procuracao_validade', 'servico_escolhido', 'reuniao_agendada', 'cliente'],
-        leads_atendimento: ['atendente_id', 'envio_disparo', 'observacoes']
+        leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
+            'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
+            'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
+            'tem_divida', 'tipo_divida', 'valor_divida_municipal', 'valor_divida_estadual',
+            'valor_divida_federal', 'valor_divida_pgfn', 'tempo_divida', 'calculo_parcelamento'],
+        leads_processo: ['servico', 'status_atendimento', 'data_reuniao', 'procuracao',
+            'procuracao_ativa', 'procuracao_validade', 'cliente', 'atendente_id',
+            'envio_disparo', 'observacoes'],
     };
     return JSON.stringify({
-        instrucoes: "Para atualizar os dados do cliente centralmente, chame update_user enviando os campos desejados na raiz do JSON (ex: { situacao: 'qualificado', email: 'x@y.com' }). Use a tabela abaixo para saber EXATAMENTE como os campos se chamam no banco.",
+        instrucoes: "Para atualizar os dados do cliente centralmente, chame update_user enviando os campos desejados na raiz do JSON (ex: { situacao: 'qualificado', email: 'x@y.com' }). Use a tabela abaixo para saber EXATAMENTE como os campos se chamam no banco. Aliases aceitos: servico_negociado/servico_escolhido → servico | valor_divida_ativa → valor_divida_pgfn.",
         tabelas_e_campos: tableMappings
     }, null, 2);
 }

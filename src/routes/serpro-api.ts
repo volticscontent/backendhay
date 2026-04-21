@@ -46,16 +46,26 @@ router.post('/serpro', async (req: Request, res: Response) => {
 });
 
 // GET /serpro/clients — last consulted clients
+// source=admin  → only consultations where CNPJ matches a registered lead, by admin
+// source=bot    → only consultations where CNPJ matches a registered lead, by bot
+// source=test   → consultations where CNPJ does NOT match any registered lead (test/orphan)
 router.get('/serpro/clients', async (req: Request, res: Response) => {
   const source = req.query.source as string | undefined;
-  const ALLOWED_SOURCES = new Set(['admin', 'bot']);
-  const safeSource = source && ALLOWED_SOURCES.has(source) ? source : null;
-  const sourceCondition = safeSource ? `WHERE source = $1` : '';
-  const queryParams = safeSource ? [safeSource] : [];
+  const NAMED_SOURCES = new Set(['admin', 'bot']);
+  const isTest = source === 'test';
+  const safeNamedSource = source && NAMED_SOURCES.has(source) ? source : null;
+
+  // Build the WHERE clause for the CTE
+  const cteWhere = safeNamedSource ? `WHERE source = $1` : '';
+  const queryParams: unknown[] = safeNamedSource ? [safeNamedSource] : [];
+
+  // For test tab: no source filter in CTE, but we filter afterwards for no lead match
+  // For admin/bot: filter by source and only return rows where lead matched
+  const leadFilter = isTest ? 'WHERE l.id IS NULL' : (safeNamedSource ? 'WHERE l.id IS NOT NULL' : '');
 
   const betterQuery = `
     WITH LatestConsultations AS (
-      SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro ${sourceCondition} GROUP BY cnpj
+      SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro ${cteWhere} GROUP BY cnpj
     )
     SELECT
       lc.cnpj AS raw_cnpj, lc.last_consultation_date AS created_at, c.resultado,
@@ -66,13 +76,14 @@ router.get('/serpro/clients', async (req: Request, res: Response) => {
     JOIN consultas_serpro c ON c.cnpj = lc.cnpj AND c.created_at = lc.last_consultation_date
     LEFT JOIN leads l ON LTRIM(REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g'), '0') = LTRIM(REGEXP_REPLACE(lc.cnpj, '[^0-9]', '', 'g'), '0')
     LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+    ${leadFilter}
     ORDER BY lc.last_consultation_date DESC LIMIT 20
   `;
 
   try {
     const result = await query(betterQuery, queryParams);
     const clients = result.rows.map((row) => {
-      let nome = row.nome_completo || 'Nome não disponível';
+      let nome = row.nome_completo || 'CNPJ sem cadastro';
       if (!row.nome_completo && row.resultado) {
         try {
           const resData = row.resultado as Record<string, unknown>;

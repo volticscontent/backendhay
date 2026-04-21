@@ -6,6 +6,15 @@ import { cronLogger } from '../lib/logger';
 import { isWithinBusinessHours } from '../lib/business-hours';
 import { normalizePhone } from '../lib/utils';
 import { evolutionGetConnectionState, evolutionConnectInstance } from '../lib/evolution';
+import { enqueueRoboPgmei } from '../queues/integra/job-pgmei';
+import { enqueueRoboCnd } from '../queues/integra/job-cnd';
+import { enqueueRoboCaixaPostal } from '../queues/integra/job-caixa-postal';
+
+const INTEGRA_ENQUEUE: Record<string, (id: number) => Promise<void>> = {
+    pgmei:        enqueueRoboPgmei,
+    cnd:          enqueueRoboCnd,
+    caixa_postal: enqueueRoboCaixaPostal,
+};
 
 /**
  * Registra todos os CRON jobs do sistema
@@ -213,6 +222,59 @@ export function registerCronJobs(): void {
             await redis.set('evolution:last_activity', Date.now().toString());
         } catch (error) {
             log.error('Erro no Keep-alive:', error);
+        }
+    });
+
+    // ============================
+    // 6. Integra Contador — Robôs agendados
+    //    Roda toda hora :00, verifica dia + hora na tabela integra_robos
+    // ============================
+    cron.schedule('0 * * * *', async () => {
+        const log = cronLogger.withTrace(`cron-integra-${Date.now().toString(36)}`);
+        const now = new Date();
+        const diaAtual = now.getDate();
+        const horaAtual = now.getHours();
+
+        try {
+            const robos = await pool.query(`
+                SELECT tipo_robo, hora_execucao
+                FROM integra_robos
+                WHERE ativo = true
+                  AND dia_execucao = $1
+            `, [diaAtual]);
+
+            for (const robo of robos.rows) {
+                const horaRobo = parseInt(String(robo.hora_execucao).split(':')[0], 10);
+                if (horaRobo !== horaAtual) continue;
+
+                const tipo = robo.tipo_robo as string;
+                const enqueue = INTEGRA_ENQUEUE[tipo];
+                if (!enqueue) {
+                    log.warn(`[Integra] Tipo desconhecido: ${tipo}`);
+                    continue;
+                }
+
+                const exec = await pool.query(
+                    `INSERT INTO integra_execucoes (robo_tipo, status)
+                     VALUES ($1, 'running') RETURNING id`,
+                    [tipo]
+                );
+                const execucaoId = exec.rows[0].id as number;
+                await enqueue(execucaoId);
+
+                await pool.query(
+                    `UPDATE integra_robos
+                     SET ultima_execucao = NOW(),
+                         proxima_execucao = NOW() + interval '1 month',
+                         updated_at = NOW()
+                     WHERE tipo_robo = $1`,
+                    [tipo]
+                );
+
+                log.info(`[Integra] Robô ${tipo} disparado — execução ${execucaoId}`);
+            }
+        } catch (err) {
+            log.error('[Integra] Erro ao checar robôs:', err);
         }
     });
 

@@ -21,16 +21,16 @@ async function resolveUserCnpjAndProcuracaoStatus(userData) {
     }
     let cnpj = userData.cnpj;
     if (!cnpj) {
-        const resEmp = await db_1.default.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [userData.id]);
-        if (resEmp.rows.length > 0)
-            cnpj = resEmp.rows[0].cnpj;
+        const resLead = await db_1.default.query('SELECT cnpj FROM leads WHERE id = $1 LIMIT 1', [userData.id]);
+        if (resLead.rows.length > 0)
+            cnpj = resLead.rows[0].cnpj;
     }
     if (!cnpj) {
         return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais.' };
     }
-    const salesRes = await db_1.default.query('SELECT procuracao, procuracao_ativa FROM leads_vendas WHERE lead_id = $1 LIMIT 1', [userData.id]);
-    const salesRow = salesRes.rows[0] || {};
-    const hasFormalProcuracao = Boolean(salesRow.procuracao) || Boolean(salesRow.procuracao_ativa);
+    const procRes = await db_1.default.query('SELECT procuracao, procuracao_ativa FROM leads_processo WHERE lead_id = $1 LIMIT 1', [userData.id]);
+    const procRow = procRes.rows[0] || {};
+    const hasFormalProcuracao = Boolean(procRow.procuracao) || Boolean(procRow.procuracao_ativa);
     const hasTrackedCompletion = await (0, server_tools_1.checkProcuracaoStatus)(userData.id);
     if (!hasFormalProcuracao && !hasTrackedCompletion) {
         return {
@@ -49,21 +49,51 @@ Se o cliente mencionar dívidas, pendências, boleto atrasado ou regularização
 3. Aguarde a resposta do cliente (Opção A - Procuração vs Opção B - Acesso Direto).
 4. Se Opção A (Procuração): Use 'enviar_processo_autonomo'.
 5. Após a conclusão da Procuração, use 'verificar_serpro_pos_ecac' IMEDIATAMENTE.
-   - Sucesso -> chame 'marcar_procuracao_concluida'.
+   - Sucesso -> chame 'marcar_procuracao_concluida' e em seguida 'consultar_pgmei_serpro'.
    - Falha -> peça print do e-CAC.
 
 - **MEI Excluído ou Desenquadrado:**
-  Ofereça duas opções claras: 
+  Ofereça duas opções claras:
   Opção 1 (Procuração): Regularizar agora e aguardar (valor menor, sem Gov).
   Opção 2 (Acesso Direto): Baixar atual e abrir novo (valor maior, exige Gov).
 
-### CONSULTAS SERPRO (PGMEI / SITFIS) - REGRAS ESTRITAS
-- **NÃO FAÇA** consultas ao Serpro (PGMEI, Dívida Ativa, Situação Fiscal) sem ANTES garantir que a Procuração foi assinada e confirmada via Serpro (com a tool verificar_procuracao_status ou fluxo explícito).
-- O uso desenfreado gasta recursos e expõe nossos IPs. 
-- Explicite ao cliente que: "Para consultarmos exatamente as pendências do seu MEI ou sua situação fiscal de forma segura, o primeiro passo é você nos enviar a Procuração (via Opção A)."
-- Somente DEPOIS disso, use 'consultar_divida_ativa_serpro' ou 'consultar_situacao_fiscal_serpro'.
+### CONSULTAS SERPRO — REGRAS ESTRITAS E CAMADAS
+- **NÃO FAÇA** nenhuma consulta Serpro sem Procuração confirmada (verificar_procuracao_status ou fluxo explícito).
+- **CAMADA 1 (padrão):** Use 'consultar_pgmei_serpro' — retorna PGMEI (débitos DAS) e PGFN (Dívida Ativa). Rápida, focada, sem custo excessivo.
+- **CAMADA 2 (somente se necessário):** Use 'consultar_divida_ativa_serpro' ou 'consultar_situacao_fiscal_serpro' para casos específicos onde a Camada 1 não foi suficiente ou o atendente humano solicitou varredura completa.
+- O uso desenfreado de consultas profundas gasta recursos e expõe nossos IPs. Prefira sempre a Camada 1.
+- Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
 `;
 const getRegularizacaoTools = (context) => [
+    {
+        name: 'consultar_pgmei_serpro',
+        description: 'Camada 1 de consulta Serpro: busca débitos PGMEI (DAS MEI) e Dívida Ativa PGFN simultaneamente. Use como primeira consulta após a Procuração confirmada. NÃO realiza varredura fiscal profunda (SITFIS/municipal/estadual).',
+        parameters: { type: 'object', properties: {} },
+        function: async () => {
+            try {
+                const ud = await (0, server_tools_1.getUser)(context.userPhone);
+                if (!ud)
+                    return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                const p = JSON.parse(ud);
+                if (p.status === 'error' || p.status === 'not_found')
+                    return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                if (!gate.ok || !gate.cnpj) {
+                    return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message || 'Procuração obrigatória para consulta Serpro.' });
+                }
+                const [pgmeiResult, pgfnResult] = await Promise.allSettled([
+                    (0, server_tools_1.checkCnpjSerpro)(gate.cnpj, 'PGMEI'),
+                    (0, server_tools_1.checkCnpjSerpro)(gate.cnpj, 'PGFN_CONSULTAR'),
+                ]);
+                const pgmei = pgmeiResult.status === 'fulfilled' ? JSON.parse(pgmeiResult.value) : { status: 'error', message: 'Falha ao consultar PGMEI' };
+                const pgfn = pgfnResult.status === 'fulfilled' ? JSON.parse(pgfnResult.value) : { status: 'error', message: 'Falha ao consultar PGFN' };
+                return JSON.stringify({ status: 'success', pgmei, pgfn });
+            }
+            catch (error) {
+                return JSON.stringify({ status: 'error', message: String(error) });
+            }
+        }
+    },
     {
         name: 'iniciar_fluxo_regularizacao', description: 'Inicia o fluxo de regularização fiscal aprimorado.', parameters: { type: 'object', properties: {} },
         function: async () => { try {
@@ -141,9 +171,9 @@ const getRegularizacaoTools = (context) => [
                     return JSON.stringify({ status: "error", message: "Usuário não encontrado" });
                 let cnpj = p.cnpj;
                 if (!cnpj && p.id) {
-                    const resEmp = await db_1.default.query('SELECT cnpj FROM leads_empresarial WHERE lead_id = $1 LIMIT 1', [p.id]);
-                    if (resEmp.rows.length > 0)
-                        cnpj = resEmp.rows[0].cnpj;
+                    const resLead = await db_1.default.query('SELECT cnpj FROM leads WHERE id = $1 LIMIT 1', [p.id]);
+                    if (resLead.rows.length > 0)
+                        cnpj = resLead.rows[0].cnpj;
                 }
                 if (!cnpj)
                     return JSON.stringify({ status: "error", message: "CNPJ não cadastrado. Peça o print." });

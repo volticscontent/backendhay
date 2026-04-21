@@ -47,27 +47,14 @@ router.get('/dashboard', async (_req, res) => {
     try {
         const result = await (0, db_1.query)(`
       SELECT
-        l.id,
-        l.nome_completo,
-        l.telefone,
-        l.email,
-        le.cnpj,
-        lf.calculo_parcelamento,
-        l.data_cadastro,
-        l.atualizado_em,
-        la.envio_disparo,
-        lq.situacao,
-        lq.qualificacao,
-        lq.interesse_ajuda,
-        lq.pos_qualificacao AS confirmacao_qualificacao,
-        (lv.data_reuniao IS NOT NULL) AS reuniao_agendada,
-        (lv.cliente IS TRUE) AS cliente
+        l.id, l.nome_completo, l.telefone, l.email, l.cnpj,
+        l.calculo_parcelamento, l.data_cadastro, l.atualizado_em,
+        lp.envio_disparo, l.situacao, l.qualificacao, l.interesse_ajuda,
+        l.pos_qualificacao AS confirmacao_qualificacao,
+        (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
+        (lp.cliente IS TRUE) AS cliente
       FROM leads l
-      LEFT JOIN leads_empresarial le ON l.id = le.lead_id
-      LEFT JOIN leads_qualificacao lq ON l.id = lq.lead_id
-      LEFT JOIN leads_financeiro lf ON l.id = lf.lead_id
-      LEFT JOIN leads_atendimento la ON l.id = la.lead_id
-      LEFT JOIN leads_vendas lv ON l.id = lv.lead_id
+      LEFT JOIN leads_processo lp ON l.id = lp.lead_id
       ORDER BY l.atualizado_em DESC
       LIMIT 500
     `);
@@ -135,23 +122,37 @@ router.post('/mei/submit', async (req, res) => {
             }
             await client.query('BEGIN');
             const extraData = { mei_form_data: { atividade_principal: form.atividade_principal, atividades_secundarias: form.atividades_secundarias, local_atividade: form.local_atividade, titulo_eleitor_ou_recibo_ir: form.titulo_eleitor_ou_recibo_ir } };
+            const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
             let leadId;
             if (resolvedId) {
-                await client.query(`UPDATE leads SET nome_completo=$1, cpf=$2, data_nascimento=$3, nome_mae=$4, email=$5, senha_gov=$6, atualizado_em=NOW() WHERE id=$7`, [form.nome_completo, form.cpf, form.data_nascimento, form.nome_mae, form.email, form.senha_gov, resolvedId]);
+                await client.query(`UPDATE leads SET
+             nome_completo=$1, cpf=$2, data_nascimento=$3, nome_mae=$4, email=$5,
+             senha_gov_enc = CASE WHEN $6::text IS NULL THEN senha_gov_enc ELSE pgp_sym_encrypt($6::text,$7::text) END,
+             nome_fantasia=$8, endereco=$9, numero=$10, complemento=$11,
+             bairro=$12, cidade=$13, estado=$14, cep=$15,
+             metadata = COALESCE(metadata,'{}') || $16::jsonb,
+             atualizado_em=NOW()
+           WHERE id=$17`, [form.nome_completo, form.cpf, form.data_nascimento, form.nome_mae, form.email,
+                    form.senha_gov || null, cryptoKey,
+                    form.nome_fantasia, form.endereco, form.numero, form.complemento ?? null,
+                    form.bairro, form.cidade, form.estado, form.cep,
+                    JSON.stringify(extraData), resolvedId]);
                 leadId = resolvedId;
-                const empCheck = await client.query('SELECT id, dados_serpro FROM leads_empresarial WHERE lead_id=$1', [leadId]);
-                if (empCheck.rows.length > 0) {
-                    const newDados = { ...((empCheck.rows[0].dados_serpro) || {}), ...extraData };
-                    await client.query(`UPDATE leads_empresarial SET nome_fantasia=$1,endereco=$2,numero=$3,complemento=$4,bairro=$5,cidade=$6,estado=$7,cep=$8,dados_serpro=$9,updated_at=NOW() WHERE lead_id=$10`, [form.nome_fantasia, form.endereco, form.numero, form.complemento ?? null, form.bairro, form.cidade, form.estado, form.cep, JSON.stringify(newDados), leadId]);
-                }
-                else {
-                    await client.query(`INSERT INTO leads_empresarial (lead_id,nome_fantasia,endereco,numero,complemento,bairro,cidade,estado,cep,dados_serpro) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [leadId, form.nome_fantasia, form.endereco, form.numero, form.complemento ?? null, form.bairro, form.cidade, form.estado, form.cep, JSON.stringify(extraData)]);
-                }
             }
             else {
-                const ins = await client.query(`INSERT INTO leads (nome_completo,cpf,data_nascimento,nome_mae,email,senha_gov,telefone,data_cadastro) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW()) RETURNING id`, [form.nome_completo, form.cpf, form.data_nascimento, form.nome_mae, form.email, form.senha_gov, form.telefone]);
+                const ins = await client.query(`INSERT INTO leads
+             (nome_completo,cpf,data_nascimento,nome_mae,email,
+              senha_gov_enc,nome_fantasia,endereco,numero,complemento,
+              bairro,cidade,estado,cep,metadata,telefone,data_cadastro)
+           VALUES ($1,$2,$3,$4,$5,
+                   CASE WHEN $6::text IS NULL THEN NULL ELSE pgp_sym_encrypt($6::text,$7::text) END,
+                   $8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,NOW())
+           RETURNING id`, [form.nome_completo, form.cpf, form.data_nascimento, form.nome_mae, form.email,
+                    form.senha_gov || null, cryptoKey,
+                    form.nome_fantasia, form.endereco, form.numero, form.complemento ?? null,
+                    form.bairro, form.cidade, form.estado, form.cep,
+                    JSON.stringify(extraData), form.telefone]);
                 leadId = ins.rows[0].id;
-                await client.query(`INSERT INTO leads_empresarial (lead_id,nome_fantasia,endereco,numero,complemento,bairro,cidade,estado,cep,dados_serpro) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [leadId, form.nome_fantasia, form.endereco, form.numero, form.complemento ?? null, form.bairro, form.cidade, form.estado, form.cep, JSON.stringify(extraData)]);
             }
             await client.query('COMMIT');
             return leadId;
@@ -168,13 +169,17 @@ router.post('/ecac/submit', async (req, res) => {
     const { nome_completo, telefone, email, senha_gov } = req.body?.form || {};
     if (!telefone)
         return void res.status(400).json({ error: 'telefone é obrigatório' });
+    const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
     try {
         const check = await (0, db_1.query)('SELECT id FROM leads WHERE telefone = $1', [telefone]);
         if (check.rows.length > 0) {
-            await (0, db_1.query)(`UPDATE leads SET nome_completo=$1, email=$2, senha_gov=$3, atualizado_em=NOW() WHERE telefone=$4`, [nome_completo, email, senha_gov, telefone]);
+            await (0, db_1.query)(`UPDATE leads SET nome_completo=$1, email=$2,
+         senha_gov_enc = CASE WHEN $3::text IS NULL THEN senha_gov_enc ELSE pgp_sym_encrypt($3::text,$4::text) END,
+         atualizado_em=NOW() WHERE telefone=$5`, [nome_completo, email, senha_gov || null, cryptoKey, telefone]);
         }
         else {
-            await (0, db_1.query)(`INSERT INTO leads (nome_completo, telefone, email, senha_gov, data_cadastro) VALUES ($1,$2,$3,$4,NOW())`, [nome_completo, telefone, email, senha_gov]);
+            await (0, db_1.query)(`INSERT INTO leads (nome_completo, telefone, email, senha_gov_enc, data_cadastro)
+         VALUES ($1,$2,$3, CASE WHEN $4::text IS NULL THEN NULL ELSE pgp_sym_encrypt($4::text,$5::text) END, NOW())`, [nome_completo, telefone, email, senha_gov || null, cryptoKey]);
         }
         res.json({ success: true });
     }
@@ -235,7 +240,7 @@ router.post('/whatsapp/sync-contacts', async (req, res) => {
                 const existing = await (0, db_1.query)('SELECT id, nome_completo FROM leads WHERE telefone = $1', [phone]);
                 if (existing.rows.length === 0) {
                     await (0, db_1.query)(`INSERT INTO leads (telefone, nome_completo, data_cadastro, atualizado_em) VALUES ($1,$2,NOW(),NOW())`, [phone, pushName || 'Desconhecido']);
-                    await (0, db_1.query)(`INSERT INTO leads_qualificacao (lead_id, situacao) SELECT id, 'aguardando_qualificação' FROM leads WHERE telefone=$1 ON CONFLICT (lead_id) DO NOTHING`, [phone]);
+                    await (0, db_1.query)(`UPDATE leads SET situacao = 'aguardando_qualificacao', atualizado_em = NOW() WHERE telefone = $1`, [phone]);
                     created++;
                 }
                 else {

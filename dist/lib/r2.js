@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.listFilesFromR2 = listFilesFromR2;
 exports.uploadFileToR2 = uploadFileToR2;
+exports.getPresignedDownloadUrl = getPresignedDownloadUrl;
 exports.getPresignedUploadUrl = getPresignedUploadUrl;
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
@@ -65,6 +66,17 @@ async function uploadFileToR2(fileBuffer, fileName, contentType) {
         ? `${R2_PUBLIC_URL.replace(/\/$/, '')}/${fileName}`
         : `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET_NAME}/${fileName}`;
     return publicUrl;
+}
+async function getPresignedDownloadUrl(key, expiresIn = 900) {
+    if (!R2_BUCKET_NAME)
+        throw new Error('R2_BUCKET_NAME não configurado');
+    const command = new client_s3_1.GetObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: key,
+        ResponseContentDisposition: 'inline',
+        ResponseContentType: 'application/pdf',
+    });
+    return (0, s3_request_presigner_1.getSignedUrl)(r2, command, { expiresIn });
 }
 async function getPresignedUploadUrl(fileName, contentType) {
     if (!R2_BUCKET_NAME)

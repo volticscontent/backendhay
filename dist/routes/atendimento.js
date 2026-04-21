@@ -92,25 +92,25 @@ router.get('/atendimento/profile-pic', async (req, res) => {
 router.get('/atendimento/lead/:phone', async (req, res) => {
     const cleanPhone = String(req.params.phone).replace(/\D/g, '');
     try {
+        const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
         const baseQuery = `
-      SELECT l.*, le.razao_social, le.cnpj, le.cartao_cnpj, le.tipo_negocio, le.faturamento_mensal,
-        le.endereco, le.numero, le.complemento, le.bairro, le.cidade, le.estado, le.cep, le.dados_serpro,
-        la.observacoes, la.data_controle_24h, la.envio_disparo, la.data_ultima_consulta, la.atendente_id,
-        lf.calculo_parcelamento, lf.valor_divida_ativa, lf.valor_divida_municipal, lf.valor_divida_estadual,
-        lf.valor_divida_federal, lf.tipo_divida, lf.tem_divida, lf.tempo_divida,
-        lq.situacao, lq.qualificacao, lq.motivo_qualificacao, lq.interesse_ajuda, lq.pos_qualificacao, lq.possui_socio,
-        lv.servico_negociado, lv.status_atendimento, lv.data_reuniao, lv.procuracao, lv.procuracao_ativa, lv.procuracao_validade
+      SELECT l.*,
+        CASE WHEN l.senha_gov_enc IS NULL THEN NULL
+             ELSE pgp_sym_decrypt(l.senha_gov_enc::bytea, $2::text)
+        END AS senha_gov,
+        l.valor_divida_pgfn AS valor_divida_ativa,
+        lp.servico, lp.servico AS servico_negociado, lp.servico AS servico_escolhido, lp.status_atendimento, lp.data_reuniao,
+        (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
+        lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade,
+        lp.observacoes, lp.data_controle_24h, lp.envio_disparo, lp.atendente_id,
+        lp.data_followup, lp.recursos_entregues
       FROM leads l
-      LEFT JOIN leads_empresarial le ON l.id = le.lead_id
-      LEFT JOIN leads_qualificacao lq ON l.id = lq.lead_id
-      LEFT JOIN leads_financeiro lf ON l.id = lf.lead_id
-      LEFT JOIN leads_vendas lv ON l.id = lv.lead_id
-      LEFT JOIN leads_atendimento la ON l.id = la.lead_id
+      LEFT JOIN leads_processo lp ON l.id = lp.lead_id
     `;
-        let result = await (0, db_1.query)(`${baseQuery} WHERE l.telefone = $1`, [cleanPhone]);
+        let result = await (0, db_1.query)(`${baseQuery} WHERE l.telefone = $1`, [cleanPhone, cryptoKey]);
         if (result.rows.length === 0) {
             const phoneVariations = [cleanPhone, cleanPhone.replace(/^55/, ''), `55${cleanPhone}`].filter(Boolean);
-            result = await (0, db_1.query)(`${baseQuery} WHERE l.telefone = ANY($1) LIMIT 1`, [phoneVariations]);
+            result = await (0, db_1.query)(`${baseQuery} WHERE l.telefone = ANY($1) LIMIT 1`, [phoneVariations, cryptoKey]);
         }
         if (result.rows.length === 0)
             return void res.status(404).json({ success: false, error: 'Lead não encontrado' });
@@ -121,7 +121,6 @@ router.get('/atendimento/lead/:phone', async (req, res) => {
             data_cadastro: toIso(lead.data_cadastro),
             atualizado_em: toIso(lead.atualizado_em),
             data_controle_24h: toIso(lead.data_controle_24h),
-            data_ultima_consulta: toIso(lead.data_ultima_consulta),
             data_reuniao: toIso(lead.data_reuniao),
             procuracao_validade: toIso(lead.procuracao_validade),
         };
@@ -273,12 +272,12 @@ router.get('/atendimento/leads/search', async (req, res) => {
     const searchTerm = `%${term}%`;
     const cleanTerm = term.replace(/\D/g, '');
     try {
-        let sql = `SELECT l.id, l.nome_completo, l.telefone, le.cnpj, le.razao_social, le.nome_fantasia
-               FROM leads l LEFT JOIN leads_empresarial le ON l.id = le.lead_id
-               WHERE l.nome_completo ILIKE $1 OR le.razao_social ILIKE $1 OR le.nome_fantasia ILIKE $1`;
+        let sql = `SELECT l.id, l.nome_completo, l.telefone, l.cnpj, l.razao_social, l.nome_fantasia
+               FROM leads l
+               WHERE l.nome_completo ILIKE $1 OR l.razao_social ILIKE $1 OR l.nome_fantasia ILIKE $1`;
         const params = [searchTerm];
         if (cleanTerm.length > 0) {
-            sql += ` OR l.telefone LIKE $2 OR le.cnpj LIKE $2`;
+            sql += ` OR l.telefone LIKE $2 OR l.cnpj LIKE $2`;
             params.push(`%${cleanTerm}%`);
         }
         sql += ` LIMIT 20`;

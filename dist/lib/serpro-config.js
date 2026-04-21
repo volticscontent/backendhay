@@ -55,8 +55,6 @@ exports.SERVICE_CONFIG = {
         env_sistema: 'INTEGRA_SITFIS_ID_SISTEMA',
         env_servico: 'INTEGRA_SITFIS_PROTOCOLO_ID_SERVICO',
         default_sistema: 'SITFIS',
-        // IDs v9.x podem estar descontinuados. Confirmar no portal Serpro e sobrescrever
-        // via env INTEGRA_SITFIS_PROTOCOLO_ID_SERVICO se necessário.
         default_servico: 'SOLICITARPROTOCOLO91',
         versaoSistema: '2.0',
         tipo: 'Apoiar',
@@ -66,8 +64,6 @@ exports.SERVICE_CONFIG = {
         env_sistema: 'INTEGRA_SITFIS_ID_SISTEMA',
         env_servico: 'INTEGRA_SITFIS_RELATORIO_ID_SERVICO',
         default_sistema: 'SITFIS',
-        // IDs v9.x podem estar descontinuados. Confirmar no portal Serpro e sobrescrever
-        // via env INTEGRA_SITFIS_RELATORIO_ID_SERVICO se necessário.
         default_servico: 'RELATORIOSITFIS92',
         versaoSistema: '2.0',
         tipo: 'Emitir',
@@ -152,6 +148,7 @@ exports.SERVICE_CONFIG = {
         env_servico: 'INTEGRA_PROCESSOS_ID_SERVICO',
         default_sistema: 'EPROCESSO',
         default_servico: 'CONSPROCPORINTER271',
+        versaoSistema: '2.0',
         tipo: 'Consultar',
         descricao: 'Consulta de Processos Administrativos.',
     },
@@ -168,14 +165,15 @@ exports.SERVICE_CONFIG = {
         env_servico: 'INTEGRA_PAGAMENTO_ID_SERVICO',
         default_sistema: 'PAGTOWEB',
         default_servico: 'COMPARRECADACAO72',
-        tipo: 'Consultar',
-        descricao: 'Consulta de Comprovantes de Arrecadação.',
+        tipo: 'Emitir',
+        descricao: 'Emissão de Comprovante de Arrecadação.',
     },
     PROCURACAO: {
         env_sistema: 'INTEGRA_PROCURACAO_ID_SISTEMA',
         env_servico: 'INTEGRA_PROCURACAO_ID_SERVICO',
         default_sistema: 'PROCURACOES',
         default_servico: 'OBTERPROCURACAO41',
+        versaoSistema: '1',
         tipo: 'Consultar',
         descricao: 'Consulta de Procurações Eletrônicas.',
     },
@@ -187,21 +185,7 @@ exports.SERVICE_CONFIG = {
         tipo: 'Consultar',
         descricao: 'Consulta de débitos em Dívida Ativa da União (MEI). Para geral, use SITFIS.',
     },
-    PGFN_PAEX: {
-        env_sistema: 'INTEGRA_PGFN_PAEX_ID_SISTEMA',
-        env_servico: 'INTEGRA_PGFN_PAEX_ID_SERVICO',
-        default_sistema: 'PARC-PAEX',
-        default_servico: 'OBTEREXTRATOPARC245',
-        tipo: 'Consultar',
-        descricao: 'Parcelamento Excepcional PGFN (PAEX).',
-    },
-    PGFN_SIPADE: {
-        env_sistema: 'INTEGRA_PGFN_SIPADE_ID_SISTEMA',
-        env_servico: 'INTEGRA_PGFN_SIPADE_ID_SERVICO',
-        default_sistema: 'PARC-SIPADE',
-        default_servico: 'OBTEREXTRATOPARC251',
-        tipo: 'Consultar',
-        descricao: 'Sistema de Parcelamento de Débitos PGFN (SIPADE).',
-    },
+    // PGFN_PAEX e PGFN_SIPADE removidos: sistemas em prospecção no catálogo Serpro (IDs não publicados).
+    // PAEX encerrou adesões em 2006; SIPADE é legado PGFN. Irrelevantes para perfil MEI.
 };
 //# sourceMappingURL=serpro-config.js.map
