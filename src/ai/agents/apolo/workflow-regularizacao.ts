@@ -62,6 +62,17 @@ Se o cliente mencionar dívidas, pendências, boleto atrasado ou regularização
    - Sucesso -> chame 'marcar_procuracao_concluida' e em seguida 'consultar_pgmei_serpro'.
    - Falha -> peça print do e-CAC.
 
+### COLETA INTELIGENTE DE DADOS DA EMPRESA E CADASTRO (MANDATÓRIO)
+Sempre que um lead entrar no fluxo de Regularização, Contabilidade ou iniciar o processo de Procuração, VOCÊ DEVE OBRIGATORIAMENTE coletar os dados da empresa.
+1. Antes de se despedir ou se o cliente estiver travado esperando algo, pergunte natural e gradualmente:
+   - "Aproveitando, qual é o seu CNPJ?"
+   - "Qual o nome (Razão Social) da sua empresa?"
+   - "A empresa está no Simples Nacional ou MEI?"
+   - "Vocês já possuem Certificado Digital A1 ativo?"
+2. Não vomite todas as perguntas em um único balão gigante. Faça isso de forma conversacional e amigável, misturando com as explicações da Procuração.
+3. Isso é crucial porque um sistema invisível irá extrair essas informações do seu chat com o cliente para preencher a ficha cadastral no Integra Contador. Nada de prosseguir assumindo que os dados não importam.
+
+
 - **MEI Excluído ou Desenquadrado:**
   Ofereça duas opções claras:
   Opção 1 (Procuração): Regularizar agora e aguardar (valor menor, sem Gov).
@@ -194,7 +205,22 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     return JSON.stringify({ status: "error", error_type: "procuracao_obrigatoria", message: gate.message || "Procuração obrigatória para consulta Serpro." });
                 }
 
-                const result = await checkCnpjSerpro(gate.cnpj, 'SIT_FISCAL');
+                // Passo 1: solicitar protocolo SITFIS
+                const solicitacaoRaw = await checkCnpjSerpro(gate.cnpj, 'SIT_FISCAL_SOLICITAR');
+                const solicitacao = JSON.parse(solicitacaoRaw) as Record<string, unknown>;
+                if (solicitacao.status === 'error') return solicitacaoRaw;
+
+                const protocolo = (
+                    solicitacao.nrProtocolo ?? solicitacao.protocolo ?? solicitacao.numProtocolo ??
+                    (typeof solicitacao.dados === 'string' ? (() => { try { const d = JSON.parse(solicitacao.dados as string) as Record<string, unknown>; return d.nrProtocolo ?? d.protocolo; } catch { return undefined; } })() : undefined)
+                ) as string | undefined;
+
+                if (!protocolo) {
+                    return JSON.stringify({ status: 'error', message: 'Protocolo SITFIS não retornado. Tente novamente em instantes.' });
+                }
+
+                // Passo 2: emitir relatório de situação fiscal
+                const result = await checkCnpjSerpro(gate.cnpj, 'SIT_FISCAL_RELATORIO', { protocoloRelatorio: protocolo });
                 return result;
             } catch (error) {
                 return JSON.stringify({ status: "error", message: String(error) });

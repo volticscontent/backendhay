@@ -12,88 +12,206 @@ const PRESETS: Record<string, string[]> = {
 
 // GET /integra/empresas
 router.get('/integra/empresas', async (_req: Request, res: Response) => {
-    const result = await query(
-        `SELECT id, cnpj, razao_social, regime_tributario, ativo,
-                servicos_habilitados, lead_id, certificado_validade, observacoes,
-                created_at, updated_at
-         FROM integra_empresas
-         ORDER BY razao_social ASC`
-    );
-    res.json(result.rows);
+    try {
+        const result = await query(
+            `SELECT id, cnpj, razao_social, regime_tributario, ativo,
+                    servicos_habilitados, lead_id, certificado_validade, observacoes,
+                    created_at, updated_at
+             FROM integra_empresas
+             ORDER BY razao_social ASC`
+        );
+        res.json(result.rows);
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
+    }
 });
 
 // GET /integra/empresas/:id
 router.get('/integra/empresas/:id', async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const result = await query(
-        `SELECT * FROM integra_empresas WHERE id = $1`,
-        [id]
-    );
-    if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
-    res.json(result.rows[0]);
+    try {
+        const { id } = req.params;
+        const result = await query(`SELECT * FROM integra_empresas WHERE id = $1`, [id]);
+        if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
+        res.json(result.rows[0]);
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
+    }
 });
 
 // POST /integra/empresas
 router.post('/integra/empresas', async (req: Request, res: Response) => {
-    const { cnpj, razao_social, regime_tributario = 'mei', ativo = true,
-            servicos_habilitados, lead_id, certificado_validade, observacoes } = req.body as {
-        cnpj: string; razao_social: string; regime_tributario?: string;
-        ativo?: boolean; servicos_habilitados?: string[];
-        lead_id?: number; certificado_validade?: string; observacoes?: string;
-    };
+    try {
+        const { cnpj, razao_social, regime_tributario = 'mei', ativo = true,
+                servicos_habilitados, lead_id, certificado_validade, observacoes } = req.body as {
+            cnpj: string; razao_social: string; regime_tributario?: string;
+            ativo?: boolean; servicos_habilitados?: string[];
+            lead_id?: number; certificado_validade?: string; observacoes?: string;
+        };
 
-    if (!cnpj || !razao_social) {
-        return void res.status(400).json({ error: 'cnpj e razao_social são obrigatórios' });
+        if (!cnpj || !razao_social) {
+            return void res.status(400).json({ error: 'cnpj e razao_social são obrigatórios' });
+        }
+
+        const servicos = servicos_habilitados ?? PRESETS[regime_tributario] ?? PRESETS.mei;
+
+        const result = await query(
+            `INSERT INTO integra_empresas
+               (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados, lead_id, certificado_validade, observacoes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [cnpj, razao_social, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
     }
-
-    const servicos = servicos_habilitados ?? PRESETS[regime_tributario] ?? PRESETS.mei;
-
-    const result = await query(
-        `INSERT INTO integra_empresas
-           (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados, lead_id, certificado_validade, observacoes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *`,
-        [cnpj, razao_social, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
-    );
-    res.status(201).json(result.rows[0]);
 });
 
 // PATCH /integra/empresas/:id
 router.patch('/integra/empresas/:id', async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const fields = req.body as Record<string, unknown>;
+    try {
+        const { id } = req.params;
+        const fields = req.body as Record<string, unknown>;
 
-    const allowed = ['razao_social', 'regime_tributario', 'ativo', 'servicos_habilitados',
-                     'lead_id', 'certificado_validade', 'observacoes'];
-    const updates: string[] = [];
-    const values: unknown[] = [];
+        const allowed = ['razao_social', 'regime_tributario', 'ativo', 'servicos_habilitados',
+                         'lead_id', 'certificado_validade', 'observacoes'];
+        const updates: string[] = [];
+        const values: unknown[] = [];
 
-    for (const key of allowed) {
-        if (key in fields) {
-            values.push(key === 'servicos_habilitados' ? JSON.stringify(fields[key]) : fields[key]);
-            updates.push(`${key} = $${values.length}`);
+        for (const key of allowed) {
+            if (key in fields) {
+                values.push(key === 'servicos_habilitados' ? JSON.stringify(fields[key]) : fields[key]);
+                updates.push(`${key} = $${values.length}`);
+            }
         }
+
+        if (updates.length === 0) return void res.status(400).json({ error: 'Nenhum campo válido para atualizar' });
+
+        values.push(id);
+        const result = await query(
+            `UPDATE integra_empresas SET ${updates.join(', ')}, updated_at = NOW()
+             WHERE id = $${values.length} RETURNING *`,
+            values
+        );
+
+        if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
+        res.json(result.rows[0]);
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
     }
-
-    if (updates.length === 0) return void res.status(400).json({ error: 'Nenhum campo válido para atualizar' });
-
-    values.push(id);
-    const result = await query(
-        `UPDATE integra_empresas SET ${updates.join(', ')}, updated_at = NOW()
-         WHERE id = $${values.length} RETURNING *`,
-        values
-    );
-
-    if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
-    res.json(result.rows[0]);
 });
 
 // DELETE /integra/empresas/:id
 router.delete('/integra/empresas/:id', async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const result = await query(`DELETE FROM integra_empresas WHERE id = $1 RETURNING id`, [id]);
-    if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
-    res.json({ deleted: true });
+    try {
+        const { id } = req.params;
+        const result = await query(`DELETE FROM integra_empresas WHERE id = $1 RETURNING id`, [id]);
+        if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
+        res.json({ deleted: true });
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
+    }
+});
+
+// GET /integra/leads-para-importar — leads com CNPJ que ainda não estão em integra_empresas
+router.get('/integra/leads-para-importar', async (_req: Request, res: Response) => {
+    try {
+        const result = await query(`
+            SELECT
+                l.id,
+                l.nome_completo,
+                REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS cnpj,
+                l.email,
+                l.telefone,
+                COALESCE(lp.procuracao_ativa, false) AS procuracao_ativa
+            FROM leads l
+            LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+            WHERE l.cnpj IS NOT NULL AND l.cnpj != ''
+              AND REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') NOT IN (
+                  SELECT cnpj FROM integra_empresas
+              )
+            ORDER BY COALESCE(lp.procuracao_ativa, false) DESC, l.nome_completo ASC
+            LIMIT 200
+        `);
+        res.json(result.rows);
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
+    }
+});
+
+// === ROTA TEMPORÁRIA E2E ===
+// GET /integra/test-run — Executa a rotina de Geração MANUAL para a empresa MOCK de teste
+router.get('/integra/test-run', async (req: Request, res: Response) => {
+    try {
+        const empresa = await query(`SELECT id FROM integra_empresas WHERE cnpj = '00000000000191' AND ativo = true`);
+        if (!empresa.rows.length) return void res.status(404).json({ error: 'Empresa Mock E2E não encontrada' });
+        
+        const empresaId = empresa.rows[0].id as number;
+        
+        const exec = await query(
+            `INSERT INTO integra_execucoes (robo_tipo, status) VALUES ('pgmei', 'running') RETURNING id`
+        );
+        const execucaoId = exec.rows[0].id as number;
+        
+        // Dynamic import workaround to avoid circular/unresolved deps if any
+        const job = await import('../../queues/integra/job-pgmei');
+        await job.enqueueRoboPgmei(execucaoId, empresaId);
+        
+        res.status(202).json({ 
+            message: '🚀 Teste End-to-End Iniciado. O Job PGMEI foi enfileirado para o MOCK!', 
+            execucao_id: execucaoId, 
+            empresa_id: empresaId 
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message ?? 'Erro interno' });
+    }
+});
+
+// GET /integra/analyze-chat/:phone — Analisa histórico de mensagens e preenche pré-form de empresa
+import { getChatHistory } from '../../lib/chat-history';
+import OpenAI from 'openai';
+router.get('/integra/analyze-chat/:phone', async (req: Request, res: Response) => {
+    try {
+        const { phone } = req.params;
+        const history = await getChatHistory(phone, 30); // Ultimas 30 interações para contexto
+        
+        if (!history || history.length === 0) {
+            return void res.status(404).json({ error: 'Nenhum histórico encontrado para este número.' });
+        }
+
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'dummy-key' });
+        
+        const systemPrompt = `Você é um Analista Fiscal especializado na plataforma Integra Contador.
+        Seu objetivo é ler o histórico da conversa entre o cliente e o bot (Apolo) e extrair os dados da empresa.
+        Devolva RIGOROSAMENTE um JSON com as seguintes chaves (use null se a informação não estiver presente na conversa):
+        - cnpj: string (somente números)
+        - razao_social: string (nome da empresa, se mencionado)
+        - regime_tributario: string ("mei", "simples", "presumido" ou "real")
+        - certificado_validade: string (formato YYYY-MM-DD se o usuário disse que possui certificado A1 e enviou a data, senao null)
+        - servicos_habilitados: array de strings (quais os escopos fiscais deveríamos habilitar se basear em pedido do cliente ex: ["PGMEI", "CND"] ou deixe null pro sistema decidir)`;
+
+        const completion = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: 'Histórico:\n' + history.map(h => `${h.role}: ${h.content}`).join('\n') }
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.1
+        });
+
+        const jsonStr = completion.choices[0].message.content || '{}';
+        const parsedData = JSON.parse(jsonStr);
+
+        res.json({
+            status: 'success',
+            extracted_form: parsedData,
+            analyzed_messages: history.length
+        });
+    } catch (err: any) {
+        console.error('[analyze-chat] Erro:', err);
+        res.status(500).json({ error: err?.message ?? 'Erro na compilação do RAG' });
+    }
 });
 
 // GET /integra/empresas/presets/:regime — retorna preset de serviços

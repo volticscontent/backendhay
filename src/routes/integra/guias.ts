@@ -78,9 +78,8 @@ router.post('/integra/guias/gerar', async (req: Request, res: Response) => {
     );
     const execucaoId = exec.rows[0].id as number;
 
-    // Para geração manual, usamos job-pgmei mas filtrando pela empresa específica via Redis flag
-    // Por ora dispara o worker padrão — o worker já usa servicos_habilitados para filtrar
-    await enqueueRoboPgmei(execucaoId);
+    // Para geração manual, isolamos a execução APENAS para essa empresa_id
+    await enqueueRoboPgmei(execucaoId, empresa_id);
 
     res.status(202).json({ execucao_id: execucaoId, empresa_id, message: 'Geração iniciada' });
 });

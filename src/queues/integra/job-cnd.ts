@@ -17,9 +17,32 @@ export const cndQueue = new Queue(QUEUE_NAME, {
     },
 });
 
+function extractProtocolo(response: unknown): string | undefined {
+    if (!response || typeof response !== 'object') return undefined;
+    const r = response as Record<string, unknown>;
+    // Tenta campos comuns da resposta SOLICITARPROTOCOLO91
+    const direct = r.nrProtocolo ?? r.protocolo ?? r.numProtocolo ?? r.protocoloRelatorio ?? r.numeroProtocolo;
+    if (direct && typeof direct === 'string') return direct;
+    // Tenta dentro de 'dados' (string JSON)
+    if (typeof r.dados === 'string') {
+        try {
+            const dados = JSON.parse(r.dados) as Record<string, unknown>;
+            const nested = dados.nrProtocolo ?? dados.protocolo ?? dados.numProtocolo;
+            if (nested && typeof nested === 'string') return nested;
+        } catch { /* ignora */ }
+    }
+    return undefined;
+}
+
 async function processEmpresa(execucaoId: number, empresaId: number, cnpj: string): Promise<'success' | 'error'> {
     try {
-        const result = await consultarServico('CND', cnpj);
+        // Passo 1: solicitar protocolo SITFIS
+        const solicitacao = await consultarServico('SIT_FISCAL_SOLICITAR', cnpj);
+        const protocolo = extractProtocolo(solicitacao);
+        if (!protocolo) throw new Error(`Protocolo SITFIS não retornado. Resposta: ${JSON.stringify(solicitacao)}`);
+
+        // Passo 2: emitir CND com o protocolo obtido
+        const result = await consultarServico('CND', cnpj, { protocoloRelatorio: protocolo });
         await query(
             `INSERT INTO integra_execucao_itens (execucao_id, empresa_id, status, dados_resposta)
              VALUES ($1, $2, 'success', $3)`,

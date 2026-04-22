@@ -19,7 +19,7 @@ export const caixaPostalQueue = new Queue(QUEUE_NAME, {
 
 async function processEmpresa(execucaoId: number, empresaId: number, cnpj: string): Promise<'success' | 'error'> {
     try {
-        const result = await consultarServico('CAIXAPOSTAL', cnpj);
+        const result = await consultarServico('CAIXA_POSTAL', cnpj);
         const mensagens = Array.isArray(result) ? result : (result as any)?.mensagens ?? [];
 
         for (const msg of mensagens) {

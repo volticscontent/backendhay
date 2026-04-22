@@ -38,8 +38,8 @@ router.get('/integra/billing', async (req: Request, res: Response) => {
         // Totais gerais do mês
         const totais = await query(`
             SELECT
-                SUM(COUNT(ei.id))                                         AS total_consultas,
-                SUM(COUNT(ei.id) * COALESCE(p.preco_unitario, 0))         AS custo_total
+                COUNT(ei.id)                                      AS total_consultas,
+                SUM(COALESCE(p.preco_unitario, 0))                AS custo_total
             FROM integra_execucao_itens ei
             JOIN integra_execucoes ex ON ex.id = ei.execucao_id
             LEFT JOIN integra_precos p ON p.tipo_robo = ex.robo_tipo

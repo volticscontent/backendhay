@@ -26,27 +26,6 @@ async function processEmpresa(execucaoId: number, empresaId: number, cnpj: strin
              VALUES ($1, $2, 'success', $3)`,
             [execucaoId, empresaId, JSON.stringify(result)]
         );
-
-        // Persistir guia se houver dados de pagamento
-        const r = result as Record<string, unknown>;
-        if (r.valorPrincipal || r.valor || r.codigoBarras) {
-            const hoje = new Date();
-            const competencia = `${hoje.getFullYear()}${String(hoje.getMonth() + 1).padStart(2, '0')}`;
-            await query(
-                `INSERT INTO integra_guias
-                   (empresa_id, tipo, competencia, valor, vencimento, codigo_barras, dados_originais)
-                 VALUES ($1, 'das_mei', $2, $3, $4, $5, $6)
-                 ON CONFLICT DO NOTHING`,
-                [
-                    empresaId, competencia,
-                    r.valorPrincipal ?? r.valor ?? null,
-                    r.dataVencimento ?? null,
-                    r.codigoBarras ?? null,
-                    JSON.stringify(result),
-                ]
-            );
-        }
-
         return 'success';
     } catch (err: any) {
         const msg = err?.message ?? String(err);
@@ -63,14 +42,18 @@ export function startPgmeiWorker() {
     const worker = new Worker(
         QUEUE_NAME,
         async (job: Job) => {
-            const { execucaoId } = job.data as { execucaoId: number };
+            const { execucaoId, empresaId } = job.data as { execucaoId: number; empresaId?: number };
             const log = cronLogger;
 
-            const empresas = await query(
-                `SELECT id, cnpj FROM integra_empresas
-                 WHERE ativo = true
-                   AND servicos_habilitados ? 'PGMEI'`
-            );
+            let querySql = `SELECT id, cnpj FROM integra_empresas WHERE ativo = true AND servicos_habilitados ? 'PGMEI'`;
+            const queryParams: any[] = [];
+            
+            if (empresaId) {
+                querySql += ` AND id = $1`;
+                queryParams.push(empresaId);
+            }
+
+            const empresas = await query(querySql, queryParams);
 
             const total = empresas.rows.length;
             let sucesso = 0, falhas = 0, ignoradas = 0;
@@ -112,6 +95,6 @@ export function startPgmeiWorker() {
     return worker;
 }
 
-export async function enqueueRoboPgmei(execucaoId: number) {
-    await pgmeiQueue.add('run', { execucaoId }, { jobId: `pgmei-${execucaoId}` });
+export async function enqueueRoboPgmei(execucaoId: number, empresaId?: number) {
+    await pgmeiQueue.add('run', { execucaoId, empresaId }, { jobId: `pgmei-${execucaoId}` });
 }

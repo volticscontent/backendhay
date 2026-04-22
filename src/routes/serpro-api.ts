@@ -55,33 +55,71 @@ router.get('/serpro/clients', async (req: Request, res: Response) => {
   const isTest = source === 'test';
   const safeNamedSource = source && NAMED_SOURCES.has(source) ? source : null;
 
-  // Build the WHERE clause for the CTE
-  const cteWhere = safeNamedSource ? `WHERE source = $1` : '';
+  // Para source=test: mostra consultas sem lead correspondente (comportamento original)
+  if (isTest) {
+    const testQuery = `
+      WITH LatestConsultations AS (
+        SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro GROUP BY cnpj
+      )
+      SELECT
+        lc.cnpj AS raw_cnpj, lc.last_consultation_date AS created_at, c.resultado,
+        NULL::int AS lead_id, NULL::text AS nome_completo, NULL::text AS telefone, NULL::text AS email,
+        true AS procuracao_ativa, NULL::text AS procuracao_validade
+      FROM LatestConsultations lc
+      JOIN consultas_serpro c ON c.cnpj = lc.cnpj AND c.created_at = lc.last_consultation_date
+      LEFT JOIN leads l ON LTRIM(REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g'), '0') = LTRIM(REGEXP_REPLACE(lc.cnpj, '[^0-9]', '', 'g'), '0')
+      WHERE l.id IS NULL
+      ORDER BY lc.last_consultation_date DESC LIMIT 20
+    `;
+    try {
+      const result = await query(testQuery);
+      return void res.json(result.rows.map((row) => ({
+        id: row.raw_cnpj, nome: 'CNPJ sem cadastro',
+        cnpj: row.raw_cnpj, telefone: null, email: null,
+        data_ultima_consulta: row.created_at,
+        procuracao_ativa: false, procuracao_validade: null,
+      })));
+    } catch (err) {
+      console.error('Error fetching test serpro clients:', err);
+      return void res.status(500).json({ error: 'Internal Server Error' });
+    }
+  }
+
+  // Para source=admin ou source=bot (ou sem filtro):
+  // Parte 1 — leads com procuração ativa (aparecem mesmo sem consulta prévia)
+  // Parte 2 — consultas que têm lead correspondente (para histórico de data/resultado)
+  const sourceFilter = safeNamedSource ? `AND c.source = $1` : '';
   const queryParams: unknown[] = safeNamedSource ? [safeNamedSource] : [];
 
-  // For test tab: no source filter in CTE, but we filter afterwards for no lead match
-  // For admin/bot: filter by source and only return rows where lead matched
-  const leadFilter = isTest ? 'WHERE l.id IS NULL' : (safeNamedSource ? 'WHERE l.id IS NOT NULL' : '');
-
-  const betterQuery = `
-    WITH LatestConsultations AS (
-      SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro ${cteWhere} GROUP BY cnpj
-    )
+  const combinedQuery = `
     SELECT
-      lc.cnpj AS raw_cnpj, lc.last_consultation_date AS created_at, c.resultado,
+      REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS raw_cnpj,
+      MAX(c.created_at) AS created_at,
+      (SELECT resultado FROM consultas_serpro
+       WHERE cnpj = REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g')
+         ${safeNamedSource ? `AND source = $1` : ''}
+       ORDER BY created_at DESC LIMIT 1) AS resultado,
       l.id AS lead_id, l.nome_completo, l.telefone, l.email,
-      (COALESCE(lp.procuracao, false) OR COALESCE(lp.procuracao_ativa, false) OR (c.resultado IS NOT NULL)) AS procuracao_ativa,
+      (COALESCE(lp.procuracao, false) OR COALESCE(lp.procuracao_ativa, false) OR MAX(c.created_at) IS NOT NULL) AS procuracao_ativa,
       lp.procuracao_validade
-    FROM LatestConsultations lc
-    JOIN consultas_serpro c ON c.cnpj = lc.cnpj AND c.created_at = lc.last_consultation_date
-    LEFT JOIN leads l ON LTRIM(REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g'), '0') = LTRIM(REGEXP_REPLACE(lc.cnpj, '[^0-9]', '', 'g'), '0')
+    FROM leads l
     LEFT JOIN leads_processo lp ON l.id = lp.lead_id
-    ${leadFilter}
-    ORDER BY lc.last_consultation_date DESC LIMIT 20
+    LEFT JOIN consultas_serpro c
+      ON REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') = c.cnpj ${sourceFilter}
+    WHERE l.cnpj IS NOT NULL AND l.cnpj != ''
+      AND (
+        COALESCE(lp.procuracao_ativa, false) = true
+        OR COALESCE(lp.procuracao, false) = true
+        OR c.id IS NOT NULL
+      )
+    GROUP BY l.id, l.nome_completo, l.telefone, l.email, l.cnpj,
+             lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade
+    ORDER BY MAX(c.created_at) DESC NULLS LAST
+    LIMIT 50
   `;
 
   try {
-    const result = await query(betterQuery, queryParams);
+    const result = await query(combinedQuery, queryParams);
     const clients = result.rows.map((row) => {
       let nome = row.nome_completo || 'CNPJ sem cadastro';
       if (!row.nome_completo && row.resultado) {

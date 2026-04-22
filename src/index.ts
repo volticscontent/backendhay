@@ -74,7 +74,93 @@ app.get('/', (_req, res) => {
 });
 
 async function runMigrations() {
-    // integra_precos — tabela de preços Serpro por robô (Fase 4 Billing)
+    // ── Integra Contador: tabelas principais ─────────────────────────────────
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS integra_empresas (
+            id                    SERIAL PRIMARY KEY,
+            cnpj                  VARCHAR(14)  NOT NULL UNIQUE,
+            razao_social          TEXT         NOT NULL,
+            regime_tributario     VARCHAR(20)  NOT NULL DEFAULT 'mei',
+            ativo                 BOOLEAN      NOT NULL DEFAULT true,
+            servicos_habilitados  JSONB        NOT NULL DEFAULT '[]',
+            lead_id               INTEGER      REFERENCES leads(id) ON DELETE SET NULL,
+            certificado_validade  DATE,
+            observacoes           TEXT,
+            created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_robos (
+            tipo_robo        VARCHAR(30)  PRIMARY KEY,
+            ativo            BOOLEAN      NOT NULL DEFAULT false,
+            dia_execucao     INTEGER      NOT NULL DEFAULT 10,
+            hora_execucao    TIME         NOT NULL DEFAULT '08:00',
+            ultima_execucao  TIMESTAMPTZ,
+            proxima_execucao TIMESTAMPTZ,
+            updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        INSERT INTO integra_robos (tipo_robo) VALUES ('pgmei'), ('cnd'), ('caixa_postal')
+            ON CONFLICT (tipo_robo) DO NOTHING;
+
+        -- Seed empresa teste E2E
+        INSERT INTO integra_empresas (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados)
+        VALUES ('00000000000191', 'EMPRESA MOCK E2E - BANCO DO BRASIL', 'mei', true, '["PGMEI", "CND"]')
+        ON CONFLICT (cnpj) DO NOTHING;
+
+        CREATE TABLE IF NOT EXISTS integra_execucoes (
+            id              SERIAL PRIMARY KEY,
+            robo_tipo       VARCHAR(30)  NOT NULL,
+            status          VARCHAR(20)  NOT NULL DEFAULT 'running',
+            total_empresas  INTEGER      DEFAULT 0,
+            sucesso         INTEGER      DEFAULT 0,
+            falhas          INTEGER      DEFAULT 0,
+            ignoradas       INTEGER      DEFAULT 0,
+            iniciado_em     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            concluido_em    TIMESTAMPTZ,
+            duracao_ms      INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_integra_exec_robo ON integra_execucoes(robo_tipo, iniciado_em DESC);
+
+        CREATE TABLE IF NOT EXISTS integra_execucao_itens (
+            id            SERIAL PRIMARY KEY,
+            execucao_id   INTEGER      NOT NULL REFERENCES integra_execucoes(id) ON DELETE CASCADE,
+            empresa_id    INTEGER      NOT NULL REFERENCES integra_empresas(id)  ON DELETE CASCADE,
+            status        VARCHAR(20)  NOT NULL DEFAULT 'pending',
+            dados_resposta JSONB,
+            mensagem      TEXT,
+            custo_estimado DECIMAL(10, 4),
+            created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_guias (
+            id               SERIAL PRIMARY KEY,
+            empresa_id       INTEGER      NOT NULL REFERENCES integra_empresas(id) ON DELETE CASCADE,
+            tipo             VARCHAR(30)  NOT NULL DEFAULT 'das_mei',
+            competencia      VARCHAR(6),
+            valor            DECIMAL(12, 2),
+            vencimento       DATE,
+            codigo_barras    TEXT,
+            dados_originais  JSONB,
+            status_pagamento VARCHAR(20)  NOT NULL DEFAULT 'pendente',
+            pdf_r2_key       TEXT,
+            created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE (empresa_id, tipo, competencia)
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_caixa_postal (
+            id             SERIAL PRIMARY KEY,
+            empresa_id     INTEGER      NOT NULL REFERENCES integra_empresas(id) ON DELETE CASCADE,
+            assunto        TEXT,
+            conteudo       TEXT,
+            data_mensagem  TIMESTAMPTZ,
+            dados_originais JSONB,
+            lida           BOOLEAN      NOT NULL DEFAULT false,
+            created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE (empresa_id, assunto, data_mensagem)
+        );
+    `);
+
+    // ── integra_precos — tabela de preços Serpro por robô (Billing) ──────────
     await pool.query(`
         CREATE TABLE IF NOT EXISTS integra_precos (
             id            SERIAL PRIMARY KEY,
@@ -83,7 +169,6 @@ async function runMigrations() {
             descricao     TEXT,
             updated_at    TIMESTAMPTZ DEFAULT NOW()
         );
-        -- Seed preços padrão (estimativa — ajustar conforme contrato Serpro)
         INSERT INTO integra_precos (tipo_robo, preco_unitario, descricao) VALUES
             ('pgmei',        0.05, 'PGMEI — por empresa consultada'),
             ('pgdas',        0.05, 'PGDAS — por empresa consultada'),
@@ -91,7 +176,6 @@ async function runMigrations() {
             ('caixa_postal', 0.03, 'Caixa Postal — por empresa consultada')
         ON CONFLICT (tipo_robo) DO NOTHING;
 
-        -- custo_estimado em integra_execucao_itens (caso não exista ainda)
         ALTER TABLE integra_execucao_itens
             ADD COLUMN IF NOT EXISTS custo_estimado DECIMAL(10, 4);
     `);
