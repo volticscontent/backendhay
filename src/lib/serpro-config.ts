@@ -79,6 +79,8 @@ export const SERVICE_CONFIG: Record<string, ServiceConfigItem> = {
         tipo: 'Emitir',
         descricao: 'Relatório de Situação Fiscal Completa.',
     },
+    // Alias de PGMEI com env vars separadas para permitir override por sistema/serviço diferente.
+    // Sem override de env, chama o mesmo endpoint DIVIDAATIVA24 que PGMEI.
     DIVIDA_ATIVA: {
         env_sistema: 'INTEGRA_DIVIDA_ATIVA_ID_SISTEMA',
         env_servico: 'INTEGRA_DIVIDA_ATIVA_ID_SERVICO',
@@ -187,6 +189,8 @@ export const SERVICE_CONFIG: Record<string, ServiceConfigItem> = {
         tipo: 'Consultar',
         descricao: 'Consulta de Procurações Eletrônicas.',
     },
+    // Alias de PGMEI sem versaoSistema:'2.4' explícita (usa '1.0' default).
+    // Separado para permitir override via env INTEGRA_PGFN_* se a Serpro publicar endpoint PGFN dedicado.
     PGFN_CONSULTAR: {
         env_sistema: 'INTEGRA_PGFN_ID_SISTEMA',
         env_servico: 'INTEGRA_PGFN_CONSULTA_ID_SERVICO',

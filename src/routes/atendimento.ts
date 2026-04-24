@@ -53,8 +53,8 @@ router.get('/atendimento/chats', async (_req: Request, res: Response) => {
         const leadMap = new Map<string, Record<string, unknown>>();
         if (phones.length > 0) {
           const { rows: leadRows } = await pool.query(
-            `SELECT l.id, l.telefone, l.nome_completo, lv.status_atendimento, lv.data_reuniao
-             FROM leads l LEFT JOIN leads_vendas lv ON lv.lead_id = l.id
+            `SELECT l.id, l.telefone, l.nome_completo, lp.status_atendimento, lp.data_reuniao
+             FROM leads l LEFT JOIN leads_processo lp ON lp.lead_id = l.id
              WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
                 OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
                 OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`,
@@ -97,8 +97,8 @@ router.get('/atendimento/chats', async (_req: Request, res: Response) => {
       const fallbackLeadMap = new Map<string, Record<string, unknown>>();
       if (fallbackPhones.length > 0) {
         const { rows: leadRows } = await pool.query(
-          `SELECT l.id, l.telefone, l.nome_completo, lv.status_atendimento, lv.data_reuniao
-           FROM leads l LEFT JOIN leads_vendas lv ON lv.lead_id = l.id
+          `SELECT l.id, l.telefone, l.nome_completo, lp.status_atendimento, lp.data_reuniao
+           FROM leads l LEFT JOIN leads_processo lp ON lp.lead_id = l.id
            WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
               OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
               OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`,
@@ -156,16 +156,38 @@ router.get('/atendimento/lead/:phone', async (req: Request, res: Response) => {
   try {
     const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
     const baseQuery = `
-      SELECT l.*,
+      SELECT
+        l.id, l.telefone, l.nome_completo, l.email, l.cpf, l.data_nascimento, l.nome_mae, l.sexo,
+        l.cnpj, l.razao_social, l.nome_fantasia, l.tipo_negocio, l.faturamento_mensal,
+        l.endereco, l.numero, l.complemento, l.bairro, l.cidade, l.estado, l.cep,
+        l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
+        l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
+        l.tem_divida, l.tipo_divida, l.valor_divida_municipal, l.valor_divida_estadual,
+        l.valor_divida_federal, l.valor_divida_pgfn, l.valor_divida_pgfn AS valor_divida_ativa,
+        l.tempo_divida, l.calculo_parcelamento,
+        l.needs_attendant, l.attendant_requested_at, l.metadata, l.data_cadastro, l.atualizado_em,
         CASE WHEN l.senha_gov_enc IS NULL THEN NULL
              ELSE pgp_sym_decrypt(l.senha_gov_enc::bytea, $2::text)
         END AS senha_gov,
-        l.valor_divida_pgfn AS valor_divida_ativa,
-        lp.servico, lp.servico AS servico_negociado, lp.servico AS servico_escolhido, lp.status_atendimento, lp.data_reuniao,
+        lp.servico, lp.servico AS servico_negociado, lp.servico AS servico_escolhido,
+        lp.status_atendimento, lp.data_reuniao,
         (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
-        lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade,
-        lp.observacoes, lp.data_controle_24h, lp.envio_disparo, lp.atendente_id,
-        lp.data_followup, lp.recursos_entregues
+        lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade, lp.cliente,
+        lp.atendente_id, lp.envio_disparo, lp.observacoes,
+        lp.data_controle_24h, lp.data_followup, lp.recursos_entregues,
+        -- Legacy UI fields (not stored separately, but expected by LeadSheetData)
+        NULL::text AS cartao_cnpj,
+        NULL::text AS porte_empresa,
+        NULL::text AS score_serasa,
+        NULL::text AS tem_cartorios,
+        NULL::text AS motivo_divida,
+        NULL::text AS tem_protestos,
+        NULL::text AS tem_divida_ativa,
+        NULL::text AS tem_execucao_fiscal,
+        NULL::text AS tem_parcelamento,
+        NULL::text AS parcelamento_ativo,
+        NULL::text AS idades_socios,
+        NULL::timestamptz AS data_ultima_consulta
       FROM leads l
       LEFT JOIN leads_processo lp ON l.id = lp.lead_id
     `;
@@ -185,9 +207,12 @@ router.get('/atendimento/lead/:phone', async (req: Request, res: Response) => {
       data_controle_24h: toIso(lead.data_controle_24h),
       data_reuniao: toIso(lead.data_reuniao),
       procuracao_validade: toIso(lead.procuracao_validade),
+      attendant_requested_at: toIso(lead.attendant_requested_at),
+      data_followup: toIso(lead.data_followup),
     };
     res.json({ success: true, data: serialized });
   } catch (err) {
+    console.error('[atendimento/lead] error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch lead' });
   }
 });

@@ -37,7 +37,14 @@ router.post('/serpro', async (req: Request, res: Response) => {
       }
     }
 
-    saveConsultation(cnpj, target, finalResult, 200, 'admin');
+    // Resolve lead_id by CNPJ for traceability
+    const cleanCnpj = cnpj.replace(/\D/g, '');
+    const leadRow = await query(
+      `SELECT id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1`,
+      [cleanCnpj],
+    );
+    const leadId = (leadRow.rows[0]?.id as number | undefined) ?? null;
+    saveConsultation(cnpj, target, finalResult, 200, 'admin', leadId);
     res.json(finalResult);
   } catch (err: unknown) {
     console.error('SERPRO API Error:', err);
@@ -330,6 +337,12 @@ router.put('/serpro/procuracao/:leadId', async (req: Request, res: Response) => 
         procuracao_validade = $3,
         updated_at = NOW()
     `, [leadId, ativo, validoAte]);
+
+    await query(`
+      INSERT INTO leads_procuracao_historico (lead_id, ativo, validade, origem)
+      VALUES ($1, $2, $3, 'admin')
+    `, [leadId, ativo, validoAte ? new Date(validoAte).toISOString().split('T')[0] : null]);
+
     res.json({ success: true, procuracao_ativa: ativo, procuracao_validade: validoAte });
   } catch (err) {
     console.error('Erro ao atualizar procuração:', err);

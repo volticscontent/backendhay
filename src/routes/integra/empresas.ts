@@ -14,11 +14,14 @@ const PRESETS: Record<string, string[]> = {
 router.get('/integra/empresas', async (_req: Request, res: Response) => {
     try {
         const result = await query(
-            `SELECT id, cnpj, razao_social, regime_tributario, ativo,
-                    servicos_habilitados, lead_id, certificado_validade, observacoes,
-                    created_at, updated_at
-             FROM integra_empresas
-             ORDER BY razao_social ASC`
+            `SELECT ie.id, ie.cnpj, ie.razao_social, ie.regime_tributario, ie.ativo,
+                    ie.servicos_habilitados, ie.lead_id, ie.certificado_validade, ie.observacoes,
+                    ie.created_at, ie.updated_at,
+                    l.nome_completo AS lead_nome,
+                    l.telefone     AS lead_telefone
+             FROM integra_empresas ie
+             LEFT JOIN leads l ON ie.lead_id = l.id
+             ORDER BY ie.razao_social ASC`
         );
         res.json(result.rows);
     } catch (err: any) {
@@ -54,13 +57,30 @@ router.post('/integra/empresas', async (req: Request, res: Response) => {
 
         const servicos = servicos_habilitados ?? PRESETS[regime_tributario] ?? PRESETS.mei;
 
+        // Se veio com lead_id, buscar razao_social real do lead para evitar gravar nome_completo como razão social
+        let finalRazaoSocial = razao_social;
+        if (lead_id) {
+            const leadRow = await query(`SELECT razao_social FROM leads WHERE id = $1`, [lead_id]);
+            const leadRazao = leadRow.rows[0]?.razao_social as string | null | undefined;
+            if (leadRazao) finalRazaoSocial = leadRazao;
+        }
+
         const result = await query(
             `INSERT INTO integra_empresas
                (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados, lead_id, certificado_validade, observacoes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
-            [cnpj, razao_social, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
+            [cnpj, finalRazaoSocial, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
         );
+
+        // Garantir que leads.razao_social esteja preenchido com o valor usado
+        if (lead_id) {
+            await query(
+                `UPDATE leads SET razao_social = COALESCE(razao_social, $1), atualizado_em = NOW() WHERE id = $2`,
+                [finalRazaoSocial, lead_id]
+            );
+        }
+
         res.status(201).json(result.rows[0]);
     } catch (err: any) {
         res.status(500).json({ error: err?.message ?? 'Erro interno' });
@@ -95,6 +115,16 @@ router.patch('/integra/empresas/:id', async (req: Request, res: Response) => {
         );
 
         if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
+
+        // Sincronizar razao_social de volta ao lead quando atualizada (integra_empresas é fonte de verdade fiscal)
+        const updated = result.rows[0] as { lead_id?: number; razao_social?: string };
+        if ('razao_social' in fields && updated.lead_id) {
+            await query(
+                `UPDATE leads SET razao_social = $1, atualizado_em = NOW() WHERE id = $2`,
+                [updated.razao_social, updated.lead_id]
+            );
+        }
+
         res.json(result.rows[0]);
     } catch (err: any) {
         res.status(500).json({ error: err?.message ?? 'Erro interno' });
@@ -120,6 +150,7 @@ router.get('/integra/leads-para-importar', async (_req: Request, res: Response) 
             SELECT
                 l.id,
                 l.nome_completo,
+                l.razao_social,
                 REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS cnpj,
                 l.email,
                 l.telefone,

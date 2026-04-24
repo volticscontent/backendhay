@@ -256,11 +256,10 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         } else {
             dadosServico.ano = options.ano;
         }
-    } else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'DCTFWEB'].includes(nomeServico)) {
+    } else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'DCTFWEB', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico)) {
         const currentYear = new Date().getFullYear().toString();
         if (nomeServico === 'DCTFWEB') dadosServico.anoPA = currentYear;
-        else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico)) dadosServico.anoCalendario = currentYear;
-        else dadosServico.ano = currentYear;
+        else dadosServico.anoCalendario = currentYear;
     }
 
     if (options.mes) {
@@ -313,6 +312,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
     const isSitfis = ['SIT_FISCAL_SOLICITAR', 'SIT_FISCAL_RELATORIO', 'CND'].includes(nomeServico);
     const isProcuracao = nomeServico === 'PROCURACAO';
     const cpfNumero = options.cpf ? onlyDigits(options.cpf) : undefined;
+    if (isSitfis && !cpfNumero) throw new Error(`${nomeServico} requer options.cpf (CPF do empresário — SITFIS é CPF-based, não aceita CNPJ como contribuinte)`);
     const contribuinteNumero = ((isSitfis || isProcuracao) && cpfNumero) ? cpfNumero : cnpjNumero;
     const contribuinteTipo = ((isSitfis || isProcuracao) && cpfNumero && cpfNumero.length === 11)
         ? TipoContribuinte.CPF
@@ -323,7 +323,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
     if (nomeServico === 'SIT_FISCAL_SOLICITAR') {
         dadosField = '';
     } else if (nomeServico === 'SIT_FISCAL_RELATORIO' || nomeServico === 'CND') {
-        if (!options.protocoloRelatorio) throw new Error('SIT_FISCAL_RELATORIO exige options.protocoloRelatorio');
+        if (!options.protocoloRelatorio) throw new Error(`${nomeServico} requer options.protocoloRelatorio — fluxo obrigatório 2 etapas: 1) SIT_FISCAL_SOLICITAR → obtém protocolo, 2) ${nomeServico} com o protocolo retornado`);
         dadosField = JSON.stringify({ protocoloRelatorio: options.protocoloRelatorio });
     } else if (isProcuracao) {
         // OBTERPROCURACAO41: outorgante = CNPJ da empresa cliente, outorgado = CNPJ do contador

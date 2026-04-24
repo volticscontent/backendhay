@@ -75,15 +75,15 @@ export async function maybeSavePdfFromBotResult(
     }
 }
 
-export async function saveConsultation(cnpj: string, service: string, result: unknown, status: number, source: string = 'bot') {
+export async function saveConsultation(cnpj: string, service: string, result: unknown, status: number, source: string = 'bot', leadId?: number | null) {
     try {
         const cleanCnpj = cnpj.replace(/\D/g, '');
         const q = `
-      INSERT INTO consultas_serpro (cnpj, tipo_servico, resultado, status, source, created_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
+      INSERT INTO consultas_serpro (cnpj, tipo_servico, resultado, status, source, lead_id, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
       RETURNING id
     `;
-        const res = await pool.query(q, [cleanCnpj, service, result, status, source]);
+        const res = await pool.query(q, [cleanCnpj, service, result, status, source, leadId ?? null]);
         dbLogger.debug(`Consulta Serpro salva. ID: ${res.rows[0].id}`);
     } catch (error) {
         dbLogger.error('Erro ao salvar consulta Serpro:', error);
