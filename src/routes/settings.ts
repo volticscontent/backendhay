@@ -35,7 +35,8 @@ router.post('/settings', async (req: Request, res: Response) => {
       [key, label, type, value || ''],
     );
     res.json({ success: true });
-  } catch (err) {
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ success: false, error: 'Failed to create setting' });
   }
 });

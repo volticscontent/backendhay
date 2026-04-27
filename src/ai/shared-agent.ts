@@ -3,7 +3,7 @@ import { ToolDefinition } from './openai-client';
 import {
     getUser, getAvailableMedia, contextRetrieve, sendMedia,
     updateUser, callAttendant, interpreter, setAgentRouting,
-    getUpdatableFields
+    getUpdatableFields, getClientDataWithFreshness
 } from './server-tools';
 import { getDynamicContext } from './knowledge-base';
 import { agentLogger } from '../lib/logger';
@@ -149,6 +149,12 @@ export function getSharedTools(context: AgentContext): ToolDefinition[] {
             description: 'Buscar informações atualizadas do lead no banco de dados.',
             parameters: { type: 'object', properties: {} },
             function: async () => await getUser(context.userPhone)
+        },
+        {
+            name: 'consultar_dados_cliente',
+            description: 'Retorna dados cadastrais do banco + histórico de consultas Serpro com indicador de frescor (ainda_valido). USE SEMPRE ANTES de qualquer tool Serpro para evitar consultas redundantes ao governo.',
+            parameters: { type: 'object', properties: {} },
+            function: async () => await getClientDataWithFreshness(context.userPhone)
         }
     ];
 }

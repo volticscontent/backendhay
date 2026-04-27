@@ -203,7 +203,7 @@ import { getChatHistory } from '../../lib/chat-history';
 import OpenAI from 'openai';
 router.get('/integra/analyze-chat/:phone', async (req: Request, res: Response) => {
     try {
-        const { phone } = req.params;
+        const phone = req.params.phone as string;
         const history = await getChatHistory(phone, 30); // Ultimas 30 interações para contexto
         
         if (!history || history.length === 0) {

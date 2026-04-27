@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { webhookLogger } from '../lib/logger';
 import { processIncomingMessage } from '../lib/message-processor';
 import redis from '../lib/redis';
+import { getIO } from '../lib/socket-server';
 
 let requestCounter = 0;
 function nextTraceId(): string {
@@ -80,7 +81,7 @@ router.post('/notify', (req: Request, res: Response) => {
             return;
         }
 
-        const io = require('../lib/socket-server').getIO();
+        const io = getIO();
         if (!io) {
             res.status(503).json({ error: 'Socket.io not initialized' });
             return;

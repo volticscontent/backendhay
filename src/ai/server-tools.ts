@@ -548,6 +548,147 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
     }
 }
 
+// ==================== Cache-aware client data ====================
+
+/**
+ * Por quantos dias o resultado de cada serviço Serpro é considerado fresco.
+ * Reflete a frequência real de mudança dos dados na Receita Federal.
+ */
+const FRESHNESS_DAYS: Record<string, number> = {
+    CCMEI_DADOS:               90,  // dados cadastrais raramente mudam
+    SIMEI:                     90,
+    PROCURACAO:                30,  // pode ser revogada, checar mensalmente
+    PGMEI:                      7,  // débitos DAS mudam após vencimento mensal
+    PGFN_CONSULTAR:            30,
+    DIVIDA_ATIVA:              30,
+    PGMEI_EXTRATO:             30,
+    PGMEI_BOLETO:              30,
+    PGMEI_ATU_BENEFICIO:       30,
+    SIT_FISCAL_SOLICITAR:      90,
+    SIT_FISCAL_RELATORIO:      90,
+    CND:                      180,
+    CAIXA_POSTAL:               1,  // mensagens chegam diariamente
+    DASN_SIMEI:               365,  // declaração anual
+    DCTFWEB:                   30,
+    PGDASD:                    30,
+    PARCELAMENTO_MEI_CONSULTAR: 7,
+    PARCELAMENTO_SN_CONSULTAR:  7,
+};
+
+/**
+ * Retorna dados cadastrais do banco + histórico de consultas Serpro com indicador de frescor.
+ * O bot deve chamar isso ANTES de qualquer tool Serpro para evitar consultas redundantes.
+ */
+export async function getClientDataWithFreshness(phone: string): Promise<string> {
+    try {
+        const leadRes = await query(`
+            SELECT
+                l.id, l.telefone, l.nome_completo, l.email, l.cpf,
+                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+                l.tem_divida, l.tipo_divida, l.valor_divida_federal, l.valor_divida_pgfn,
+                l.situacao, l.qualificacao, l.observacoes, l.atualizado_em,
+                lp.servico, lp.status_atendimento, lp.procuracao_ativa,
+                lp.procuracao_validade, lp.observacoes AS obs_processo
+            FROM leads l
+            LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+            WHERE l.telefone = $1
+            LIMIT 1
+        `, [phone]);
+
+        if (leadRes.rows.length === 0) {
+            return JSON.stringify({ status: 'not_found', message: 'Lead não encontrado.' });
+        }
+        const lead = leadRes.rows[0] as Record<string, unknown>;
+        const cnpj = ((lead.cnpj as string | null) || '').replace(/\D/g, '');
+
+        // Última consulta por serviço (somente sucesso status=200)
+        let consultasFrescor: Record<string, unknown>[] = [];
+        if (cnpj) {
+            const cRes = await query(`
+                SELECT DISTINCT ON (tipo_servico)
+                    tipo_servico, resultado, created_at
+                FROM consultas_serpro
+                WHERE cnpj = $1 AND status = 200
+                ORDER BY tipo_servico, created_at DESC
+            `, [cnpj]);
+
+            const now = Date.now();
+            consultasFrescor = cRes.rows.map(row => {
+                const service = row.tipo_servico as string;
+                const freshnessDays = FRESHNESS_DAYS[service] ?? 7;
+                const fetchedAt = new Date(row.created_at as string);
+                const ageDays = Math.floor((now - fetchedAt.getTime()) / 86_400_000);
+                const aindaValido = ageDays < freshnessDays;
+                return {
+                    servico: service,
+                    ultima_consulta: fetchedAt.toLocaleDateString('pt-BR'),
+                    dias_atras: ageDays,
+                    valido_por_dias: freshnessDays,
+                    ainda_valido: aindaValido,
+                    proximo_refresh: aindaValido ? `em ${freshnessDays - ageDays} dia(s)` : 'ATUALIZAR AGORA',
+                    resultado: row.resultado,
+                };
+            });
+        }
+
+        // Documentos PDF ainda válidos (CND, SITFIS, DAS)
+        let documentosValidos: Record<string, unknown>[] = [];
+        if (cnpj) {
+            const docRes = await query(`
+                SELECT tipo_servico, r2_url, valido_ate, created_at
+                FROM serpro_documentos
+                WHERE cnpj = $1
+                  AND deletado_em IS NULL
+                  AND (valido_ate IS NULL OR valido_ate > NOW())
+                ORDER BY created_at DESC
+                LIMIT 10
+            `, [cnpj]);
+            documentosValidos = docRes.rows.map(row => ({
+                servico: row.tipo_servico,
+                url: row.r2_url,
+                valido_ate: row.valido_ate ? new Date(row.valido_ate as string).toLocaleDateString('pt-BR') : null,
+                gerado_em: new Date(row.created_at as string).toLocaleDateString('pt-BR'),
+            }));
+        }
+
+        return JSON.stringify({
+            status: 'success',
+            dados_cadastro: {
+                fonte: 'banco_de_dados',
+                atualizado_em: lead.atualizado_em
+                    ? new Date(lead.atualizado_em as string).toLocaleDateString('pt-BR')
+                    : null,
+                dados: {
+                    nome: lead.nome_completo,
+                    cpf: lead.cpf,
+                    cnpj: lead.cnpj,
+                    razao_social: lead.razao_social,
+                    tipo_negocio: lead.tipo_negocio,
+                    faturamento_mensal: lead.faturamento_mensal,
+                    tem_divida: lead.tem_divida,
+                    tipo_divida: lead.tipo_divida,
+                    valor_divida_federal: lead.valor_divida_federal,
+                    valor_divida_pgfn: lead.valor_divida_pgfn,
+                    situacao: lead.situacao,
+                    qualificacao: lead.qualificacao,
+                    procuracao_ativa: lead.procuracao_ativa ?? false,
+                    procuracao_validade: lead.procuracao_validade,
+                    status_atendimento: lead.status_atendimento,
+                    observacoes: lead.observacoes,
+                    obs_processo: lead.obs_processo,
+                },
+            },
+            consultas_serpro: consultasFrescor,
+            documentos_validos: documentosValidos,
+            regras_frescor: FRESHNESS_DAYS,
+            instrucao: 'Se ainda_valido=true use o campo "resultado" diretamente. Só chame a tool Serpro se ainda_valido=false ou serviço ausente da lista.',
+        });
+    } catch (error) {
+        log.error('getClientDataWithFreshness error:', error);
+        return JSON.stringify({ status: 'error', message: String(error) });
+    }
+}
+
 // ==================== Serpro ====================
 
 export async function checkCnpjSerpro(cnpj: string, service: keyof typeof SERVICE_CONFIG = 'CCMEI_DADOS', options: any = {}): Promise<string> {

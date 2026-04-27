@@ -1,5 +1,5 @@
 import { ToolDefinition } from '../../openai-client';
-import { sendEnumeratedList, sendMeetingForm, updateUser, interpreter } from '../../server-tools';
+import { sendEnumeratedList, sendMeetingForm } from '../../server-tools';
 import { AgentContext } from '../../types';
 
 export const COMERCIAL_RULES = `
@@ -24,13 +24,12 @@ Antes de responder, você DEVE seguir este processo mental:
 ### Diferenciação: Atendimento por Chat vs Reunião
 - **Lead novo (não qualificado):** Conduza o atendimento inteiramente por chat. NÃO ofereça reunião proativamente.
 - **Lead qualificado (MQL ou SQL):** Após chamar update_user, apenas avise: "Um consultor da nossa equipe entrará em contato para agendar uma conversa com você."
+- **Coleta de situação concluída (Opção B do fluxo regularização):** Assim que você tiver coletado ao menos CNPJ, faturamento e situação de dívidas, chame 'enviar_link_reuniao' proativamente e depois chame update_user com {"status_atendimento": "reuniao_pendente"}.
 - **Cliente pede reunião explicitamente:** Chame 'enviar_link_reuniao' e em seguida chame update_user com {"status_atendimento": "reuniao"}.
 - **Cliente já é cliente (pós-venda):** Chame 'chamar_atendente' com reason="reuniao_cliente" para encaminhar ao time de atendimento.
 `;
 
 export const getComercialTools = (context: AgentContext): ToolDefinition[] => [
     { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
-    { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
-    { name: 'update_user', description: 'Atualizar dados cadastrais ou status do lead no banco de dados.', parameters: { type: 'object', properties: { campos: { type: 'object', description: 'Objeto contendo os campos a serem atualizados (ex: { situacao: "qualificado" })' } } }, function: async (args: any) => await updateUser({ ...args.campos, telefone: context.userPhone }) },
-    { name: 'interpreter', description: 'Analista de memória e histórico de conversas do cliente.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['get', 'post'] }, text: { type: 'string' }, category: { type: 'string' } } }, function: async (args: any) => await interpreter(context.userPhone, args.action, args.text, args.category) }
+    { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião. Use proativamente após coleta de situação completa.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
 ];

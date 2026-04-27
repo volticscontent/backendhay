@@ -83,7 +83,8 @@ export async function parseIncomingMessage(
     }
 
     // 3. Document extraction (PDF)
-    const docMsg = msgData.documentMessage as Record<string, unknown> | undefined;
+    // documentWithCaptionMessage é o formato usado por clientes Android recentes (WhatsApp v2.23+)
+    const docMsg = (msgData.documentMessage ?? msgData.documentWithCaptionMessage) as Record<string, unknown> | undefined;
     if (docMsg) {
         const caption = (docMsg.caption as string) || '';
         const fileName = (docMsg.fileName as string) || 'documento.pdf';

@@ -9,7 +9,7 @@ console.log('🔍 Diagnóstico WebSocket Evolution API');
 console.log('URL:', EVOLUTION_API_URL);
 console.log('Instance:', EVOLUTION_INSTANCE_NAME);
 
-function testConnection(name: string, options: any) {
+function testConnection(name: string, options: Record<string, unknown>) {
     console.log(`\n--- Testando: ${name} ---`);
     const socket = io(EVOLUTION_API_URL, options);
 

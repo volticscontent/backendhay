@@ -17,6 +17,7 @@ import integraGuiasRoutes from './routes/integra/guias';
 import intregraCaixaPostalRoutes from './routes/integra/caixa-postal';
 import intregraBillingRoutes from './routes/integra/billing';
 import botContextRoutes from './routes/bot-context';
+import cnpjRoutes from './routes/cnpj';
 import { startMessageWorker, startFollowUpWorker } from './queues/message-queue';
 import { startDebounceWorker } from './queues/message-debounce';
 import { startPgmeiWorker } from './queues/integra/job-pgmei';
@@ -55,6 +56,7 @@ app.use('/api', integraGuiasRoutes);
 app.use('/api', intregraCaixaPostalRoutes);
 app.use('/api', intregraBillingRoutes);
 app.use('/api', botContextRoutes);
+app.use('/api', cnpjRoutes);
 
 // Root health check
 app.get('/', (_req, res) => {

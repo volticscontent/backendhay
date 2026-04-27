@@ -14,8 +14,8 @@ async function configureInstance() {
 
     try {
         // 1. Verificar estado atual
-        const state: any = await evolutionGetConnectionState();
-        evolutionLogger.info(`Estado atual da instância: ${state?.instance?.state || 'Desconhecido'}`);
+        const state: Record<string, unknown> = await evolutionGetConnectionState() as Record<string, unknown>;
+        evolutionLogger.info(`Estado atual da instância: ${(state?.instance as Record<string, string>)?.state || 'Desconhecido'}`);
 
         // 2. Aplicar Configurações de Comportamento
         evolutionLogger.info('⚙️ Aplicando configurações de comportamento (Always Online, Reject Call)...');
@@ -54,8 +54,8 @@ async function configureInstance() {
         evolutionLogger.info('✅ Configurações de comportamento aplicadas com sucesso!');
         evolutionLogger.info('ℹ️ Nota: As configurações de Hardware (Chrome/Windows) devem ser mantidas no .env do servidor Evolution API conforme configurado no Easy Panel.');
 
-    } catch (error: any) {
-        evolutionLogger.error('❌ Erro ao configurar instância:', error.message);
+    } catch (error: unknown) {
+        evolutionLogger.error('❌ Erro ao configurar instância:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }
