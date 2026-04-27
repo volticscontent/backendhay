@@ -3,7 +3,15 @@
     "allow": [
       "Bash(npx tsc *)",
       "Bash(xargs grep *)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(node_modules/.bin/next build *)",
+      "Bash(npx next *)",
+      "Bash(grep -n \"//.*disparo\\\\|/\\\\*.*disparo\" \"D:/Códigos/Haylander/haylanderform/src/app/\\(admin\\)/lista/LeadList.tsx\" \"D:/Códigos/Haylander/haylanderform/src/components/chat/ChatInterface.tsx\" \"D:/Códigos/Haylander/haylanderform/src/app/\\(admin\\)/serpro/integra/robos/RobosClient.tsx\")",
+      "Bash(node \"D:/Códigos/Haylander/haylanderform/node_modules/.bin/tsc\" --noEmit --project \"D:/Códigos/Haylander/haylanderform/tsconfig.json\")",
+      "Bash(cmd /c \"cd /d D:\\\\Códigos\\\\Haylander\\\\haylanderform && node_modules\\\\.bin\\\\tsc.cmd --noEmit 2>&1\")",
+      "Bash(npx.cmd --prefix \"D:/Códigos/Haylander/haylanderform\" tsc --noEmit)",
+      "Bash(node \"D:/Códigos/Haylander/haylanderform/node_modules/typescript/bin/tsc\" --noEmit --project \"D:/Códigos/Haylander/haylanderform/tsconfig.json\")"
     ]
   }
 }

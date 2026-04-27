@@ -7,6 +7,7 @@ import { generateEmbedding } from './embedding';
 import { consultarServico } from '../lib/serpro';
 import { SERVICE_CONFIG } from '../lib/serpro-config';
 import { saveConsultation, maybeSavePdfFromBotResult } from '../lib/serpro-db';
+import { cnpjService } from '../lib/cnpj-service';
 import logger from '../lib/logger';
 
 const log = logger.child('ServerTools');
@@ -734,6 +735,72 @@ export async function checkCnpjSerpro(cnpj: string, service: keyof typeof SERVIC
 
 export async function consultarProcuracaoSerpro(cnpj: string): Promise<string> {
     return checkCnpjSerpro(cnpj, 'PROCURACAO');
+}
+
+/**
+ * Consulta dados PÚBLICOS de qualquer CNPJ usando a BrasilAPI e VERIFICA acesso Serpro.
+ * Esta ferramenta é a principal validação para saber se a procuração e-CAC está ativa.
+ */
+export async function consultarCnpjPublico(cnpj: string): Promise<string> {
+    const cleanCnpj = cnpj.replace(/\D/g, '');
+    const results = {
+        cnpj: cleanCnpj,
+        public_data: null as any,
+        serpro_access: {
+            active: false,
+            error_type: null as string | null,
+            message: null as string | null
+        }
+    };
+
+    try {
+        // 1. Sempre busca dados públicos (BrasilAPI)
+        const publicResult = await cnpjService.consultarCNPJ(cnpj);
+        if (publicResult.success) {
+            results.public_data = publicResult.data;
+            saveConsultation(cleanCnpj, 'CNPJ_API', publicResult.data, 200, 'bot').catch(() => {});
+        } else {
+            log.warn(`[consultarCnpjPublico] Falha BrasilAPI para ${cleanCnpj}: ${publicResult.error?.message}`);
+        }
+
+        // 2. Tenta acesso Serpro para validar Procuração
+        try {
+            const serproRaw = await checkCnpjSerpro(cleanCnpj, 'PROCURACAO');
+            const serproData = JSON.parse(serproRaw);
+            
+            if (serproData.status === 'error') {
+                results.serpro_access = {
+                    active: false,
+                    error_type: serproData.error_type || 'unknown_error',
+                    message: serproData.message
+                };
+            } else {
+                results.serpro_access = {
+                    active: true,
+                    error_type: null,
+                    message: 'Procuração e-CAC validada e ativa no Serpro.'
+                };
+            }
+        } catch (serproErr) {
+            results.serpro_access = {
+                active: false,
+                error_type: 'connection_error',
+                message: String(serproErr)
+            };
+        }
+
+        return JSON.stringify({
+            status: 'success',
+            ...results,
+            instruction: results.serpro_access.active 
+                ? "Procuração ATIVA. Você pode prosseguir com consultas profundas (PGMEI, SITFIS)."
+                : "Procuração AUSENTE ou INVÁLIDA. Você DEVE informar o cliente que a procuração e-CAC não foi detectada e orientá-lo a criá-la (Opção A)."
+        });
+
+    } catch (error) {
+        log.error(`[consultarCnpjPublico] Fatal error for ${cleanCnpj}:`, error);
+        return JSON.stringify({ status: 'error', message: String(error) });
+    }
 }
 
 export async function consultarDividaAtivaGeralSerpro(cnpj: string): Promise<string> {

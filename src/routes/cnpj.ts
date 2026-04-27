@@ -6,6 +6,8 @@
 import { Router } from 'express';
 import { cnpjService, CNPJValidator } from '../lib/cnpj-service';
 import { bootLogger } from '../lib/logger';
+import { query } from '../lib/db';
+import { saveConsultation } from '../lib/serpro-db';
 
 const router = Router();
 
@@ -23,6 +25,23 @@ router.get('/cnpj/:cnpj', async (req, res) => {
     const result = await cnpjService.consultarCNPJ(cnpj, clientIp);
     
     if (result.success) {
+      // Persistir para aparecer nas consultas do Admin
+      try {
+        const cleanCnpj = CNPJValidator.clean(cnpj);
+        const leadRow = await query(
+          `SELECT id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1`,
+          [cleanCnpj],
+        );
+        const leadId = (leadRow.rows[0]?.id as number | undefined) ?? null;
+        
+        // Salva a consulta no histórico para visibilidade no painel Serpro/Integra
+        // Usamos 'CNPJ_API' como tipo de serviço e 'test' como source para aparecer em "Consultas de Teste"
+        // se não houver lead vinculado.
+        saveConsultation(cleanCnpj, 'CNPJ_API', result.data, 200, 'test', leadId);
+      } catch (dbError) {
+        bootLogger.error(`Erro ao persistir consulta CNPJ no histórico: ${cnpj}`, dbError);
+      }
+
       res.json({
         success: true,
         data: result.data,
@@ -86,6 +105,23 @@ router.post('/cnpj/batch', async (req, res) => {
     bootLogger.info(`Consulta lote CNPJs: ${cnpjs.length} CNPJs - IP: ${clientIp}`);
     
     const results = await cnpjService.consultarLote(cnpjs, clientIp);
+    
+    // Persistir consultas bem-sucedidas no histórico
+    for (const result of results) {
+      if (result.success && result.data) {
+        try {
+          const cleanCnpj = CNPJValidator.clean(result.data.cnpj);
+          const leadRow = await query(
+            `SELECT id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1`,
+            [cleanCnpj],
+          );
+          const leadId = (leadRow.rows[0]?.id as number | undefined) ?? null;
+          saveConsultation(cleanCnpj, 'CNPJ_API', result.data, 200, 'test', leadId);
+        } catch (dbError) {
+          bootLogger.error(`Erro ao persistir consulta lote CNPJ no histórico: ${result.data.cnpj}`, dbError);
+        }
+      }
+    }
     
     // Estatísticas
     const successful = results.filter(r => r.success).length;

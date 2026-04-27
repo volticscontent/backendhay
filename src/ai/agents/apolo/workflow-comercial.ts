@@ -1,5 +1,5 @@
 import { ToolDefinition } from '../../openai-client';
-import { sendEnumeratedList, sendMeetingForm } from '../../server-tools';
+import { sendEnumeratedList, sendMeetingForm, consultarCnpjPublico } from '../../server-tools';
 import { AgentContext } from '../../types';
 
 export const COMERCIAL_RULES = `
@@ -18,6 +18,13 @@ Antes de responder, você DEVE seguir este processo mental:
 5. Se for DESQUALIFICADO, chame update_user com {"situacao": "desqualificado"}.
 6. **LINGUAGEM DE CONTADOR:** No campo 'observacoes' do update_user, salve resumos úteis para um contador, evitando termos técnicos.
 
+### Consulta de Dados Públicos e Validação de Procuração (CNPJ)
+- Se o cliente fornecer um CNPJ, use a tool 'consultar_cnpj_publico' IMEDIATAMENTE.
+- **PRINCIPAL VALIDADOR:** Esta ferramenta busca dados básicos (BrasilAPI) e **valida se a procuração e-CAC está ativa** (via Serpro).
+- **SE Procuração estiver ATIVA:** Você pode prosseguir com consultas profundas (PGMEI, Dívidas) e parabenizar o cliente por já ter o acesso configurado.
+- **SE Procuração estiver AUSENTE:** Você DEVE informar ao cliente que o acesso seguro ainda não foi detectado e orientá-lo a criar a procuração e-CAC (Opção A) usando o vídeo tutorial.
+- Se o resultado indicar que a empresa está 'BAIXADA', 'INAPTA' ou 'SUSPENSA', acolha o cliente e ofereça ajuda para regularizar.
+
 ### Acolhimento e Menu Inicial
 - **REGRA DE OURO:** Se for a primeira mensagem, envie uma saudação e CHAME A TOOL 'enviar_lista_enumerada'.
 
@@ -32,4 +39,10 @@ Antes de responder, você DEVE seguir este processo mental:
 export const getComercialTools = (context: AgentContext): ToolDefinition[] => [
     { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
     { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião. Use proativamente após coleta de situação completa.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
+    {
+        name: 'consultar_cnpj_publico',
+        description: 'Consulta dados cadastrais públicos e VALIDA status da Procuração e-CAC. Use sempre que o cliente informar um CNPJ.',
+        parameters: { type: 'object', properties: { cnpj: { type: 'string', description: 'CNPJ a ser consultado (apenas números ou formatado).' } }, required: ['cnpj'] },
+        function: async (args: any) => await consultarCnpjPublico(args.cnpj)
+    },
 ];

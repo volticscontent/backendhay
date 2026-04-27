@@ -17,7 +17,7 @@ describe('Axios Debug - Verificação detalhada', () => {
     
     // Forma 2: Usar axios.createError (se disponível)
     try {
-      const error2 = axios.createError('Request failed', { response: { status: 404 } });
+      const error2 = (axios as any).createError('Request failed', { response: { status: 404 } });
       console.log('Erro 2 - axios.isAxiosError:', axios.isAxiosError(error2));
     } catch (e) {
       console.log('axios.createError não disponível');
