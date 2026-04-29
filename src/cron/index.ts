@@ -278,5 +278,76 @@ export function registerCronJobs(): void {
         }
     });
 
+    // ============================
+    // 7. Confirmação Pós-Reunião — 4x ao dia (12h, 15h, 18h, 21h)
+    //    Coleta reuniões de fechamento do dia que ainda não foram confirmadas
+    //    e notifica o Haylander para atualizar o status.
+    // ============================
+    cron.schedule('0 12,15,18,21 * * *', async () => {
+        const log = cronLogger.withTrace(`cron-pos-reuniao-${Date.now().toString(36)}`);
+        log.info('Confirmação Pós-Reunião - Iniciando...');
+
+        const client = await pool.connect();
+        try {
+            // Busca reuniões de fechamento com data_reuniao nas últimas 12h
+            // que ainda estão com status pendente (não confirmadas como cliente ou perdida)
+            const res = await client.query(`
+                SELECT
+                    l.id, l.telefone, l.nome_completo,
+                    lp.data_reuniao, lp.status_atendimento, lp.observacoes
+                FROM leads l
+                JOIN leads_processo lp ON l.id = lp.lead_id
+                WHERE lp.status_atendimento IN ('reuniao_fechamento', 'reuniao_pendente', 'reuniao')
+                  AND lp.data_reuniao IS NOT NULL
+                  AND lp.data_reuniao <= NOW()
+                  AND lp.data_reuniao >= NOW() - INTERVAL '12 hours'
+                  AND l.situacao NOT IN ('cliente', 'desqualificado')
+                ORDER BY lp.data_reuniao ASC
+            `);
+
+            if (res.rows.length === 0) {
+                log.info('Nenhuma reunião pendente de confirmação.');
+                return;
+            }
+
+            const attendantPhone = process.env.ATTENDANT_PHONE;
+            if (!attendantPhone) {
+                log.warn('ATTENDANT_PHONE não configurado — notificação não enviada.');
+                return;
+            }
+
+            // Monta resumo das reuniões pendentes para o Haylander
+            const linhas = res.rows.map((r, i) => {
+                const hora = r.data_reuniao
+                    ? new Date(r.data_reuniao).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+                    : '?';
+                const tipo = r.status_atendimento === 'reuniao_fechamento' ? '🔴 Fechamento' : '📅 Atendimento';
+                return `${i + 1}. *${r.nome_completo || r.telefone}* — ${hora} (${tipo})`;
+            });
+
+            const horaAtual = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+            const msg =
+                `📋 *Confirmação de Reuniões — ${horaAtual}*\n\n` +
+                `${linhas.join('\n')}\n\n` +
+                `Acesse o painel para atualizar o status de cada lead:\n` +
+                `• *Cliente fechou* → marque como "cliente"\n` +
+                `• *Não apareceu / não fechou* → marque situação e adicione observação\n\n` +
+                `_Este lembrete é enviado automaticamente 4x ao dia enquanto houver reuniões pendentes._`;
+
+            await enqueueMessages({
+                phone: attendantPhone,
+                messages: [{ content: msg, type: 'text', delay: 0 }],
+                context: 'cron-pos-reuniao'
+            });
+
+            log.info(`Notificação pós-reunião enviada — ${res.rows.length} reuniões pendentes`);
+
+        } catch (error) {
+            log.error('Erro no cron pós-reunião:', error);
+        } finally {
+            client.release();
+        }
+    });
+
     cronLogger.info('✅ Todos os jobs registrados');
 }

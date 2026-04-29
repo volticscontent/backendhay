@@ -21,11 +21,31 @@ export function createRegularizacaoMessageSegments(): MessageSegment[] {
 
 export function createAutonomoMessageSegments(): MessageSegment[] {
     return [
-        { id: 'autonomo-inicio', content: 'Perfeito! ✅ Vou te enviar o passo a passo completo.', type: 'text', delay: 1000 },
-        { id: 'link-ecac', content: 'Acesse o e-CAC através deste *link oficial* do Governo Federal:', type: 'text', delay: 1500 },
-        { id: 'link-ecac-url', content: 'https://cav.receita.fazenda.gov.br/autenticacao/login', type: 'link', delay: 2000, metadata: { url: 'https://cav.receita.fazenda.gov.br/autenticacao/login', trackingKey: 'link-ecac' } },
-        { id: 'instrucoes-ecac', content: 'No e-CAC, acesse *Outros > Outorgar Procuração* e pesquise nosso escritório pelo CPF/CNPJ. Autorize os serviços de *Consulta e Gestão* e salve.', type: 'text', delay: 2500 },
-        { id: 'instrucoes-finais', content: 'Após criar a procuração, *volte aqui e me avise* que conseguiu! 🚀 Confirmarei a autorização e daremos início à consultoria.', type: 'text', delay: 3000 },
+        { id: 'autonomo-inicio', content: 'Perfeito! ✅ Preparei tudo para você. Primeiro, assista a este vídeo de menos de 2 minutos — ele mostra exatamente o que fazer:', type: 'text', delay: 1000 },
+        { id: 'video-tutorial', content: 'https://www.instagram.com/reel/DWquc43Cdnm/?igsh=OXlzc2ZzNDVvaHU5', type: 'link', delay: 1500, metadata: { url: 'https://www.instagram.com/reel/DWquc43Cdnm/?igsh=OXlzc2ZzNDVvaHU5', trackingKey: 'video-tutorial' } },
+        { id: 'passo-a-passo', content: `*✅ Como criar a Procuração no e-CAC — Passo a Passo*
+
+*1. Acesse o Portal de Autorizações*
+🔗 https://servicos.receitafederal.gov.br/servico/autorizacoes/minhas-autorizacoes
+🔐 Faça login com sua conta Gov.br nível Prata ou Ouro
+✅ Selecione seu nome no canto superior direito
+⌨️ Digite seu CNPJ no primeiro campo, selecione o perfil "Representante no CNPJ" e clique em *Representar*
+
+*2. Clique em "Nova Autorização"*
+
+*3. Preencha os dados:*
+Meu CNPJ: *51.564.549/0001-40*
+Validade: escolha o prazo mínimo de 5 dias
+
+*4. Serviços*
+✅ Selecione *Todos* e clique em Avançar
+
+*5. Assine digitalmente*
+📲 O sistema enviará um código de 6 dígitos no app Gov.br
+🔑 Insira o código no site para concluir
+
+✅ A procuração é ativada na hora ou em até 24 horas.`, type: 'text', delay: 2500 },
+        { id: 'instrucoes-finais', content: 'Após criar a procuração, *me avise aqui* que concluiu! 🚀 Vou confirmar a autorização e em seguida faço a consulta completa das pendências do seu CNPJ.', type: 'text', delay: 3500 },
     ];
 }
 

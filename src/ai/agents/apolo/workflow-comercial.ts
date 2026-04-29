@@ -1,48 +1,100 @@
 import { ToolDefinition } from '../../openai-client';
-import { sendEnumeratedList, sendMeetingForm, consultarCnpjPublico } from '../../server-tools';
+import { sendEnumeratedList, sendMeetingForm, consultarCnpjPublico, callAttendant, updateUser } from '../../server-tools';
 import { AgentContext } from '../../types';
 
 export const COMERCIAL_RULES = `
 # Regras Comerciais e Triagem
-**FLUXO DE PENSAMENTO OBRIGATÓRIO (Chain of Thought):**
-Antes de responder, você DEVE seguir este processo mental:
-1. Faça 1 ou 2 perguntas curtas e amigáveis para descobrir o cenário básico (faturamento mensal aproximado e se tem dívidas), caso ele não tenha informado.
-2. Com base nas respostas, classifique o lead AGORA (Respeite a ordem de PRECEDÊNCIA):
-   - **REGRA 1 (CRÍTICA):** Faturamento É 'Até 5k' E SEM Dívida? -> **DESQUALIFICADO** (PARE AQUI!).
-   - Faturamento > 10k? -> MQL
-   - Tem Dívida (tem_divida = true)? -> MQL
-   - Quer Abrir Empresa (Novo CNPJ)? -> MQL (Somente se NÃO cair na regra 1).
-   - NENHUM dos acima? -> DESQUALIFICADO.
-3. Se for QUALIFICADO (MQL ou SQL), você DEVE IMEDIATAMENTE chamar a tool update_user preenchendo 'qualificacao', 'motivo_qualificacao' e as informações extraídas.
-4. **PASSAGEM DE BASTÃO:** Assim que chamar a update_user para qualificar, avise o cliente que um consultor entrará em contato.
-5. Se for DESQUALIFICADO, chame update_user com {"situacao": "desqualificado"}.
-6. **LINGUAGEM DE CONTADOR:** No campo 'observacoes' do update_user, salve resumos úteis para um contador, evitando termos técnicos.
 
-### Consulta de Dados Públicos e Validação de Procuração (CNPJ)
-- Se o cliente fornecer um CNPJ, use a tool 'consultar_cnpj_publico' IMEDIATAMENTE.
-- **PRINCIPAL VALIDADOR:** Esta ferramenta busca dados básicos (BrasilAPI) e **valida se a procuração e-CAC está ativa** (via Serpro).
-- **SE Procuração estiver ATIVA:** Você pode prosseguir com consultas profundas (PGMEI, Dívidas) e parabenizar o cliente por já ter o acesso configurado.
-- **SE Procuração estiver AUSENTE:** Você DEVE informar ao cliente que o acesso seguro ainda não foi detectado e orientá-lo a criar a procuração e-CAC (Opção A) usando o vídeo tutorial.
-- Se o resultado indicar que a empresa está 'BAIXADA', 'INAPTA' ou 'SUSPENSA', acolha o cliente e ofereça ajuda para regularizar.
+### Abertura — Primeira Mensagem
+Na primeira mensagem: saudação calorosa + envie a apresentação comercial ('enviar_apresentacao_comercial') + pergunte como pode ajudar.
+NÃO mande menu numerado. A conversa começa de forma natural.
 
-### Acolhimento e Menu Inicial
-- **REGRA DE OURO:** Se for a primeira mensagem, envie uma saudação e CHAME A TOOL 'enviar_lista_enumerada'.
+### Quando o Cliente Fornece o CNPJ
+1. Chame 'consultar_cnpj_publico' IMEDIATAMENTE — ela busca dados públicos (BrasilAPI) e já preenche a ficha automaticamente.
+2. Confirme com o cliente os dados encontrados: "Vi que sua empresa é [razao_social], MEI no ramo de [tipo_negocio], em [cidade/UF]. Está correto?"
+3. Se is_mei = true: confirme que é MEI antes de prosseguir.
+4. Se situacao_cadastral for BAIXADA, INAPTA ou SUSPENSA: acolha e explique que podemos regularizar.
+5. Se procuração ATIVA: prossiga direto para consultas Serpro (PGMEI, dívidas).
+6. Se procuração AUSENTE: explique que a procuração e-CAC é OBRIGATÓRIA para prestarmos o serviço. Use 'enviar_processo_autonomo'.
 
-### Diferenciação: Atendimento por Chat vs Reunião
-- **Lead novo (não qualificado):** Conduza o atendimento inteiramente por chat. NÃO ofereça reunião proativamente.
-- **Lead qualificado (MQL ou SQL):** Após chamar update_user, apenas avise: "Um consultor da nossa equipe entrará em contato para agendar uma conversa com você."
-- **Coleta de situação concluída (Opção B do fluxo regularização):** Assim que você tiver coletado ao menos CNPJ, faturamento e situação de dívidas, chame 'enviar_link_reuniao' proativamente e depois chame update_user com {"status_atendimento": "reuniao_pendente"}.
-- **Cliente pede reunião explicitamente:** Chame 'enviar_link_reuniao' e em seguida chame update_user com {"status_atendimento": "reuniao"}.
-- **Cliente já é cliente (pós-venda):** Chame 'chamar_atendente' com reason="reuniao_cliente" para encaminhar ao time de atendimento.
+### A Procuração e-CAC é OBRIGATÓRIA
+A procuração não é uma opção — é um requisito técnico para acessarmos os sistemas da Receita Federal e prestar o serviço corretamente.
+Enquanto o cliente não tiver a procuração ativa, não conseguimos consultar dívidas, emitir guias nem automatizar nenhum processo em nome dele.
+Explique isso com clareza e empatia: "Preciso dessa autorização para conseguir trabalhar no seu CNPJ com segurança, sem precisar da sua senha."
+
+Se o cliente recusar fazer a procuração agora:
+- Explique o motivo de forma simples e empática
+- Ofereça simular valores com base nas informações que ele tem (meses de DAS em aberto, etc.)
+- Se ele aceitar a simulação e demonstrar intenção de contratar, chame 'agendar_reuniao_fechamento'
+- Se ele recusar a procuração E a simulação: marque red_flag(PROCURACAO_RECUSADA) e encerre com educação
+
+### Qualificação (BANT)
+Colete de forma conversacional, nunca em lista:
+- **Necessidade:** Qual o problema? (dívidas, notas, organização, abertura)
+- **Urgência:** Tem prazo ou pressão? (notificação da Receita, DAS atrasado, multa)
+- **Capacidade:** Faturamento mensal aproximado
+
+Classificação:
+- **SQL** (BANT confirmado): dor declarada + urgência + faturamento compatível → 'agendar_reuniao_fechamento'
+- **MQL**: tem interesse mas falta urgência ou orçamento → continue coletando, use 'enviar_link_reuniao' ao concluir
+- **DESQUALIFICADO**: faturamento ≤ R$5k/mês E sem dívida E sem plano de crescimento → update_user(situacao=desqualificado)
+
+Ao qualificar: update_user com qualificacao + motivo_qualificacao (TAG: RESGATE_URGENTE | PARCEIRO_DE_CRESCIMENTO | NUTRICAO) + observacoes com resumo BANT completo para o Haylander.
+
+### Reuniões
+- 'enviar_link_reuniao' → consulta simples, sem urgência definida
+- 'agendar_reuniao_fechamento' → lead SQL confirmado, urgência presente, pronto para proposta. Notifica o Haylander com urgência.
 `;
 
 export const getComercialTools = (context: AgentContext): ToolDefinition[] => [
-    { name: 'enviar_lista_enumerada', description: 'Exibir a lista de opções numerada (1-5) para o cliente via WhatsApp.', parameters: { type: 'object', properties: {} }, function: async () => await sendEnumeratedList(context.userPhone) },
-    { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento de reunião. Use proativamente após coleta de situação completa.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
+    {
+        name: 'enviar_apresentacao_comercial',
+        description: 'Envia a apresentação comercial (PDF) para o cliente. Use na primeira mensagem, após a saudação.',
+        parameters: { type: 'object', properties: {} },
+        function: async () => {
+            const { sendCommercialPresentation } = await import('../../server-tools');
+            return sendCommercialPresentation(context.userPhone, 'apc');
+        }
+    },
+    {
+        name: 'enviar_link_reuniao',
+        description: 'Envia link de agendamento para consulta simples (lead MQL, sem urgência definida). Para lead SQL com urgência, use agendar_reuniao_fechamento.',
+        parameters: { type: 'object', properties: {} },
+        function: async () => {
+            await updateUser({ telefone: context.userPhone, status_atendimento: 'reuniao_pendente' });
+            return sendMeetingForm(context.userPhone);
+        }
+    },
+    {
+        name: 'agendar_reuniao_fechamento',
+        description: 'Use quando o lead é SQL: dor declarada + urgência + capacidade financeira confirmadas. Envia o link de reunião E notifica o Haylander com urgência incluindo o resumo do lead.',
+        parameters: {
+            type: 'object',
+            properties: {
+                resumo: { type: 'string', description: 'Resumo BANT completo: problema, urgência, faturamento, TAG, o que já foi discutido.' }
+            },
+            required: ['resumo']
+        },
+        function: async (args: any) => {
+            await updateUser({ telefone: context.userPhone, status_atendimento: 'reuniao_fechamento' });
+            const [meetingResult] = await Promise.all([
+                sendMeetingForm(context.userPhone),
+                callAttendant(
+                    context.userPhone,
+                    `🔴 REUNIÃO DE FECHAMENTO AGENDADA\n\nLead: ${context.userPhone}\n\n${args.resumo}\n\nAção: Confirme disponibilidade e entre na chamada preparado para fechar.`
+                )
+            ]);
+            return meetingResult;
+        }
+    },
     {
         name: 'consultar_cnpj_publico',
-        description: 'Consulta dados cadastrais públicos e VALIDA status da Procuração e-CAC. Use sempre que o cliente informar um CNPJ.',
-        parameters: { type: 'object', properties: { cnpj: { type: 'string', description: 'CNPJ a ser consultado (apenas números ou formatado).' } }, required: ['cnpj'] },
-        function: async (args: any) => await consultarCnpjPublico(args.cnpj)
+        description: 'Use IMEDIATAMENTE quando o cliente informar um CNPJ. Busca dados públicos (BrasilAPI), detecta se é MEI, preenche a ficha automaticamente e valida se a procuração e-CAC está ativa no Serpro.',
+        parameters: {
+            type: 'object',
+            properties: { cnpj: { type: 'string', description: 'CNPJ informado pelo cliente.' } },
+            required: ['cnpj']
+        },
+        function: async (args: any) => consultarCnpjPublico(args.cnpj, context.userPhone)
     },
 ];

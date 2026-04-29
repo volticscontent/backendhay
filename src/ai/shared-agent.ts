@@ -94,14 +94,21 @@ export function getSharedTools(context: AgentContext): ToolDefinition[] {
         },
         {
             name: 'update_user',
-            description: 'Atualizar dados do usuário. OBRIGATÓRIO informar observacoes com resumo e motivo_qualificacao ao qualificar/desqualificar.',
+            description: `Atualizar dados do lead no banco. Use sempre que coletar uma informação nova ou mudar o estágio do lead.
+
+QUANDO QUALIFICAR (MQL ou SQL): preencha qualificacao + motivo_qualificacao (TAG obrigatória: RESGATE_URGENTE | GESTAO_E_CRESCIMENTO | NUTRICAO) + observacoes com resumo BANT completo.
+QUANDO DESQUALIFICAR: situacao=desqualificado + motivo_qualificacao explicando o motivo.
+QUANDO RED-FLAG: situacao=red_flag + motivo_qualificacao com o tipo (PROCURACAO_RECUSADA | SUMIU_POS_PROCURACAO | SUMIU_POS_PROPOSTA | PRECO_RECUSADO). Red-flag NÃO encerra o lead — marca para follow-up humano.`,
             parameters: {
                 type: 'object',
                 properties: {
-                    situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] },
+                    situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'red_flag', 'Ativo'] },
                     qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] },
-                    motivo_qualificacao: { type: 'string', description: 'Por que foi qualificado ou desqualificado?' },
-                    observacoes: { type: 'string', description: 'Relato do contexto, escolhas (ex: autonomo) e histórico do lead para os humanos.' },
+                    motivo_qualificacao: {
+                        type: 'string',
+                        description: 'TAG de abordagem ao qualificar (RESGATE_URGENTE | GESTAO_E_CRESCIMENTO | NUTRICAO), tipo de red-flag, ou motivo de desqualificação. Sempre preenchido.'
+                    },
+                    observacoes: { type: 'string', description: 'Resumo BANT para o Haylander: necessidade declarada, urgência, capacidade de pagamento, próximo passo.' },
                     faturamento_mensal: { type: 'string' },
                     tipo_negocio: { type: 'string' },
                     tem_divida: { type: 'boolean' },
@@ -123,6 +130,12 @@ export function getSharedTools(context: AgentContext): ToolDefinition[] {
                     await setAgentRouting(context.userPhone, 'vendedor');
                     agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`);
                 }
+                if (args.situacao === 'red_flag') {
+                    const tipo = (args.motivo_qualificacao as string) || 'não especificado';
+                    const reason = `🚩 RED-FLAG detectado\nLead: ${context.userPhone}\nTipo: ${tipo}\nAção: follow-up humano necessário`;
+                    await callAttendant(context.userPhone, reason);
+                    agentLogger.warn(`🚩 Red-flag marcado: ${context.userPhone} — ${tipo}`);
+                }
                 return result;
             }
         },
@@ -143,12 +156,6 @@ export function getSharedTools(context: AgentContext): ToolDefinition[] {
             description: 'Ferramenta de memória compartilhada (post/get).',
             parameters: { type: 'object', properties: { action: { type: 'string', enum: ['post', 'get'] }, text: { type: 'string' }, category: { type: 'string', enum: ['qualificacao', 'vendas', 'atendimento'] } }, required: ['action', 'text'] },
             function: async (args) => await interpreter(context.userPhone, args.action as 'post' | 'get', args.text as string, args.category as 'qualificacao' | 'vendas' | 'atendimento')
-        },
-        {
-            name: 'select_User',
-            description: 'Buscar informações atualizadas do lead no banco de dados.',
-            parameters: { type: 'object', properties: {} },
-            function: async () => await getUser(context.userPhone)
         },
         {
             name: 'consultar_dados_cliente',

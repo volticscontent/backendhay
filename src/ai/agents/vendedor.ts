@@ -2,7 +2,7 @@ import { AgentContext, AgentMessage } from '../types';
 import { runAgent, ToolDefinition } from '../openai-client';
 import {
     tryScheduleMeeting, searchServices,
-    setAgentRouting, sendMeetingForm, updateUser
+    setAgentRouting, sendMeetingForm, updateUser, callAttendant
 } from '../server-tools';
 import { prepareAgentContext, getSharedTools } from '../shared-agent';
 
@@ -77,7 +77,37 @@ export async function runVendedorAgent(message: AgentMessage, context: AgentCont
         .replace('{{CURRENT_DATE}}', sharedCtx.currentDate);
 
     const customTools: ToolDefinition[] = [
-        { name: 'enviar_link_reuniao', description: 'Gera e envia o link de agendamento.', parameters: { type: 'object', properties: {} }, function: async () => await sendMeetingForm(context.userPhone) },
+        {
+            name: 'enviar_link_reuniao',
+            description: 'Envia link de agendamento para consulta simples. Para lead com urgência e intenção de fechar, use agendar_reuniao_fechamento.',
+            parameters: { type: 'object', properties: {} },
+            function: async () => {
+                await updateUser({ telefone: context.userPhone, status_atendimento: 'reuniao_pendente' });
+                return sendMeetingForm(context.userPhone);
+            }
+        },
+        {
+            name: 'agendar_reuniao_fechamento',
+            description: 'Use quando o lead confirmou intenção de contratar. Envia o link de reunião E notifica o Haylander com urgência e resumo completo do lead.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    resumo: { type: 'string', description: 'Resumo BANT: problema, urgência, faturamento, TAG, histórico da conversa.' }
+                },
+                required: ['resumo']
+            },
+            function: async (args: any) => {
+                await updateUser({ telefone: context.userPhone, status_atendimento: 'reuniao_fechamento' });
+                const [meetingResult] = await Promise.all([
+                    sendMeetingForm(context.userPhone),
+                    callAttendant(
+                        context.userPhone,
+                        `🔴 REUNIÃO DE FECHAMENTO\n\nLead: ${context.userPhone}\n\n${args.resumo}\n\nAção: Confirme disponibilidade antes da chamada.`
+                    )
+                ]);
+                return meetingResult;
+            }
+        },
         { name: 'tentar_agendar', description: 'Tentar agendar reunião (verifica disponibilidade).', parameters: { type: 'object', properties: { data_horario: { type: 'string', description: 'Data e hora (ex: 25/12/2023 14:00)' } }, required: ['data_horario'] }, function: async (args) => await tryScheduleMeeting(context.userPhone, args.data_horario as string) },
         {
             name: 'finalizar_atendimento_vendas', description: 'Encerra o atendimento comercial e devolve ao suporte.',

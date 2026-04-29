@@ -58,13 +58,28 @@ async function seedIfEmpty(nameCol: string, valueCol: string, descriptionCol: st
     if (parseInt(res.rows[0].count) > 0) return;
     await client.query(
       `INSERT INTO services (${nameCol},${valueCol},${descriptionCol}) VALUES
-       ($1,$2,$3),($4,$5,$6),($7,$8,$9),($10,$11,$12),($13,$14,$15)`,
+       ($1,$2,$3),($4,$5,$6),($7,$8,$9),($10,$11,$12),($13,$14,$15),($16,$17,$18),($19,$20,$21)`,
       [
-        'Abertura de MEI', 0, 'Processo completo de abertura de Microempreendedor Individual',
-        'Regularização de Pendências', 0, 'Análise e regularização de pendências fiscais do MEI',
-        'Declaração Anual (DASN-SIMEI)', 0, 'Envio da declaração anual de faturamento do MEI',
-        'Parcelamento de Dívidas', 0, 'Negociação e parcelamento de dívidas fiscais',
-        'Consultoria Contábil', 0, 'Orientação contábil especializada para MEI e empresas',
+        'Plano Basic', 150.00,
+        'Contabilidade mensal para MEI. Inclui: emissão de guias DAS e notas fiscais, acompanhamento de faturamento, DASN-SIMEI e suporte via WhatsApp (respostas em até 24h). Ideal para MEI com operação simples.',
+
+        'Plano Premium', 450.00,
+        'MAIS VENDIDO (80% dos clientes). Tudo do Basic mais suporte via WhatsApp e E-mail, planejamento tributário básico e acompanhamento de pendências fiscais. Ideal para MEI/ME com faturamento regular que quer acompanhamento próximo.',
+
+        'Plano Diamond', 1797.00,
+        'Plano completo para infoprodutores e empreendedores digitais com faturamento elevado. Tudo do Premium mais: suporte por videoconferência, assessoria financeira e contábil completa, consultoria financeira quinzenal e planejamento tributário avançado com redução legal de impostos.',
+
+        'Regularização de CNPJ', 0,
+        'Serviço avulso para MEI com CNPJ irregular. Inclui: diagnóstico completo via Serpro (PGMEI + Dívida Ativa), negociação e parcelamento de dívidas fiscais, regularização perante a Receita Federal. Valor sob consulta conforme volume de dívidas.',
+
+        'Abertura de MEI', 0,
+        'Abertura completa de Microempreendedor Individual. Inclui orientação sobre enquadramento, CNAE ideal para o negócio e obrigações mensais. Valor a confirmar.',
+
+        'DASN-SIMEI Avulso', 0,
+        'Envio da declaração anual de faturamento do MEI (prazo: até 31 de maio). Para quem não possui plano mensal ativo. Evita multa por atraso.',
+
+        'Transformação MEI para ME/LTDA', 0,
+        'Para quem ultrapassou o limite do MEI ou precisa de mais estrutura jurídica. Inclui análise do melhor regime tributário (Simples Nacional, Lucro Presumido) e todo o processo de abertura da nova empresa. Valor sob consulta.',
       ],
     );
   } catch (e) {

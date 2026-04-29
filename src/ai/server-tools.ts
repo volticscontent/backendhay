@@ -509,38 +509,50 @@ export async function sendCommercialPresentation(phone: string, type: 'apc' | 'v
         if (res.rows.length > 0 && res.rows[0].value) mediaUrl = res.rows[0].value;
     } catch { /* usa default */ }
 
+    const isSocialUrl = /instagram\.com|youtu|tiktok|facebook\.com/.test(mediaUrl);
+
     try {
         if (type === 'apc') {
             const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
-            log.info(`[sendCommercialPresentation] Evolution response (APC) for ${phone}:`, { evolution_log: evoLog });
-            
+            log.info(`[sendCommercialPresentation] APC sent for ${phone}`);
             try {
                 const { notifySocketServer } = await import('../lib/socket');
                 notifySocketServer('haylander-chat-updates', {
-                    chatId: jid,
-                    fromMe: true,
+                    chatId: jid, fromMe: true,
                     message: { conversation: `[Apresentação Comercial enviada]` },
-                    id: `msg-${Date.now()}`,
-                    messageTimestamp: Math.floor(Date.now() / 1000)
+                    id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
                 }).catch(() => {});
             } catch (e) {}
-
             return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type, evolution_log: evoLog });
         } else {
+            // URL social (Instagram, YouTube, etc): envia como mensagem de texto com link
+            if (isSocialUrl) {
+                const { evolutionSendTextMessage } = await import('../lib/evolution');
+                const text = `🎥 *Vídeo Tutorial — Como criar a Procuração no e-CAC*\n\n${mediaUrl}\n\n_Assista antes de seguir os passos abaixo. O processo leva menos de 2 minutos._`;
+                const evoLog = await evolutionSendTextMessage(jid, text);
+                log.info(`[sendCommercialPresentation] Video tutorial (social URL) sent for ${phone}`);
+                try {
+                    const { notifySocketServer } = await import('../lib/socket');
+                    notifySocketServer('haylander-chat-updates', {
+                        chatId: jid, fromMe: true,
+                        message: { conversation: `[Vídeo Tutorial enviado — ${mediaUrl}]` },
+                        id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
+                    }).catch(() => {});
+                } catch (e) {}
+                return JSON.stringify({ status: 'sent', message: 'Link do vídeo tutorial enviado.', type, url: mediaUrl });
+            }
+
+            // URL de arquivo (R2/mp4): envia como vídeo
             const evoLog = await evolutionSendMediaMessage(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
-            log.info(`[sendCommercialPresentation] Evolution response (Video) for ${phone}:`, { evolution_log: evoLog });
-            
+            log.info(`[sendCommercialPresentation] Video file sent for ${phone}`);
             try {
                 const { notifySocketServer } = await import('../lib/socket');
                 notifySocketServer('haylander-chat-updates', {
-                    chatId: jid,
-                    fromMe: true,
+                    chatId: jid, fromMe: true,
                     message: { conversation: `[Vídeo Tutorial enviado]` },
-                    id: `msg-${Date.now()}`,
-                    messageTimestamp: Math.floor(Date.now() / 1000)
+                    id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
                 }).catch(() => {});
             } catch (e) {}
-
             return JSON.stringify({ status: 'sent', message: 'Vídeo tutorial enviado.', type, evolution_log: evoLog });
         }
     } catch (error) {
@@ -587,9 +599,9 @@ export async function getClientDataWithFreshness(phone: string): Promise<string>
                 l.id, l.telefone, l.nome_completo, l.email, l.cpf,
                 l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
                 l.tem_divida, l.tipo_divida, l.valor_divida_federal, l.valor_divida_pgfn,
-                l.situacao, l.qualificacao, l.observacoes, l.atualizado_em,
+                l.situacao, l.qualificacao, l.atualizado_em,
                 lp.servico, lp.status_atendimento, lp.procuracao_ativa,
-                lp.procuracao_validade, lp.observacoes AS obs_processo
+                lp.procuracao_validade, lp.observacoes
             FROM leads l
             LEFT JOIN leads_processo lp ON l.id = lp.lead_id
             WHERE l.telefone = $1
@@ -676,7 +688,6 @@ export async function getClientDataWithFreshness(phone: string): Promise<string>
                     procuracao_validade: lead.procuracao_validade,
                     status_atendimento: lead.status_atendimento,
                     observacoes: lead.observacoes,
-                    obs_processo: lead.obs_processo,
                 },
             },
             consultas_serpro: consultasFrescor,
@@ -741,11 +752,13 @@ export async function consultarProcuracaoSerpro(cnpj: string): Promise<string> {
  * Consulta dados PÚBLICOS de qualquer CNPJ usando a BrasilAPI e VERIFICA acesso Serpro.
  * Esta ferramenta é a principal validação para saber se a procuração e-CAC está ativa.
  */
-export async function consultarCnpjPublico(cnpj: string): Promise<string> {
+export async function consultarCnpjPublico(cnpj: string, userPhone?: string): Promise<string> {
     const cleanCnpj = cnpj.replace(/\D/g, '');
     const results = {
         cnpj: cleanCnpj,
         public_data: null as any,
+        is_mei: false,
+        ficha_auto_preenchida: {} as Record<string, unknown>,
         serpro_access: {
             active: false,
             error_type: null as string | null,
@@ -754,48 +767,68 @@ export async function consultarCnpjPublico(cnpj: string): Promise<string> {
     };
 
     try {
-        // 1. Sempre busca dados públicos (BrasilAPI)
+        // 1. Dados públicos via BrasilAPI
         const publicResult = await cnpjService.consultarCNPJ(cnpj);
-        if (publicResult.success) {
-            results.public_data = publicResult.data;
-            saveConsultation(cleanCnpj, 'CNPJ_API', publicResult.data, 200, 'bot').catch(() => {});
+        if (publicResult.success && publicResult.data) {
+            const d = publicResult.data;
+            results.public_data = d;
+            saveConsultation(cleanCnpj, 'CNPJ_API', d, 200, 'bot').catch(() => {});
+
+            // Detecta MEI via natureza jurídica (código 213-5 = Empresário Individual = MEI)
+            const natJur = (d.natureza_juridica || '').toLowerCase();
+            results.is_mei = natJur.includes('213-5') || natJur.includes('empresário (individual)') || natJur.includes('empresario (individual)');
+
+            // Monta ficha a partir de dados públicos para auto-preenchimento
+            const ficha: Record<string, unknown> = {
+                cnpj: cleanCnpj,
+                razao_social: d.razao_social || undefined,
+                nome_fantasia: d.nome_fantasia || undefined,
+                tipo_negocio: d.atividades_principais?.[0]?.text || undefined,
+                endereco: d.endereco?.logradouro || undefined,
+                numero: d.endereco?.numero || undefined,
+                complemento: d.endereco?.complemento || undefined,
+                bairro: d.endereco?.bairro || undefined,
+                cidade: d.endereco?.municipio || undefined,
+                estado: d.endereco?.uf || undefined,
+                cep: d.endereco?.cep || undefined,
+            };
+            // Email público só se presente
+            if (d.email) ficha.email = d.email;
+
+            // Remove undefined
+            Object.keys(ficha).forEach(k => ficha[k] === undefined && delete ficha[k]);
+            results.ficha_auto_preenchida = ficha;
+
+            // Auto-popula o lead se tiver telefone (contexto do bot)
+            if (userPhone && Object.keys(ficha).length > 0) {
+                updateUser({ telefone: userPhone, ...ficha }).catch(err =>
+                    log.error('[consultarCnpjPublico] Erro ao auto-preencher lead:', err)
+                );
+            }
         } else {
             log.warn(`[consultarCnpjPublico] Falha BrasilAPI para ${cleanCnpj}: ${publicResult.error?.message}`);
         }
 
-        // 2. Tenta acesso Serpro para validar Procuração
+        // 2. Valida Procuração via Serpro
         try {
             const serproRaw = await checkCnpjSerpro(cleanCnpj, 'PROCURACAO');
             const serproData = JSON.parse(serproRaw);
-            
             if (serproData.status === 'error') {
-                results.serpro_access = {
-                    active: false,
-                    error_type: serproData.error_type || 'unknown_error',
-                    message: serproData.message
-                };
+                results.serpro_access = { active: false, error_type: serproData.error_type || 'unknown_error', message: serproData.message };
             } else {
-                results.serpro_access = {
-                    active: true,
-                    error_type: null,
-                    message: 'Procuração e-CAC validada e ativa no Serpro.'
-                };
+                results.serpro_access = { active: true, error_type: null, message: 'Procuração e-CAC ativa no Serpro.' };
             }
         } catch (serproErr) {
-            results.serpro_access = {
-                active: false,
-                error_type: 'connection_error',
-                message: String(serproErr)
-            };
+            results.serpro_access = { active: false, error_type: 'connection_error', message: String(serproErr) };
         }
 
-        return JSON.stringify({
-            status: 'success',
-            ...results,
-            instruction: results.serpro_access.active 
-                ? "Procuração ATIVA. Você pode prosseguir com consultas profundas (PGMEI, SITFIS)."
-                : "Procuração AUSENTE ou INVÁLIDA. Você DEVE informar o cliente que a procuração e-CAC não foi detectada e orientá-lo a criá-la (Opção A)."
-        });
+        const instruction = results.serpro_access.active
+            ? 'Procuração ATIVA. Prossiga com consultas Serpro (PGMEI, SITFIS).'
+            : results.is_mei
+                ? 'Lead é MEI. Procuração AUSENTE — explique que a procuração e-CAC é OBRIGATÓRIA para prestarmos o serviço corretamente. Use enviar_processo_autonomo para enviar o tutorial.'
+                : 'Procuração AUSENTE — explique que a procuração e-CAC é OBRIGATÓRIA para prestarmos o serviço corretamente. Use enviar_processo_autonomo para enviar o tutorial.';
+
+        return JSON.stringify({ status: 'success', ...results, instruction });
 
     } catch (error) {
         log.error(`[consultarCnpjPublico] Fatal error for ${cleanCnpj}:`, error);
