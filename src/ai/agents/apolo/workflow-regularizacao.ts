@@ -22,14 +22,17 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any): Promise<{
         return { ok: false, message: 'Usuário sem identificação interna. Atualize o cadastro antes da consulta.' };
     }
 
-    let cnpj = userData.cnpj as string | undefined;
+    // cnpj_ativo tem prioridade (empresa selecionada para esta consulta)
+    let cnpj = (userData.cnpj_ativo || userData.cnpj) as string | undefined;
     if (!cnpj) {
-        const resLead = await pool.query('SELECT cnpj FROM leads WHERE id = $1 LIMIT 1', [userData.id]);
-        if (resLead.rows.length > 0) cnpj = resLead.rows[0].cnpj;
+        const resLead = await pool.query('SELECT cnpj_ativo, cnpj FROM leads WHERE id = $1 LIMIT 1', [userData.id]);
+        if (resLead.rows.length > 0) {
+            cnpj = resLead.rows[0].cnpj_ativo || resLead.rows[0].cnpj;
+        }
     }
 
     if (!cnpj) {
-        return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais.' };
+        return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais (use update_user com o campo cnpj).' };
     }
 
     const procRes = await pool.query(
@@ -41,9 +44,26 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any): Promise<{
     const hasTrackedCompletion = await checkProcuracaoStatus(userData.id);
 
     if (!hasFormalProcuracao && !hasTrackedCompletion) {
+        // Tenta verificar procuração diretamente no Serpro antes de bloquear
+        try {
+            const serproResult = await consultarProcuracaoSerpro(cnpj);
+            const parsed = JSON.parse(serproResult) as Record<string, unknown>;
+            const bodyStr = JSON.stringify(parsed).toLowerCase();
+            const ausente = bodyStr.includes('procuracao_ausente') ||
+                            bodyStr.includes('não encontrad') ||
+                            bodyStr.includes('nao encontrad') ||
+                            bodyStr.includes('procuracao nao') ||
+                            (parsed.ok === false);
+            if (!ausente) {
+                // Procuração encontrada no Serpro — registra localmente e libera
+                await markProcuracaoCompleted(userData.id);
+                return { ok: true, cnpj };
+            }
+        } catch { /* ignora erro e cai no bloqueio abaixo */ }
+
         return {
             ok: false,
-            message: 'Consulta Serpro bloqueada: primeiro confirme a Procuração e-CAC (Opção A) e valide com verificar_procuracao_status/verificar_serpro_pos_ecac.'
+            message: 'Consulta Serpro bloqueada: Procuração e-CAC não confirmada. Use verificar_procuracao_status ou oriente o cliente a concluir o e-CAC (Opção A).'
         };
     }
 

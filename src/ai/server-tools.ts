@@ -8,6 +8,7 @@ import { consultarServico } from '../lib/serpro';
 import { SERVICE_CONFIG } from '../lib/serpro-config';
 import { saveConsultation, maybeSavePdfFromBotResult } from '../lib/serpro-db';
 import { cnpjService } from '../lib/cnpj-service';
+import { autoRegisterEmpresa, enrichEmpresaFromChat } from '../lib/empresa-auto-register';
 import logger from '../lib/logger';
 
 const log = logger.child('ServerTools');
@@ -98,8 +99,25 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
             normalizedFields[fieldAliases[k] ?? k] = v;
         }
 
+        // Adicionar CNPJ extra sem sobrescrever o principal
+        if (normalizedFields['cnpj_adicionar']) {
+            const cnpjExtra = String(normalizedFields['cnpj_adicionar']).replace(/\D/g, '');
+            await query(
+                `UPDATE leads SET
+                    cnpjs_adicionais = CASE
+                        WHEN cnpjs_adicionais IS NULL THEN $1::jsonb
+                        WHEN cnpjs_adicionais @> $1::jsonb THEN cnpjs_adicionais
+                        ELSE cnpjs_adicionais || $1::jsonb
+                    END,
+                    atualizado_em = NOW()
+                WHERE telefone = $2`,
+                [JSON.stringify([cnpjExtra]), telefone],
+            );
+            updatedData = { ...updatedData, cnpj_adicionado: cnpjExtra };
+        }
+
         const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
-            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'cnpj_ativo', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
@@ -1019,6 +1037,14 @@ export async function markProcuracaoCompleted(leadId: number): Promise<void> {
         `, [leadId, validoAte, JSON.stringify(recursoEntry)]);
 
         log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO (válida até ${validoAte}).`);
+
+        // Cadastro automático no Integra Contador + enriquecimento via chat (fire-and-forget)
+        autoRegisterEmpresa(leadId).then(({ empresaId, phone }) => {
+            if (empresaId && phone) {
+                enrichEmpresaFromChat(empresaId, phone).catch(() => undefined);
+            }
+        }).catch(() => undefined);
+
     } catch (error) {
         log.error('markProcuracaoCompleted error:', error);
     }

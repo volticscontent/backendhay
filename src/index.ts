@@ -202,6 +202,20 @@ async function runMigrations() {
         CREATE INDEX IF NOT EXISTS idx_serpro_docs_tipo   ON serpro_documentos(tipo_servico);
         CREATE INDEX IF NOT EXISTS idx_serpro_docs_valido ON serpro_documentos(valido_ate) WHERE deletado_em IS NULL;
     `);
+
+    // ── Multi-empresa: colunas cnpjs_adicionais e cnpj_ativo em leads ────────
+    await pool.query(`
+        ALTER TABLE leads
+            ADD COLUMN IF NOT EXISTS cnpjs_adicionais JSONB    NOT NULL DEFAULT '[]',
+            ADD COLUMN IF NOT EXISTS cnpj_ativo        TEXT;
+    `);
+
+    // ── Fix: video_ecac era type='media' mas valor é URL do Instagram ─────────
+    await pool.query(`
+        UPDATE system_settings
+        SET type = 'link', updated_at = NOW()
+        WHERE key = 'video_ecac' AND type = 'media';
+    `);
 }
 
 // ==================== Inicialização ====================

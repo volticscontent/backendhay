@@ -33,8 +33,8 @@ export async function prepareAgentContext(context: AgentContext): Promise<Shared
             const allowedKeys = [
                 'telefone', 'nome_completo', 'email', 'situacao', 'qualificacao',
                 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio',
-                'possui_socio', 'sexo', 'cnpj', 'razao_social', 'tipo_divida',
-                'valor_divida_federal'
+                'possui_socio', 'sexo', 'cnpj', 'cnpj_ativo', 'cnpjs_adicionais',
+                'razao_social', 'tipo_divida', 'valor_divida_federal'
             ];
             userData = Object.entries(parsed)
                 .filter(([k]) => allowedKeys.includes(k))
@@ -116,7 +116,9 @@ QUANDO RED-FLAG: situacao=red_flag + motivo_qualificacao com o tipo (PROCURACAO_
                     valor_divida_federal: { type: 'string' },
                     possui_socio: { type: 'boolean' },
                     cpf: { type: 'string' },
-                    cnpj: { type: 'string' },
+                    cnpj: { type: 'string', description: 'CNPJ principal do cliente (substitui o existente). Para ADICIONAR uma segunda empresa sem sobrescrever, use cnpj_adicionar.' },
+                    cnpj_adicionar: { type: 'string', description: 'Adiciona um CNPJ extra à lista de empresas do cliente sem sobrescrever o CNPJ principal. Use quando o cliente tiver mais de uma empresa.' },
+                    cnpj_ativo: { type: 'string', description: 'Define qual CNPJ está sendo consultado/operado agora. Mude este campo quando o cliente quiser operar sobre uma empresa específica (útil para clientes com múltiplos CNPJs).' },
                     razao_social: { type: 'string' },
                     email: { type: 'string' },
                     nome_completo: { type: 'string' },

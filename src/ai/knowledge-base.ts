@@ -18,9 +18,12 @@ export async function getServicesContext(): Promise<string> {
 
             const servicesList = res.rows.map(s => {
                 const nome = s.name || s.nome || 'Sem Nome';
-                const valor = s.value || s.valor || 0;
+                const valor = Number(s.value ?? s.valor ?? 0);
                 const descricao = s.description || s.descricao || 'Sem descrição';
-                return `- **${nome}**: R$ ${Number(valor).toFixed(2)}\n  Descrição: ${descricao}`;
+                const valorStr = valor > 0
+                    ? `R$ ${valor.toFixed(2).replace('.', ',')}/mês`
+                    : 'Valor sob consulta (negociado individualmente)';
+                return `- **${nome}**: ${valorStr}\n  ${descricao}`;
             }).join('\n');
 
             return `## SERVIÇOS E PRODUTOS DISPONÍVEIS:\n${servicesList}`;
