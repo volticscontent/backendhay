@@ -1,3 +1,4 @@
+import pdfParse from 'pdf-parse';
 import { ToolDefinition } from '../../openai-client';
 import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser } from '../../server-tools';
 import pool from '../../../lib/db';
@@ -160,7 +161,161 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
   - 'consultar_caixa_postal_serpro' → mensagens da Receita Federal para o cliente.
 - O uso desenfreado de consultas profundas gasta recursos e expõe nossos IPs. Prefira sempre a Camada 1.
 - Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
+
+#### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
+A resposta tem os campos: \`pgmei\`, \`pgfn\`, e opcionalmente \`aviso\`.
+
+**Regra de ouro — NUNCA diga "sem dívidas" prematuramente:**
+- Se \`aviso\` está presente → leia-o e siga a instrução. Há pendências ou resultado inconclusivo.
+- Se \`pgmei.tem_debitos_detectado === true\` OU \`pgfn.tem_debitos_detectado === true\` → HÁ DÍVIDAS.
+- Se \`pgmei.tem_documento_binario === true\` OU \`pgfn.tem_documento_binario === true\` → A Serpro retornou um DOCUMENTO em vez de texto. **ASSUMA QUE HÁ DÉBITOS** — o cliente tem pendências, mesmo que não haja texto estruturado.
+- Se \`tem_debitos_detectado === null\` (inconclusivo) → NÃO diga "sem dívidas". Diga "não foi possível obter confirmação" e sugira verificação adicional ou agendamento de reunião.
+- Somente diga "sem dívidas" se \`pgmei.tem_debitos_detectado === false\` E \`pgfn.tem_debitos_detectado === false\` E não houver \`aviso\`.
 `;
+
+/**
+ * Tenta extrair texto de um PDF em base64 usando pdf-parse.
+ * Retorna o texto extraído ou null em caso de falha.
+ */
+async function extractPdfText(base64: string): Promise<string | null> {
+    try {
+        const buffer = Buffer.from(base64, 'base64');
+        const result = await pdfParse(buffer);
+        return result.text?.trim() || null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Detecta débitos a partir do texto extraído de um PDF da Serpro.
+ * Retorna true se houver indicadores de dívida, false se regularizado, null se inconclusivo.
+ */
+function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; resumo_pdf: string } {
+    const t = texto.toUpperCase();
+
+    const INDICADORES_DEBITO = [
+        'DEVEDOR', 'DÉBITO', 'DEBITO', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE',
+        'EM ABERTO', 'VENCIDO', 'DÍVIDA ATIVA', 'DIVIDA ATIVA',
+        'GUIA EM ABERTO', 'DAS EM ABERTO', 'PARCELA EM ABERTO',
+        'VALOR DEVIDO', 'TOTAL DEVIDO',
+    ];
+    const INDICADORES_REGULAR = [
+        'SEM DÉBITO', 'SEM DEBITO', 'SEM PENDÊNCIA', 'SEM PENDENCIA',
+        'REGULARIZADO', 'ADIMPLENTE', 'SITUAÇÃO REGULAR', 'SITUACAO REGULAR',
+        'NÃO POSSUI DÉBITO', 'NAO POSSUI DEBITO',
+    ];
+
+    if (INDICADORES_DEBITO.some(i => t.includes(i))) {
+        // Extrai trecho relevante para contexto (primeiros 800 chars do texto)
+        const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+        return { tem_debitos: true, resumo_pdf };
+    }
+    if (INDICADORES_REGULAR.some(i => t.includes(i))) {
+        const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+        return { tem_debitos: false, resumo_pdf };
+    }
+    const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+    return { tem_debitos: null, resumo_pdf };
+}
+
+/**
+ * Parseia o envelope bruto do Serpro para extrair dados estruturados.
+ *
+ * O campo `dados` pode ser:
+ *  - String JSON (normal) → parseado e retornado como objeto
+ *  - String base64 de PDF → texto extraído via pdf-parse e analisado
+ *  - Objeto já parseado → usado diretamente
+ *  - Vazio → sem dados
+ *
+ * Retorna `tem_debitos_detectado` para evitar falsos negativos na IA.
+ */
+async function parseSerproData(envelope: unknown): Promise<{
+    tem_debitos_detectado: boolean | null;
+    dados: Record<string, unknown> | null;
+    tem_documento_binario: boolean;
+    texto_pdf: string | null;
+    mensagens_serpro: string[];
+}> {
+    const NOT_FOUND = { tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: [] };
+    if (!envelope || typeof envelope !== 'object') return NOT_FOUND;
+
+    const env = envelope as Record<string, unknown>;
+    const mensagensRaw = (Array.isArray(env.mensagens) ? env.mensagens : []) as Array<{ codigo?: string; texto?: string }>;
+    const mensagens_serpro = mensagensRaw.map(m => `[${m.codigo ?? '?'}] ${m.texto ?? ''}`).filter(Boolean);
+
+    let dados: Record<string, unknown> | null = null;
+    let tem_documento_binario = false;
+    let texto_pdf: string | null = null;
+
+    const dadosRaw = env.dados;
+
+    if (typeof dadosRaw === 'string' && dadosRaw.length > 0) {
+        try {
+            const parsed = JSON.parse(dadosRaw);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                dados = parsed as Record<string, unknown>;
+            }
+        } catch {
+            // dados não é JSON válido → tenta extrair como PDF base64
+            tem_documento_binario = true;
+            texto_pdf = await extractPdfText(dadosRaw);
+        }
+    } else if (dadosRaw && typeof dadosRaw === 'object' && !Array.isArray(dadosRaw)) {
+        dados = dadosRaw as Record<string, unknown>;
+    }
+
+    // documentos no topo do envelope também podem conter PDFs
+    const documentos = Array.isArray(env.documentos) ? env.documentos : [];
+    for (const doc of documentos as Array<Record<string, unknown>>) {
+        if (typeof doc.conteudo === 'string' && doc.conteudo.length > 0 && !texto_pdf) {
+            tem_documento_binario = true;
+            texto_pdf = await extractPdfText(doc.conteudo);
+            if (texto_pdf) break;
+        }
+    }
+
+    // Se extraiu texto do PDF, analisa para detectar débitos
+    if (tem_documento_binario && texto_pdf) {
+        const { tem_debitos, resumo_pdf } = detectarDebitosNoPdf(texto_pdf);
+        return {
+            tem_debitos_detectado: tem_debitos,
+            dados: null,
+            tem_documento_binario: true,
+            texto_pdf: resumo_pdf,
+            mensagens_serpro,
+        };
+    }
+
+    // Documento sem texto legível (PDF escaneado ou erro de extração)
+    if (tem_documento_binario) {
+        return { tem_debitos_detectado: null, dados: null, tem_documento_binario: true, texto_pdf: null, mensagens_serpro };
+    }
+
+    if (!dados) {
+        return { tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro };
+    }
+
+    // Detectar débitos a partir dos campos JSON conhecidos
+    const situacao = String(
+        dados.situacaoContribuinte ?? dados.situacao ?? dados.statusContribuinte ?? ''
+    ).toUpperCase();
+
+    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? null;
+    const hasGuias = Array.isArray(guiasRaw) ? guiasRaw.length > 0
+        : typeof guiasRaw === 'number' ? guiasRaw > 0
+        : false;
+
+    const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO'];
+    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO', 'ATIVO'];
+
+    const tem_debitos_detectado =
+        INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias ? true
+        : INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
+        : null;
+
+    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, mensagens_serpro };
+}
 
 export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] => [
     // ── Camada 1 ────────────────────────────────────────────────────────────────
@@ -185,10 +340,25 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     checkCnpjSerpro(gate.cnpj, 'PGFN_CONSULTAR'),
                 ]);
 
-                const pgmei = pgmeiResult.status === 'fulfilled' ? JSON.parse(pgmeiResult.value) : { status: 'error', message: 'Falha ao consultar PGMEI' };
-                const pgfn  = pgfnResult.status  === 'fulfilled' ? JSON.parse(pgfnResult.value)  : { status: 'error', message: 'Falha ao consultar PGFN' };
+                const pgmeiRaw = pgmeiResult.status === 'fulfilled' ? JSON.parse(pgmeiResult.value) : null;
+                const pgfnRaw  = pgfnResult.status  === 'fulfilled' ? JSON.parse(pgfnResult.value)  : null;
 
-                return JSON.stringify({ status: 'success', pgmei, pgfn });
+                const [pgmei, pgfn] = await Promise.all([
+                    pgmeiRaw ? parseSerproData(pgmeiRaw) : Promise.resolve({ tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: ['Falha ao consultar PGMEI'] }),
+                    pgfnRaw  ? parseSerproData(pgfnRaw)  : Promise.resolve({ tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: ['Falha ao consultar PGFN'] }),
+                ]);
+
+                const temDocumentoBinario = pgmei.tem_documento_binario || pgfn.tem_documento_binario;
+                const temDebitos = pgmei.tem_debitos_detectado === true || pgfn.tem_debitos_detectado === true;
+                const inconclusivo = !temDebitos && (pgmei.tem_debitos_detectado === null || pgfn.tem_debitos_detectado === null);
+
+                const aviso = temDocumentoBinario
+                    ? '⚠️ ATENÇÃO: A Serpro retornou conteúdo em formato de DOCUMENTO (PDF/binário) em vez de dados estruturados de texto. Isso ocorre quando há débitos ou guias. NÃO INFORME "sem dívidas" — há pendências no PGMEI/PGFN. Oriente o cliente a regularizar ou consulte o portal da Receita Federal.'
+                    : inconclusivo
+                    ? '⚠️ ATENÇÃO: Não foi possível determinar a situação fiscal com certeza. Não informe "sem dívidas" sem confirmação adicional. Use consultar_situacao_fiscal_serpro ou oriente verificação direta no portal.'
+                    : undefined;
+
+                return JSON.stringify({ status: 'success', pgmei, pgfn, aviso });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
