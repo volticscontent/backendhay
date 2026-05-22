@@ -43,29 +43,108 @@ router.get('/atendimento/chats', async (_req, res) => {
         let chatsArray = [];
         try {
             const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'teste';
-            const instanceRes = await db_1.default.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]);
+            const instanceRes = await db_1.evolutionPool.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]);
             const instanceId = instanceRes.rows[0]?.id;
             if (instanceId) {
-                const chatsQuery = await db_1.default.query(`
-          SELECT c."remoteJid" as id, c."remoteJid" as "remoteJid", c."pushName", c."profilePicUrl",
-            ch."unreadMessages" as "unreadCount", m."message", m.key, m."messageTimestamp"
+                // Query 1: Evolution DB (systembots) — contacts + last message
+                const chatsQuery = await db_1.evolutionPool.query(`
+          SELECT
+            c."remoteJid" as id,
+            c."remoteJid" as "remoteJid",
+            COALESCE(c."pushName", ch.name) as "pushName",
+            c."profilePicUrl",
+            COALESCE(ch."unreadMessages", 0) as "unreadCount",
+            m.message, m.key, m."messageTimestamp"
           FROM "Contact" c
-          INNER JOIN "Chat" ch ON c."remoteJid" = ch."remoteJid" AND c."instanceId" = ch."instanceId"
-          LEFT JOIN LATERAL (
-            SELECT "message", "messageTimestamp", "key"
+          LEFT JOIN "Chat" ch ON c."remoteJid" = ch."remoteJid" AND c."instanceId" = ch."instanceId"
+          INNER JOIN LATERAL (
+            SELECT message, "messageTimestamp", key
             FROM "Message"
-            WHERE "remoteJid" = c."remoteJid" AND "instanceId" = c."instanceId"
+            WHERE "instanceId" = c."instanceId"
+              AND (
+                key->>'remoteJid' = c."remoteJid"
+                OR key->>'remoteJidAlt' = c."remoteJid"
+              )
             ORDER BY "messageTimestamp" DESC LIMIT 1
           ) m ON true
           WHERE c."instanceId" = $1 AND c."remoteJid" NOT LIKE '%@lid'
           ORDER BY m."messageTimestamp" DESC NULLS LAST LIMIT 300
         `, [instanceId]);
-                chatsArray = chatsQuery.rows;
+                // Query 2: App DB (n_db_pg) — lead names/status keyed by normalized phone
+                const phones = chatsQuery.rows
+                    .map((c) => String(c.remoteJid || '').split('@')[0].replace(/\D/g, ''))
+                    .filter(Boolean);
+                // Build leadMap keyed by all normalized variants so format differences don't break lookup
+                const leadMap = new Map();
+                if (phones.length > 0) {
+                    const { rows: leadRows } = await db_1.default.query(`SELECT l.id, l.telefone, l.nome_completo, lp.status_atendimento, lp.data_reuniao
+             FROM leads l LEFT JOIN leads_processo lp ON lp.lead_id = l.id
+             WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+                OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+                OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`, [phones]).catch(() => ({ rows: [] }));
+                    for (const r of leadRows) {
+                        const clean = String(r.telefone).replace(/\D/g, '');
+                        leadMap.set(clean, r);
+                        leadMap.set(`55${clean}`, r);
+                        leadMap.set(clean.replace(/^55/, ''), r);
+                    }
+                }
+                chatsArray = chatsQuery.rows.map((c) => {
+                    const phone = String(c.remoteJid || '').split('@')[0].replace(/\D/g, '');
+                    const lead = leadMap.get(phone);
+                    return {
+                        ...c,
+                        leadName: lead?.nome_completo || c.pushName || null,
+                        leadId: lead?.id || null,
+                        isRegistered: !!lead?.id,
+                        leadStatus: lead?.status_atendimento || null,
+                        leadDataReuniao: lead?.data_reuniao || null,
+                    };
+                });
             }
         }
         catch {
-            const fallback = await (0, evolution_1.evolutionFindChats)();
-            chatsArray = Array.isArray(fallback) ? fallback : [];
+            // Fallback: REST API — enrich chats with contact names from findContacts
+            const [fallbackChats, contacts] = await Promise.all([
+                (0, evolution_1.evolutionFindChats)().catch(() => []),
+                (0, evolution_1.evolutionFindContacts)().catch(() => []),
+            ]);
+            const contactMap = new Map(contacts.map(c => [c.remoteJid, c]));
+            const rawChats = Array.isArray(fallbackChats) ? fallbackChats : [];
+            // Enrich with lead data so isRegistered is correct
+            const fallbackPhones = rawChats
+                .map((c) => String(c.remoteJid || c.id || '').split('@')[0].replace(/\D/g, ''))
+                .filter(Boolean);
+            const fallbackLeadMap = new Map();
+            if (fallbackPhones.length > 0) {
+                const { rows: leadRows } = await db_1.default.query(`SELECT l.id, l.telefone, l.nome_completo, lp.status_atendimento, lp.data_reuniao
+           FROM leads l LEFT JOIN leads_processo lp ON lp.lead_id = l.id
+           WHERE REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+              OR '55' || REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g') = ANY($1::text[])
+              OR REGEXP_REPLACE(REGEXP_REPLACE(l.telefone, '[^0-9]', '', 'g'), '^55', '') = ANY($1::text[])`, [fallbackPhones]).catch(() => ({ rows: [] }));
+                for (const r of leadRows) {
+                    const clean = String(r.telefone).replace(/\D/g, '');
+                    fallbackLeadMap.set(clean, r);
+                    fallbackLeadMap.set(`55${clean}`, r);
+                    fallbackLeadMap.set(clean.replace(/^55/, ''), r);
+                }
+            }
+            chatsArray = rawChats.map(c => {
+                const jid = String(c.remoteJid || c.id || '');
+                const phone = jid.split('@')[0].replace(/\D/g, '');
+                const contact = contactMap.get(jid);
+                const lead = fallbackLeadMap.get(phone);
+                return {
+                    ...c,
+                    pushName: contact?.pushName || c.pushName || null,
+                    profilePicUrl: contact?.profilePicUrl || c.profilePicUrl || null,
+                    leadName: lead?.nome_completo || contact?.pushName || c.pushName || null,
+                    leadId: lead?.id || null,
+                    isRegistered: !!lead?.id,
+                    leadStatus: lead?.status_atendimento || null,
+                    leadDataReuniao: lead?.data_reuniao || null,
+                };
+            });
         }
         chatsArray = chatsArray.filter((c) => !String(c.remoteJid || c.id || '').includes('@lid'));
         res.json({ success: true, data: chatsArray });
@@ -82,7 +161,7 @@ router.get('/atendimento/profile-pic', async (req, res) => {
     try {
         const url = await (0, evolution_1.evolutionGetProfilePic)(jid.split('@')[0]);
         const data = url;
-        res.json({ success: true, url: data?.profilePictureUrl || null });
+        res.json({ success: true, url: data?.profilePictureUrl || data?.pictureUrl || data?.url || null });
     }
     catch {
         res.json({ success: false, url: null });
@@ -94,16 +173,38 @@ router.get('/atendimento/lead/:phone', async (req, res) => {
     try {
         const cryptoKey = process.env.PGCRYPTO_KEY ?? '';
         const baseQuery = `
-      SELECT l.*,
+      SELECT
+        l.id, l.telefone, l.nome_completo, l.email, l.cpf, l.data_nascimento, l.nome_mae, l.sexo,
+        l.cnpj, l.razao_social, l.nome_fantasia, l.tipo_negocio, l.faturamento_mensal,
+        l.endereco, l.numero, l.complemento, l.bairro, l.cidade, l.estado, l.cep,
+        l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
+        l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
+        l.tem_divida, l.tipo_divida, l.valor_divida_municipal, l.valor_divida_estadual,
+        l.valor_divida_federal, l.valor_divida_pgfn, l.valor_divida_pgfn AS valor_divida_ativa,
+        l.tempo_divida, l.calculo_parcelamento,
+        l.needs_attendant, l.attendant_requested_at, l.metadata, l.data_cadastro, l.atualizado_em,
         CASE WHEN l.senha_gov_enc IS NULL THEN NULL
              ELSE pgp_sym_decrypt(l.senha_gov_enc::bytea, $2::text)
         END AS senha_gov,
-        l.valor_divida_pgfn AS valor_divida_ativa,
-        lp.servico, lp.servico AS servico_negociado, lp.servico AS servico_escolhido, lp.status_atendimento, lp.data_reuniao,
+        lp.servico, lp.servico AS servico_negociado, lp.servico AS servico_escolhido,
+        lp.status_atendimento, lp.data_reuniao,
         (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
-        lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade,
-        lp.observacoes, lp.data_controle_24h, lp.envio_disparo, lp.atendente_id,
-        lp.data_followup, lp.recursos_entregues
+        lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade, lp.cliente,
+        lp.atendente_id, lp.envio_disparo, lp.observacoes,
+        lp.data_controle_24h, lp.data_followup, lp.recursos_entregues,
+        -- Legacy UI fields (not stored separately, but expected by LeadSheetData)
+        NULL::text AS cartao_cnpj,
+        NULL::text AS porte_empresa,
+        NULL::text AS score_serasa,
+        NULL::text AS tem_cartorios,
+        NULL::text AS motivo_divida,
+        NULL::text AS tem_protestos,
+        NULL::text AS tem_divida_ativa,
+        NULL::text AS tem_execucao_fiscal,
+        NULL::text AS tem_parcelamento,
+        NULL::text AS parcelamento_ativo,
+        NULL::text AS idades_socios,
+        NULL::timestamptz AS data_ultima_consulta
       FROM leads l
       LEFT JOIN leads_processo lp ON l.id = lp.lead_id
     `;
@@ -123,10 +224,13 @@ router.get('/atendimento/lead/:phone', async (req, res) => {
             data_controle_24h: toIso(lead.data_controle_24h),
             data_reuniao: toIso(lead.data_reuniao),
             procuracao_validade: toIso(lead.procuracao_validade),
+            attendant_requested_at: toIso(lead.attendant_requested_at),
+            data_followup: toIso(lead.data_followup),
         };
         res.json({ success: true, data: serialized });
     }
     catch (err) {
+        console.error('[atendimento/lead] error:', err);
         res.status(500).json({ success: false, error: 'Failed to fetch lead' });
     }
 });
@@ -188,11 +292,16 @@ router.get('/atendimento/messages', async (req, res) => {
     if (!jid)
         return void res.status(400).json({ success: false, error: 'jid é obrigatório' });
     const jids = jid.split(',').filter(Boolean);
-    const jidsWithLids = new Set(jids);
+    const limit = 50;
     try {
+        // Expand JID set: phone→LID (incoming msgs stored under @lid in key.remoteJid)
+        // key.remoteJidAlt stores the phone JID for incoming LID messages
+        const jidsWithLids = new Set(jids);
         if (jids.length > 0) {
             const params = jids.map((_, i) => `$${i + 1}`).join(',');
-            const { rows } = await db_1.default.query(`SELECT DISTINCT key->>'remoteJid' as lid FROM "Message" WHERE key->>'remoteJidAlt' = ANY(ARRAY[${params}]) OR key->>'senderPn' = ANY(ARRAY[${params}])`, jids).catch(() => ({ rows: [] }));
+            const { rows } = await db_1.evolutionPool.query(`SELECT DISTINCT key->>'remoteJid' as lid FROM "Message"
+         WHERE key->>'remoteJidAlt' = ANY(ARRAY[${params}])
+           AND key->>'remoteJid' LIKE '%@lid'`, jids).catch(() => ({ rows: [] }));
             for (const row of rows) {
                 if (row.lid)
                     jidsWithLids.add(row.lid);
@@ -201,7 +310,7 @@ router.get('/atendimento/messages', async (req, res) => {
         let allRecords = [];
         for (const singleJid of Array.from(jidsWithLids)) {
             try {
-                const response = await (0, evolution_1.evolutionFindMessages)(singleJid, 50, page);
+                const response = await (0, evolution_1.evolutionFindMessages)(singleJid, limit, page);
                 const records = (response?.messages?.records || []);
                 allRecords = [...allRecords, ...records];
             }
@@ -215,6 +324,31 @@ router.get('/atendimento/messages', async (req, res) => {
         }
         let records = Array.from(uniqueMap.values());
         records.sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+        // If Evolution API returned nothing, try direct DB query on systembots as fallback
+        if (records.length === 0) {
+            const instanceName = process.env.EVOLUTION_INSTANCE_NAME || 'teste';
+            const instanceRes = await db_1.evolutionPool.query(`SELECT id FROM "Instance" WHERE name = $1 LIMIT 1`, [instanceName]).catch(() => ({ rows: [] }));
+            const instanceId = instanceRes.rows[0]?.id;
+            if (instanceId) {
+                const allJids = Array.from(jidsWithLids);
+                const placeholders = allJids.map((_, i) => `$${i + 1}`).join(',');
+                const offset = (page - 1) * limit;
+                const { rows: dbRows } = await db_1.evolutionPool.query(`SELECT key, message, "messageTimestamp" FROM "Message"
+           WHERE "instanceId" = $${allJids.length + 1}
+             AND (key->>'remoteJid' = ANY(ARRAY[${placeholders}]) OR key->>'remoteJidAlt' = ANY(ARRAY[${placeholders}]))
+             AND message IS NOT NULL
+           ORDER BY "messageTimestamp" DESC LIMIT ${limit} OFFSET ${offset}`, [...allJids, instanceId]).catch(() => ({ rows: [] }));
+                for (const r of dbRows) {
+                    const keyObj = (typeof r.key === 'object' ? r.key : {});
+                    const msgId = String(keyObj?.id || '');
+                    if (msgId && !uniqueMap.has(msgId)) {
+                        uniqueMap.set(msgId, { key: keyObj, message: r.message, messageTimestamp: Number(r.messageTimestamp) });
+                    }
+                }
+                records = Array.from(uniqueMap.values());
+                records.sort((a, b) => Number(b.messageTimestamp || 0) - Number(a.messageTimestamp || 0));
+            }
+        }
         records = await Promise.all(records.map(async (msg) => {
             const content = (msg.message || msg);
             const hasMedia = content.audioMessage || content.imageMessage || content.videoMessage ||
@@ -229,6 +363,7 @@ router.get('/atendimento/messages', async (req, res) => {
         res.json({ success: true, data: { messages: { records } } });
     }
     catch (err) {
+        console.error('[messages] error:', err);
         res.status(500).json({ success: false, error: 'Failed to fetch messages' });
     }
 });

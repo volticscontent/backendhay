@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -6,7 +39,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.saveLidPhoneMapping = saveLidPhoneMapping;
 exports.resolveLidToPhone = resolveLidToPhone;
 exports.warmLidCache = warmLidCache;
-const db_1 = __importDefault(require("./db"));
+const db_1 = __importStar(require("./db"));
 const redis_1 = __importDefault(require("./redis"));
 const logger_1 = require("./logger");
 const log = logger_1.webhookLogger.child?.('LidMap') || logger_1.webhookLogger;
@@ -47,14 +80,13 @@ async function resolveLidToPhone(lid) {
     catch { /* ignore */ }
     // 2. Fallback: buscar senderPn na tabela Message da Evolution API
     try {
-        const { rows } = await db_1.default.query(`SELECT key->>'senderPn' as sender_pn 
-             FROM "Message" 
-             WHERE key->>'remoteJid' = $1 
-               AND key->>'senderPn' IS NOT NULL 
+        const { rows } = await db_1.evolutionPool.query(`SELECT key->>'remoteJidAlt' as phone_jid
+             FROM "Message"
+             WHERE key->>'remoteJid' = $1
+               AND key->>'remoteJidAlt' IS NOT NULL
              LIMIT 1`, [lid]);
-        if (rows[0]?.sender_pn) {
-            const phone = rows[0].sender_pn.replace('@s.whatsapp.net', '');
-            // Re-popular o cache Redis
+        if (rows[0]?.phone_jid) {
+            const phone = rows[0].phone_jid.replace('@s.whatsapp.net', '');
             redis_1.default.set(`lid_map:${lid}`, phone, 'EX', 2592000).catch(() => { });
             redis_1.default.set(`phone_lid:${phone}`, lid, 'EX', 2592000).catch(() => { });
             return phone;
@@ -69,13 +101,13 @@ async function resolveLidToPhone(lid) {
  */
 async function warmLidCache() {
     try {
-        const { rows } = await db_1.default.query(`
-            SELECT DISTINCT 
-                key->>'remoteJid' as lid, 
-                key->>'senderPn' as sender_pn
+        const { rows } = await db_1.evolutionPool.query(`
+            SELECT DISTINCT
+                key->>'remoteJid' as lid,
+                key->>'remoteJidAlt' as phone_jid
             FROM "Message"
             WHERE key->>'remoteJid' LIKE '%@lid'
-              AND key->>'senderPn' IS NOT NULL
+              AND key->>'remoteJidAlt' IS NOT NULL
         `);
         if (rows.length === 0) {
             log.info?.('🗺️ Nenhum mapeamento LID encontrado nas Messages');
@@ -83,7 +115,7 @@ async function warmLidCache() {
         }
         const pipeline = redis_1.default.pipeline();
         for (const row of rows) {
-            const phone = row.sender_pn.replace('@s.whatsapp.net', '');
+            const phone = row.phone_jid.replace('@s.whatsapp.net', '');
             pipeline.set(`lid_map:${row.lid}`, phone, 'EX', 2592000);
             pipeline.set(`phone_lid:${phone}`, row.lid, 'EX', 2592000);
         }

@@ -58,12 +58,16 @@ export function startCaixaPostalWorker() {
     const worker = new Worker(
         QUEUE_NAME,
         async (job: Job) => {
-            const { execucaoId } = job.data as { execucaoId: number };
+            const { execucaoId, empresaId } = job.data as { execucaoId: number; empresaId?: number };
 
-            const empresas = await query(
-                `SELECT id, cnpj FROM integra_empresas
-                 WHERE ativo = true AND servicos_habilitados ? 'CAIXAPOSTAL'`
-            );
+            let querySql = `SELECT id, cnpj FROM integra_empresas
+                 WHERE ativo = true AND servicos_habilitados ? 'CAIXAPOSTAL'`;
+            const queryParams: unknown[] = [];
+            if (empresaId) {
+                querySql += ` AND id = $1`;
+                queryParams.push(empresaId);
+            }
+            const empresas = await query(querySql, queryParams);
 
             const total = empresas.rows.length;
             let sucesso = 0, falhas = 0;
@@ -97,6 +101,6 @@ export function startCaixaPostalWorker() {
     return worker;
 }
 
-export async function enqueueRoboCaixaPostal(execucaoId: number) {
-    await caixaPostalQueue.add('run', { execucaoId }, { jobId: `caixa-postal-${execucaoId}` });
+export async function enqueueRoboCaixaPostal(execucaoId: number, empresaId?: number) {
+    await caixaPostalQueue.add('run', { execucaoId, empresaId }, { jobId: `caixa-postal-${execucaoId}` });
 }

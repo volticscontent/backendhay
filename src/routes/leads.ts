@@ -20,6 +20,14 @@ function fullLeadSelect(keyParam: string): string {
     SELECT
       l.id, l.telefone, l.nome_completo, l.email, l.cpf, l.data_nascimento, l.nome_mae, l.sexo,
       l.cnpj, l.razao_social, l.nome_fantasia, l.tipo_negocio, l.faturamento_mensal,
+      COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+              'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
+              'razao_social', le.razao_social,
+              'procuracao_ativa', le.procuracao_ativa
+          ) ORDER BY le.created_at)
+          FROM lead_empresa le WHERE le.lead_id = l.id
+      ), '[]'::jsonb) AS empresas,
       l.endereco, l.numero, l.complemento, l.bairro, l.cidade, l.estado, l.cep,
       l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
       l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
@@ -233,7 +241,15 @@ router.get('/leads/list', async (req: Request, res: Response) => {
         SELECT
           l.id, l.telefone, l.nome_completo, l.email, l.data_cadastro, l.atualizado_em,
           l.needs_attendant, l.attendant_requested_at,
-          l.razao_social, l.cnpj, l.tipo_negocio, l.faturamento_mensal,
+          l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+          COALESCE((
+              SELECT jsonb_agg(jsonb_build_object(
+                  'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
+                  'razao_social', le.razao_social,
+                  'procuracao_ativa', le.procuracao_ativa
+              ) ORDER BY le.created_at)
+              FROM lead_empresa le WHERE le.lead_id = l.id
+          ), '[]'::jsonb) AS empresas,
           l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
           l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
           l.calculo_parcelamento, l.tipo_divida,

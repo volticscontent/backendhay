@@ -7,6 +7,7 @@ const express_1 = require("express");
 const logger_1 = require("../lib/logger");
 const message_processor_1 = require("../lib/message-processor");
 const redis_1 = __importDefault(require("../lib/redis"));
+const socket_server_1 = require("../lib/socket-server");
 let requestCounter = 0;
 function nextTraceId() {
     return `wh-${(++requestCounter).toString(36)}-${Date.now().toString(36)}`;
@@ -73,7 +74,7 @@ router.post('/notify', (req, res) => {
             res.status(400).json({ error: 'Missing channel or data' });
             return;
         }
-        const io = require('../lib/socket-server').getIO();
+        const io = (0, socket_server_1.getIO)();
         if (!io) {
             res.status(503).json({ error: 'Socket.io not initialized' });
             return;

@@ -19,9 +19,35 @@ exports.cndQueue = new bullmq_1.Queue(QUEUE_NAME, {
         removeOnFail: { age: 3600 * 24 * 7 },
     },
 });
+function extractProtocolo(response) {
+    if (!response || typeof response !== 'object')
+        return undefined;
+    const r = response;
+    // Tenta campos comuns da resposta SOLICITARPROTOCOLO91
+    const direct = r.nrProtocolo ?? r.protocolo ?? r.numProtocolo ?? r.protocoloRelatorio ?? r.numeroProtocolo;
+    if (direct && typeof direct === 'string')
+        return direct;
+    // Tenta dentro de 'dados' (string JSON)
+    if (typeof r.dados === 'string') {
+        try {
+            const dados = JSON.parse(r.dados);
+            const nested = dados.nrProtocolo ?? dados.protocolo ?? dados.numProtocolo;
+            if (nested && typeof nested === 'string')
+                return nested;
+        }
+        catch { /* ignora */ }
+    }
+    return undefined;
+}
 async function processEmpresa(execucaoId, empresaId, cnpj) {
     try {
-        const result = await (0, serpro_1.consultarServico)('CND', cnpj);
+        // Passo 1: solicitar protocolo SITFIS
+        const solicitacao = await (0, serpro_1.consultarServico)('SIT_FISCAL_SOLICITAR', cnpj);
+        const protocolo = extractProtocolo(solicitacao);
+        if (!protocolo)
+            throw new Error(`Protocolo SITFIS não retornado. Resposta: ${JSON.stringify(solicitacao)}`);
+        // Passo 2: emitir CND com o protocolo obtido
+        const result = await (0, serpro_1.consultarServico)('CND', cnpj, { protocoloRelatorio: protocolo });
         await (0, db_1.query)(`INSERT INTO integra_execucao_itens (execucao_id, empresa_id, status, dados_resposta)
              VALUES ($1, $2, 'success', $3)`, [execucaoId, empresaId, JSON.stringify(result)]);
         return 'success';
@@ -34,9 +60,15 @@ async function processEmpresa(execucaoId, empresaId, cnpj) {
 }
 function startCndWorker() {
     const worker = new bullmq_1.Worker(QUEUE_NAME, async (job) => {
-        const { execucaoId } = job.data;
-        const empresas = await (0, db_1.query)(`SELECT id, cnpj FROM integra_empresas
-                 WHERE ativo = true AND servicos_habilitados ? 'CND'`);
+        const { execucaoId, empresaId } = job.data;
+        let querySql = `SELECT id, cnpj FROM integra_empresas
+                 WHERE ativo = true AND servicos_habilitados ? 'CND'`;
+        const queryParams = [];
+        if (empresaId) {
+            querySql += ` AND id = $1`;
+            queryParams.push(empresaId);
+        }
+        const empresas = await (0, db_1.query)(querySql, queryParams);
         const total = empresas.rows.length;
         let sucesso = 0, falhas = 0;
         await (0, db_1.query)(`UPDATE integra_execucoes SET total_empresas = $1 WHERE id = $2`, [total, execucaoId]);
@@ -62,7 +94,7 @@ function startCndWorker() {
     worker.on('failed', (_job, err) => logger_1.cronLogger.error('[CND] Job falhou:', err));
     return worker;
 }
-async function enqueueRoboCnd(execucaoId) {
-    await exports.cndQueue.add('run', { execucaoId }, { jobId: `cnd-${execucaoId}` });
+async function enqueueRoboCnd(execucaoId, empresaId) {
+    await exports.cndQueue.add('run', { execucaoId, empresaId }, { jobId: `cnd-${execucaoId}` });
 }
 //# sourceMappingURL=job-cnd.js.map

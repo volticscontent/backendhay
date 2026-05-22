@@ -79,15 +79,15 @@ async function maybeSavePdfFromBotResult(cnpj, service, result, protocolo) {
         logger_1.dbLogger.error('[maybeSavePdf] Falha ao salvar PDF do bot:', err);
     }
 }
-async function saveConsultation(cnpj, service, result, status, source = 'bot') {
+async function saveConsultation(cnpj, service, result, status, source = 'bot', leadId) {
     try {
         const cleanCnpj = cnpj.replace(/\D/g, '');
         const q = `
-      INSERT INTO consultas_serpro (cnpj, tipo_servico, resultado, status, source, created_at)
-      VALUES ($1, $2, $3, $4, $5, NOW())
+      INSERT INTO consultas_serpro (cnpj, tipo_servico, resultado, status, source, lead_id, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
       RETURNING id
     `;
-        const res = await db_1.default.query(q, [cleanCnpj, service, result, status, source]);
+        const res = await db_1.default.query(q, [cleanCnpj, service, result, status, source, leadId ?? null]);
         logger_1.dbLogger.debug(`Consulta Serpro salva. ID: ${res.rows[0].id}`);
     }
     catch (error) {

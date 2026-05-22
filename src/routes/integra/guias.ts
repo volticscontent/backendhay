@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { query } from '../../lib/db';
 import { getPresignedDownloadUrl } from '../../lib/r2';
 import { enqueueRoboPgmei } from '../../queues/integra/job-pgmei';
+import { enqueueRoboCnd } from '../../queues/integra/job-cnd';
+import { enqueueRoboCaixaPostal } from '../../queues/integra/job-caixa-postal';
 
 const router = Router();
 
@@ -68,20 +70,29 @@ router.get('/integra/guias/:id/download', async (req: Request, res: Response) =>
 router.post('/integra/guias/gerar', async (req: Request, res: Response) => {
     const { empresa_id, tipo_robo = 'pgmei' } = req.body as { empresa_id: number; tipo_robo?: string };
     if (!empresa_id) return void res.status(400).json({ error: 'empresa_id obrigatório' });
+    const roboTipo = (tipo_robo || 'pgmei').toLowerCase();
 
     const empresa = await query(`SELECT id FROM integra_empresas WHERE id = $1 AND ativo = true`, [empresa_id]);
     if (!empresa.rows.length) return void res.status(404).json({ error: 'Empresa não encontrada ou inativa' });
 
     const exec = await query(
         `INSERT INTO integra_execucoes (robo_tipo, status) VALUES ($1, 'running') RETURNING id`,
-        [tipo_robo]
+        [roboTipo]
     );
     const execucaoId = exec.rows[0].id as number;
 
     // Para geração manual, isolamos a execução APENAS para essa empresa_id
-    await enqueueRoboPgmei(execucaoId, empresa_id);
+    if (roboTipo === 'pgmei') {
+        await enqueueRoboPgmei(execucaoId, empresa_id);
+    } else if (roboTipo === 'cnd') {
+        await enqueueRoboCnd(execucaoId, empresa_id);
+    } else if (roboTipo === 'caixa_postal') {
+        await enqueueRoboCaixaPostal(execucaoId, empresa_id);
+    } else {
+        return void res.status(400).json({ error: `tipo_robo inválido: ${roboTipo}` });
+    }
 
-    res.status(202).json({ execucao_id: execucaoId, empresa_id, message: 'Geração iniciada' });
+    res.status(202).json({ execucao_id: execucaoId, empresa_id, tipo_robo: roboTipo, message: 'Geração iniciada' });
 });
 
 export default router;

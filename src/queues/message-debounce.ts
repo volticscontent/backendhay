@@ -240,16 +240,6 @@ async function sendAgentResponse(responseText: string, sender: string, userPhone
     }));
 
     await enqueueMessages({ phone: sender, messages: segments, context: `agent-response|${agentLabel}` });
-
-    // Cancelar nudges anteriores e agendar novo follow-up de 5 minutos
-    await cancelPendingFollowUps(userPhone);
-    const nudgeMsg = 'Oi, só pra ver se você conseguiu ler a mensagem acima! Posso te ajudar com mais alguma coisa? 😊';
-    await scheduleFollowUp(
-        userPhone,
-        nudgeMsg,
-        5 * 60 * 1000,
-        'nudge'
-    );
 }
 
 /** Envia mensagem de fallback quando AI falha */

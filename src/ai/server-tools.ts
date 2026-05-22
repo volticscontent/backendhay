@@ -6,6 +6,7 @@ import { evolutionFindMessages, evolutionSendMediaMessage, evolutionSendTextMess
 import { generateEmbedding } from './embedding';
 import { consultarServico } from '../lib/serpro';
 import { SERVICE_CONFIG } from '../lib/serpro-config';
+import { consultarDividaAtivaPorDevedor } from '../lib/pgfn';
 import { saveConsultation, maybeSavePdfFromBotResult } from '../lib/serpro-db';
 import { cnpjService } from '../lib/cnpj-service';
 import { autoRegisterEmpresa, enrichEmpresaFromChat } from '../lib/empresa-auto-register';
@@ -99,25 +100,49 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
             normalizedFields[fieldAliases[k] ?? k] = v;
         }
 
-        // Adicionar CNPJ extra sem sobrescrever o principal
+        // Adicionar empresa extra — INSERT em lead_empresa
         if (normalizedFields['cnpj_adicionar']) {
-            const cnpjExtra = String(normalizedFields['cnpj_adicionar']).replace(/\D/g, '');
-            await query(
-                `UPDATE leads SET
-                    cnpjs_adicionais = CASE
-                        WHEN cnpjs_adicionais IS NULL THEN $1::jsonb
-                        WHEN cnpjs_adicionais @> $1::jsonb THEN cnpjs_adicionais
-                        ELSE cnpjs_adicionais || $1::jsonb
-                    END,
-                    atualizado_em = NOW()
-                WHERE telefone = $2`,
-                [JSON.stringify([cnpjExtra]), telefone],
-            );
-            updatedData = { ...updatedData, cnpj_adicionado: cnpjExtra };
+            const raw = normalizedFields['cnpj_adicionar'] as any;
+            const cnpjLimpo = typeof raw === 'string'
+                ? raw.replace(/\D/g, '')
+                : String(raw?.cnpj ?? '').replace(/\D/g, '');
+            const tipo  = typeof raw === 'object' && raw?.tipo ? String(raw.tipo) : 'proprietario';
+            const razao = typeof raw === 'object' && raw?.razao_social ? String(raw.razao_social) : null;
+
+            const leadIdRes = await query('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+            const leadId = leadIdRes.rows[0]?.id;
+            if (leadId) {
+                await query(
+                    `INSERT INTO lead_empresa (lead_id, cnpj, tipo_vinculo, razao_social)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (lead_id, cnpj) DO UPDATE
+                       SET tipo_vinculo = EXCLUDED.tipo_vinculo,
+                           razao_social = COALESCE(EXCLUDED.razao_social, lead_empresa.razao_social),
+                           updated_at   = NOW()`,
+                    [leadId, cnpjLimpo, tipo, razao],
+                );
+            }
+            updatedData = { ...updatedData, cnpj_adicionado: cnpjLimpo };
+        }
+
+        // cnpj_ativo vai para Redis (session) — não persiste no DB
+        if ('cnpj_ativo' in normalizedFields) {
+            const leadIdRes = await query('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+            const leadId = leadIdRes.rows[0]?.id;
+            if (leadId) {
+                const val = normalizedFields['cnpj_ativo'];
+                const key = `session:cnpj_ativo:${leadId}`;
+                if (val) {
+                    await redis.set(key, String(val).replace(/\D/g, ''), 'EX', 86400); // 24h TTL
+                } else {
+                    await redis.del(key);
+                }
+            }
+            delete normalizedFields['cnpj_ativo'];
         }
 
         const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
-            'cnpj', 'cnpj_ativo', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
@@ -732,13 +757,32 @@ export async function checkCnpjSerpro(cnpj: string, service: keyof typeof SERVIC
             log.error('[checkCnpjSerpro] Error saving PDF to R2:', err)
         );
 
-        // Se o status é 200, significa que temos conexão/procuração ativa.
+        // Consulta bem-sucedida = procuração ativa. Sincroniza em leads_processo + lead_empresa.
         try {
             const cleanCnpj = cnpj.replace(/\D/g, '');
-            const resLead = await pool.query("SELECT id AS lead_id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1", [cleanCnpj]);
+
+            // Resolve lead via CNPJ principal (leads.cnpj) ou vínculo adicional (lead_empresa.cnpj)
+            const resLead = await pool.query(
+                `SELECT l.id AS lead_id, NULL::integer AS empresa_id
+                 FROM leads l
+                 WHERE REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') = $1
+                 UNION ALL
+                 SELECT le.lead_id, le.id AS empresa_id
+                 FROM lead_empresa le
+                 WHERE REGEXP_REPLACE(le.cnpj, '[^0-9]', '', 'g') = $1
+                 LIMIT 1`,
+                [cleanCnpj]
+            );
             if (resLead.rows.length > 0) {
-                await markProcuracaoCompleted(resLead.rows[0].lead_id);
-                log.info(`[checkCnpjSerpro] Status de procuração sincronizado para CNPJ ${cleanCnpj}`);
+                const { lead_id, empresa_id } = resLead.rows[0];
+                await markProcuracaoCompleted(lead_id);
+                if (empresa_id) {
+                    await pool.query(
+                        `UPDATE lead_empresa SET procuracao_ativa = true, updated_at = NOW() WHERE id = $1`,
+                        [empresa_id]
+                    );
+                }
+                log.info(`[checkCnpjSerpro] Procuração sincronizada para CNPJ ${cleanCnpj} (lead_id=${lead_id}${empresa_id ? `, empresa_id=${empresa_id}` : ''})`);
             }
         } catch (syncErr) {
             log.error('[checkCnpjSerpro] Erro ao sincronizar status de procuração:', syncErr);
@@ -855,7 +899,14 @@ export async function consultarCnpjPublico(cnpj: string, userPhone?: string): Pr
 }
 
 export async function consultarDividaAtivaGeralSerpro(cnpj: string): Promise<string> {
-    return checkCnpjSerpro(cnpj, 'PGFN_CONSULTAR');
+    try {
+        const result = await consultarDividaAtivaPorDevedor(cnpj);
+        return JSON.stringify(result);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`[consultarDividaAtivaGeralSerpro] Falha na API PGFN para CNPJ ${cnpj}:`, error);
+        return JSON.stringify({ status: 'error', origem: 'pgfn_api', message });
+    }
 }
 
 // ==================== Interpreter (Memory) ====================

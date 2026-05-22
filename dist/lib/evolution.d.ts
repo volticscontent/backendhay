@@ -53,6 +53,11 @@ export declare function evolutionSetWebhook(config: {
     events?: string[];
 }): Promise<unknown>;
 export declare function evolutionFindChats(): Promise<unknown[]>;
+export declare function evolutionFindContacts(): Promise<Array<{
+    remoteJid: string;
+    pushName: string | null;
+    profilePicUrl?: string | null;
+}>>;
 export declare function checkWhatsAppNumbers(numbers: string[]): Promise<Array<{
     exists: boolean;
     jid: string;

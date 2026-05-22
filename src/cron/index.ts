@@ -30,11 +30,7 @@ export function registerCronJobs(): void {
 
     // ============================
     // 2. Follow-up de Inatividade — A cada 30 minutos
-    //    Envia lembrete para leads que não responderam há mais de 2 horas
-    // ============================
-    // ============================
-    // 2. Follow-up de Inatividade — A cada 30 minutos
-    //    Envia lembrete para leads que não responderam há mais de 2 horas
+    //    Sequência multi-etapa por lead: warm → urgência → última chance → NUTRICAO
     // ============================
     cron.schedule('*/30 * * * *', async () => {
         const log = cronLogger.withTrace(`cron-followup-${Date.now().toString(36)}`);
@@ -48,16 +44,17 @@ export function registerCronJobs(): void {
         const timer = log.timer('Cron Follow-up Total');
         const client = await pool.connect();
         try {
-            // Buscar leads "nao_respondido" há mais de 2 horas sem follow-up recente
             const res = await log.timed('Query leads inativos', () => client.query(`
-        SELECT l.telefone, l.nome_completo
-        FROM leads l
-        LEFT JOIN leads_processo lp ON l.id = lp.lead_id
-        WHERE l.situacao = 'nao_respondido'
-          AND l.data_cadastro < NOW() - INTERVAL '2 hours'
-          AND (lp.data_followup IS NULL OR lp.data_followup < NOW() - INTERVAL '24 hours')
-        LIMIT 10
-      `));
+                SELECT l.id, l.telefone, l.nome_completo, l.situacao,
+                       l.cnpj,
+                       lp.status_atendimento, lp.data_followup
+                FROM leads l
+                LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+                WHERE l.situacao NOT IN ('cliente', 'desqualificado', 'nutricao')
+                  AND l.data_cadastro < NOW() - INTERVAL '2 hours'
+                  AND (lp.data_followup IS NULL OR lp.data_followup < NOW() - INTERVAL '6 hours')
+                LIMIT 10
+            `));
 
             if (res.rows.length === 0) {
                 log.info('Nenhum lead para follow-up no momento.');
@@ -67,36 +64,98 @@ export function registerCronJobs(): void {
 
             log.info(`Follow-up - ${res.rows.length} leads para contatar`);
 
+            const attendantPhone = process.env.ATTENDANT_PHONE;
             let count = 0;
+
             for (const lead of res.rows) {
                 try {
-                    // Limpar telefone usando utilitário robusto
                     const phone = normalizePhone(lead.telefone || '');
-
                     if (!phone || phone.length < 10) {
                         log.debug(`Follow-up - Telefone inválido, pulando: ${lead.telefone}`);
                         continue;
                     }
 
-                    const nome = lead.nome_completo || 'Cliente';
+                    // Pula se o cliente respondeu nas últimas 2 horas (já está ativo)
+                    const lastActivity = await redis.get(`last_activity:${phone}`);
+                    if (lastActivity && Date.now() - parseInt(lastActivity, 10) < 2 * 60 * 60 * 1000) {
+                        log.debug(`Follow-up pulado — ${phone} ativo nas últimas 2h`);
+                        continue;
+                    }
+
+                    const nome = (lead.nome_completo || 'Cliente').split(' ')[0];
+                    const temCnpj = Boolean(lead.cnpj);
+                    const statusAtendimento = lead.status_atendimento as string | null;
+
+                    // Busca e incrementa o contador de tentativas no Redis
+                    const redisKey = `followup_count:${phone}`;
+                    const countRaw = await redis.get(redisKey);
+                    const attempt = (parseInt(countRaw || '0', 10) || 0) + 1;
+                    await redis.set(redisKey, String(attempt), 'EX', 60 * 60 * 24 * 14); // TTL 14 dias
+
+                    if (attempt > 3) {
+                        // Etapa 4+: encerrar follow-up, marcar como NUTRICAO
+                        await client.query(
+                            `UPDATE leads SET situacao = 'nutricao', atualizado_em = NOW() WHERE id = $1`,
+                            [lead.id]
+                        );
+                        await client.query(`
+                            INSERT INTO leads_processo (lead_id, data_followup)
+                            VALUES ($1, NOW())
+                            ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
+                        `, [lead.id]);
+                        await redis.del(redisKey);
+
+                        if (attendantPhone) {
+                            await enqueueMessages({
+                                phone: attendantPhone,
+                                messages: [{ content: `📭 *Lead movido para Nutrição*\n\nNome: ${lead.nome_completo || lead.telefone}\nTelefone: ${phone}\n\nApós 3 tentativas de follow-up sem resposta, o lead foi marcado como *Nutrição*. Caso queira reativar manualmente, acesse o painel.`, type: 'text', delay: 0 }],
+                                context: 'cron-nutricao'
+                            });
+                        }
+                        log.info(`Lead ${phone} movido para NUTRICAO após 3 tentativas`);
+                        count++;
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        continue;
+                    }
+
+                    // Escolhe a mensagem baseada na etapa e no contexto do lead
+                    let msg: string;
+
+                    if (attempt === 1) {
+                        // Etapa 1: Retomada calorosa
+                        if (statusAtendimento === 'reuniao_pendente' || statusAtendimento === 'reuniao_fechamento') {
+                            msg = `Oi ${nome}! 😊 Vi que você tem uma reunião agendada com a gente. Precisa de alguma informação antes ou quer confirmar o horário?`;
+                        } else if (temCnpj) {
+                            msg = `Oi ${nome}! 😊 Vi aqui que ainda não conseguimos dar continuidade à análise do seu MEI. Ainda quer que a gente dê uma olhada na situação fiscal?`;
+                        } else {
+                            msg = `Oi ${nome}! 😊 Vi que você se interessou pelos nossos serviços. Ainda posso te ajudar com alguma dúvida?`;
+                        }
+                    } else if (attempt === 2) {
+                        // Etapa 2: Urgência e custo de inação
+                        if (temCnpj) {
+                            msg = `Oi ${nome}, tudo bem? Cada mês de DAS em aberto acumula multa de 0,33% ao dia + SELIC — quanto mais demora, mais caro fica. 😟\n\nPosso verificar a situação do seu MEI agora e mostrar exatamente o que precisa resolver. Pode ser?`;
+                        } else {
+                            msg = `Oi ${nome}! Só lembrando que regularizar um MEI fica cada vez mais caro com o tempo — cada guia em aberto acumula multa diária. 😟\n\nA gente pode resolver isso de forma prática. Quer que eu explique como funciona?`;
+                        }
+                    } else {
+                        // Etapa 3: Última chance, pergunta direta
+                        msg = `Oi ${nome}, última mensagem de nossa parte. 🙏\n\nVocê ainda quer resolver a situação do seu MEI? Responde só *sim* ou *não* — te respondo na hora.`;
+                    }
 
                     await enqueueMessages({
                         phone,
-                        messages: [{ content: `Olá ${nome}! 😊 Vi que você se interessou pelos nossos serviços. Posso te ajudar com alguma dúvida?`, type: 'text', delay: 0 }],
-                        context: 'cron-follow-up'
+                        messages: [{ content: msg, type: 'text', delay: 0 }],
+                        context: `cron-follow-up-etapa${attempt}`
                     });
 
-                    // Atualizar data de follow-up (cria o registro se não existir)
                     await client.query(`
-            INSERT INTO leads_processo (lead_id, data_followup)
-            VALUES ((SELECT id FROM leads WHERE telefone = $1 LIMIT 1), NOW())
-            ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
-          `, [lead.telefone]);
+                        INSERT INTO leads_processo (lead_id, data_followup)
+                        VALUES ($1, NOW())
+                        ON CONFLICT (lead_id) DO UPDATE SET data_followup = NOW(), updated_at = NOW()
+                    `, [lead.id]);
 
-                    log.info(`Follow-up enviado para ${phone}`);
+                    log.info(`Follow-up etapa ${attempt} enviado para ${phone}`);
                     count++;
-
-                    // Rate limit: esperar 2s entre envios
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 } catch (err) {
                     log.error(`Erro no follow-up de ${lead.telefone}:`, err);
@@ -344,6 +403,80 @@ export function registerCronJobs(): void {
 
         } catch (error) {
             log.error('Erro no cron pós-reunião:', error);
+        } finally {
+            client.release();
+        }
+    });
+
+    // ============================
+    // 8. Red-Flag 24h — A cada hora
+    //    Detecta leads que receberam o tutorial e-CAC há mais de 24h
+    //    e ainda não confirmaram a procuração → marca red_flag + notifica Haylander
+    // ============================
+    cron.schedule('0 * * * *', async () => {
+        const log = cronLogger.withTrace(`cron-redflag24-${Date.now().toString(36)}`);
+
+        const client = await pool.connect();
+        try {
+            const res = await client.query(`
+                SELECT
+                    l.id, l.telefone, l.nome_completo,
+                    l.cnpj
+                FROM leads l
+                JOIN leads_processo lp ON l.id = lp.lead_id
+                WHERE l.situacao NOT IN ('red_flag', 'cliente', 'desqualificado', 'nutricao')
+                  AND COALESCE(lp.procuracao_ativa, false) = false
+                  AND COALESCE(lp.procuracao, false) = false
+                  AND lp.recursos_entregues ? 'video-tutorial:video-tutorial-procuracao-ecac'
+                  AND (lp.recursos_entregues->'video-tutorial:video-tutorial-procuracao-ecac'->>'delivered_at')::timestamptz
+                      < NOW() - INTERVAL '24 hours'
+            `);
+
+            if (res.rows.length === 0) return;
+
+            const attendantPhone = process.env.ATTENDANT_PHONE;
+            let flagged = 0;
+
+            for (const lead of res.rows) {
+                const phone = lead.telefone as string;
+                const redisKey = `redflag24_notified:${lead.id}`;
+                if (await redis.get(redisKey)) continue; // já notificado
+
+                await client.query(
+                    `UPDATE leads SET situacao = 'red_flag', atualizado_em = NOW() WHERE id = $1`,
+                    [lead.id]
+                );
+                await client.query(`
+                    INSERT INTO leads_processo (lead_id, status_atendimento, updated_at)
+                    VALUES ($1, 'aguardando_procuracao', NOW())
+                    ON CONFLICT (lead_id) DO UPDATE
+                        SET status_atendimento = 'aguardando_procuracao', updated_at = NOW()
+                `, [lead.id]);
+
+                await redis.set(redisKey, '1', 'EX', 60 * 60 * 24 * 7); // TTL 7 dias
+
+                if (attendantPhone) {
+                    const nome = lead.nome_completo || phone;
+                    const cnpj = lead.cnpj ? ` (CNPJ ${lead.cnpj})` : '';
+                    await enqueueMessages({
+                        phone: attendantPhone,
+                        messages: [{
+                            content: `🔴 *RED FLAG — 24h sem procuração*\n\nLead: *${nome}*${cnpj}\nTelefone: ${phone}\n\nO tutorial e-CAC foi enviado há mais de 24h e o cliente ainda não concluiu a procuração. Sugestão: entrar em contato manualmente para entender a dificuldade.`,
+                            type: 'text',
+                            delay: 0,
+                        }],
+                        context: 'cron-redflag24',
+                    });
+                }
+
+                log.info(`Red-flag 24h aplicado: ${phone} (lead ${lead.id})`);
+                flagged++;
+                await new Promise(r => setTimeout(r, 1000));
+            }
+
+            if (flagged > 0) log.info(`${flagged} lead(s) marcados como red_flag por 24h sem procuração`);
+        } catch (err) {
+            log.error('Erro no cron red-flag 24h:', err);
         } finally {
             client.release();
         }

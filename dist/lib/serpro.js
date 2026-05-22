@@ -153,6 +153,9 @@ async function request(urlStr, options, body, retries = 2) {
                 });
             });
             req.on('error', (e) => reject(e));
+            req.on('timeout', () => {
+                req.destroy(new Error(`Serpro timeout após 30s: ${urlStr}`));
+            });
             if (body)
                 req.write(body);
             req.end();
@@ -220,6 +223,13 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
         throw new Error(`Serviço ${nomeServico} não configurado`);
     const idSistema = process.env[config.env_sistema] || config.default_sistema;
     const idServico = process.env[config.env_servico] || config.default_servico;
+    // Warn when PGFN_CONSULTAR or DIVIDA_ATIVA fall back to DIVIDAATIVA24 (env vars not configured)
+    if (nomeServico === 'PGFN_CONSULTAR' || nomeServico === 'DIVIDA_ATIVA') {
+        const missingEnvs = [config.env_sistema, config.env_servico].filter(k => !process.env[k]);
+        if (missingEnvs.length > 0) {
+            logger_1.serproLogger.warn(`[${nomeServico}] Usando fallback DIVIDAATIVA24 — env vars não configuradas: ${missingEnvs.join(', ')}. Configure para usar endpoint dedicado quando disponível.`);
+        }
+    }
     if (!idSistema || !idServico) {
         const missing = [];
         if (!idSistema)
@@ -249,14 +259,12 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
             dadosServico.ano = options.ano;
         }
     }
-    else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'DCTFWEB'].includes(nomeServico)) {
+    else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'DCTFWEB', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico)) {
         const currentYear = new Date().getFullYear().toString();
         if (nomeServico === 'DCTFWEB')
             dadosServico.anoPA = currentYear;
-        else if (['PGMEI', 'DIVIDA_ATIVA', 'PGDASD', 'PGFN_CONSULTAR', 'PGMEI_EXTRATO', 'PGMEI_BOLETO', 'PGMEI_ATU_BENEFICIO'].includes(nomeServico))
-            dadosServico.anoCalendario = currentYear;
         else
-            dadosServico.ano = currentYear;
+            dadosServico.anoCalendario = currentYear;
     }
     if (options.mes) {
         const mesPad = options.mes.padStart(2, '0');
@@ -306,6 +314,8 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
     const isSitfis = ['SIT_FISCAL_SOLICITAR', 'SIT_FISCAL_RELATORIO', 'CND'].includes(nomeServico);
     const isProcuracao = nomeServico === 'PROCURACAO';
     const cpfNumero = options.cpf ? onlyDigits(options.cpf) : undefined;
+    if (isSitfis && !cpfNumero)
+        throw new Error(`${nomeServico} requer options.cpf (CPF do empresário — SITFIS é CPF-based, não aceita CNPJ como contribuinte)`);
     const contribuinteNumero = ((isSitfis || isProcuracao) && cpfNumero) ? cpfNumero : cnpjNumero;
     const contribuinteTipo = ((isSitfis || isProcuracao) && cpfNumero && cpfNumero.length === 11)
         ? serpro_types_1.TipoContribuinte.CPF
@@ -317,7 +327,7 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
     }
     else if (nomeServico === 'SIT_FISCAL_RELATORIO' || nomeServico === 'CND') {
         if (!options.protocoloRelatorio)
-            throw new Error('SIT_FISCAL_RELATORIO exige options.protocoloRelatorio');
+            throw new Error(`${nomeServico} requer options.protocoloRelatorio — fluxo obrigatório 2 etapas: 1) SIT_FISCAL_SOLICITAR → obtém protocolo, 2) ${nomeServico} com o protocolo retornado`);
         dadosField = JSON.stringify({ protocoloRelatorio: options.protocoloRelatorio });
     }
     else if (isProcuracao) {

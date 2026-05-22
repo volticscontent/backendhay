@@ -210,10 +210,6 @@ async function sendAgentResponse(responseText, sender, userPhone, agentLabel = '
         delay: i === 0 ? 0 : 1500,
     }));
     await (0, message_queue_1.enqueueMessages)({ phone: sender, messages: segments, context: `agent-response|${agentLabel}` });
-    // Cancelar nudges anteriores e agendar novo follow-up de 5 minutos
-    await (0, message_queue_1.cancelPendingFollowUps)(userPhone);
-    const nudgeMsg = 'Oi, só pra ver se você conseguiu ler a mensagem acima! Posso te ajudar com mais alguma coisa? 😊';
-    await (0, message_queue_1.scheduleFollowUp)(userPhone, nudgeMsg, 5 * 60 * 1000, 'nudge');
 }
 /** Envia mensagem de fallback quando AI falha */
 async function sendFallback(sender, userPhone) {

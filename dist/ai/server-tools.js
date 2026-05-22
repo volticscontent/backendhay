@@ -53,8 +53,10 @@ exports.searchServices = searchServices;
 exports.getAvailableMedia = getAvailableMedia;
 exports.sendMedia = sendMedia;
 exports.sendCommercialPresentation = sendCommercialPresentation;
+exports.getClientDataWithFreshness = getClientDataWithFreshness;
 exports.checkCnpjSerpro = checkCnpjSerpro;
 exports.consultarProcuracaoSerpro = consultarProcuracaoSerpro;
+exports.consultarCnpjPublico = consultarCnpjPublico;
 exports.consultarDividaAtivaGeralSerpro = consultarDividaAtivaGeralSerpro;
 exports.interpreter = interpreter;
 exports.trackResourceDelivery = trackResourceDelivery;
@@ -70,6 +72,8 @@ const evolution_1 = require("../lib/evolution");
 const embedding_1 = require("./embedding");
 const serpro_1 = require("../lib/serpro");
 const serpro_db_1 = require("../lib/serpro-db");
+const cnpj_service_1 = require("../lib/cnpj-service");
+const empresa_auto_register_1 = require("../lib/empresa-auto-register");
 const logger_1 = __importDefault(require("../lib/logger"));
 const log = logger_1.default.child('ServerTools');
 function isObject(value) {
@@ -161,6 +165,42 @@ async function updateUser(data) {
         const normalizedFields = {};
         for (const [k, v] of Object.entries(fields)) {
             normalizedFields[fieldAliases[k] ?? k] = v;
+        }
+        // Adicionar empresa extra — INSERT em lead_empresa
+        if (normalizedFields['cnpj_adicionar']) {
+            const raw = normalizedFields['cnpj_adicionar'];
+            const cnpjLimpo = typeof raw === 'string'
+                ? raw.replace(/\D/g, '')
+                : String(raw?.cnpj ?? '').replace(/\D/g, '');
+            const tipo = typeof raw === 'object' && raw?.tipo ? String(raw.tipo) : 'proprietario';
+            const razao = typeof raw === 'object' && raw?.razao_social ? String(raw.razao_social) : null;
+            const leadIdRes = await (0, db_2.query)('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+            const leadId = leadIdRes.rows[0]?.id;
+            if (leadId) {
+                await (0, db_2.query)(`INSERT INTO lead_empresa (lead_id, cnpj, tipo_vinculo, razao_social)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (lead_id, cnpj) DO UPDATE
+                       SET tipo_vinculo = EXCLUDED.tipo_vinculo,
+                           razao_social = COALESCE(EXCLUDED.razao_social, lead_empresa.razao_social),
+                           updated_at   = NOW()`, [leadId, cnpjLimpo, tipo, razao]);
+            }
+            updatedData = { ...updatedData, cnpj_adicionado: cnpjLimpo };
+        }
+        // cnpj_ativo vai para Redis (session) — não persiste no DB
+        if ('cnpj_ativo' in normalizedFields) {
+            const leadIdRes = await (0, db_2.query)('SELECT id FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+            const leadId = leadIdRes.rows[0]?.id;
+            if (leadId) {
+                const val = normalizedFields['cnpj_ativo'];
+                const key = `session:cnpj_ativo:${leadId}`;
+                if (val) {
+                    await redis_1.default.set(key, String(val).replace(/\D/g, ''), 'EX', 86400); // 24h TTL
+                }
+                else {
+                    await redis_1.default.del(key);
+                }
+            }
+            delete normalizedFields['cnpj_ativo'];
         }
         const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
             'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
@@ -546,34 +586,49 @@ async function sendCommercialPresentation(phone, type = 'apc') {
             mediaUrl = res.rows[0].value;
     }
     catch { /* usa default */ }
+    const isSocialUrl = /instagram\.com|youtu|tiktok|facebook\.com/.test(mediaUrl);
     try {
         if (type === 'apc') {
             const evoLog = await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, 'document', 'Apresentação Comercial Haylander', 'Apresentacao_Haylander.pdf', 'application/pdf');
-            log.info(`[sendCommercialPresentation] Evolution response (APC) for ${phone}:`, { evolution_log: evoLog });
+            log.info(`[sendCommercialPresentation] APC sent for ${phone}`);
             try {
                 const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
                 notifySocketServer('haylander-chat-updates', {
-                    chatId: jid,
-                    fromMe: true,
+                    chatId: jid, fromMe: true,
                     message: { conversation: `[Apresentação Comercial enviada]` },
-                    id: `msg-${Date.now()}`,
-                    messageTimestamp: Math.floor(Date.now() / 1000)
+                    id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
                 }).catch(() => { });
             }
             catch (e) { }
             return JSON.stringify({ status: 'sent', message: 'Apresentação comercial enviada (PDF).', type, evolution_log: evoLog });
         }
         else {
+            // URL social (Instagram, YouTube, etc): envia como mensagem de texto com link
+            if (isSocialUrl) {
+                const { evolutionSendTextMessage } = await Promise.resolve().then(() => __importStar(require('../lib/evolution')));
+                const text = `🎥 *Vídeo Tutorial — Como criar a Procuração no e-CAC*\n\n${mediaUrl}\n\n_Assista antes de seguir os passos abaixo. O processo leva menos de 2 minutos._`;
+                const evoLog = await evolutionSendTextMessage(jid, text);
+                log.info(`[sendCommercialPresentation] Video tutorial (social URL) sent for ${phone}`);
+                try {
+                    const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+                    notifySocketServer('haylander-chat-updates', {
+                        chatId: jid, fromMe: true,
+                        message: { conversation: `[Vídeo Tutorial enviado — ${mediaUrl}]` },
+                        id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
+                    }).catch(() => { });
+                }
+                catch (e) { }
+                return JSON.stringify({ status: 'sent', message: 'Link do vídeo tutorial enviado.', type, url: mediaUrl });
+            }
+            // URL de arquivo (R2/mp4): envia como vídeo
             const evoLog = await (0, evolution_1.evolutionSendMediaMessage)(jid, mediaUrl, 'video', 'Vídeo Tutorial', 'tutorial.mp4', 'video/mp4');
-            log.info(`[sendCommercialPresentation] Evolution response (Video) for ${phone}:`, { evolution_log: evoLog });
+            log.info(`[sendCommercialPresentation] Video file sent for ${phone}`);
             try {
                 const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
                 notifySocketServer('haylander-chat-updates', {
-                    chatId: jid,
-                    fromMe: true,
+                    chatId: jid, fromMe: true,
                     message: { conversation: `[Vídeo Tutorial enviado]` },
-                    id: `msg-${Date.now()}`,
-                    messageTimestamp: Math.floor(Date.now() / 1000)
+                    id: `msg-${Date.now()}`, messageTimestamp: Math.floor(Date.now() / 1000)
                 }).catch(() => { });
             }
             catch (e) { }
@@ -585,6 +640,139 @@ async function sendCommercialPresentation(phone, type = 'apc') {
         return JSON.stringify({ status: 'error', message: `Erro ao enviar ${type}: ${String(error)}` });
     }
 }
+// ==================== Cache-aware client data ====================
+/**
+ * Por quantos dias o resultado de cada serviço Serpro é considerado fresco.
+ * Reflete a frequência real de mudança dos dados na Receita Federal.
+ */
+const FRESHNESS_DAYS = {
+    CCMEI_DADOS: 90, // dados cadastrais raramente mudam
+    SIMEI: 90,
+    PROCURACAO: 30, // pode ser revogada, checar mensalmente
+    PGMEI: 7, // débitos DAS mudam após vencimento mensal
+    PGFN_CONSULTAR: 30,
+    DIVIDA_ATIVA: 30,
+    PGMEI_EXTRATO: 30,
+    PGMEI_BOLETO: 30,
+    PGMEI_ATU_BENEFICIO: 30,
+    SIT_FISCAL_SOLICITAR: 90,
+    SIT_FISCAL_RELATORIO: 90,
+    CND: 180,
+    CAIXA_POSTAL: 1, // mensagens chegam diariamente
+    DASN_SIMEI: 365, // declaração anual
+    DCTFWEB: 30,
+    PGDASD: 30,
+    PARCELAMENTO_MEI_CONSULTAR: 7,
+    PARCELAMENTO_SN_CONSULTAR: 7,
+};
+/**
+ * Retorna dados cadastrais do banco + histórico de consultas Serpro com indicador de frescor.
+ * O bot deve chamar isso ANTES de qualquer tool Serpro para evitar consultas redundantes.
+ */
+async function getClientDataWithFreshness(phone) {
+    try {
+        const leadRes = await (0, db_2.query)(`
+            SELECT
+                l.id, l.telefone, l.nome_completo, l.email, l.cpf,
+                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+                l.tem_divida, l.tipo_divida, l.valor_divida_federal, l.valor_divida_pgfn,
+                l.situacao, l.qualificacao, l.atualizado_em,
+                lp.servico, lp.status_atendimento, lp.procuracao_ativa,
+                lp.procuracao_validade, lp.observacoes
+            FROM leads l
+            LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+            WHERE l.telefone = $1
+            LIMIT 1
+        `, [phone]);
+        if (leadRes.rows.length === 0) {
+            return JSON.stringify({ status: 'not_found', message: 'Lead não encontrado.' });
+        }
+        const lead = leadRes.rows[0];
+        const cnpj = (lead.cnpj || '').replace(/\D/g, '');
+        // Última consulta por serviço (somente sucesso status=200)
+        let consultasFrescor = [];
+        if (cnpj) {
+            const cRes = await (0, db_2.query)(`
+                SELECT DISTINCT ON (tipo_servico)
+                    tipo_servico, resultado, created_at
+                FROM consultas_serpro
+                WHERE cnpj = $1 AND status = 200
+                ORDER BY tipo_servico, created_at DESC
+            `, [cnpj]);
+            const now = Date.now();
+            consultasFrescor = cRes.rows.map(row => {
+                const service = row.tipo_servico;
+                const freshnessDays = FRESHNESS_DAYS[service] ?? 7;
+                const fetchedAt = new Date(row.created_at);
+                const ageDays = Math.floor((now - fetchedAt.getTime()) / 86_400_000);
+                const aindaValido = ageDays < freshnessDays;
+                return {
+                    servico: service,
+                    ultima_consulta: fetchedAt.toLocaleDateString('pt-BR'),
+                    dias_atras: ageDays,
+                    valido_por_dias: freshnessDays,
+                    ainda_valido: aindaValido,
+                    proximo_refresh: aindaValido ? `em ${freshnessDays - ageDays} dia(s)` : 'ATUALIZAR AGORA',
+                    resultado: row.resultado,
+                };
+            });
+        }
+        // Documentos PDF ainda válidos (CND, SITFIS, DAS)
+        let documentosValidos = [];
+        if (cnpj) {
+            const docRes = await (0, db_2.query)(`
+                SELECT tipo_servico, r2_url, valido_ate, created_at
+                FROM serpro_documentos
+                WHERE cnpj = $1
+                  AND deletado_em IS NULL
+                  AND (valido_ate IS NULL OR valido_ate > NOW())
+                ORDER BY created_at DESC
+                LIMIT 10
+            `, [cnpj]);
+            documentosValidos = docRes.rows.map(row => ({
+                servico: row.tipo_servico,
+                url: row.r2_url,
+                valido_ate: row.valido_ate ? new Date(row.valido_ate).toLocaleDateString('pt-BR') : null,
+                gerado_em: new Date(row.created_at).toLocaleDateString('pt-BR'),
+            }));
+        }
+        return JSON.stringify({
+            status: 'success',
+            dados_cadastro: {
+                fonte: 'banco_de_dados',
+                atualizado_em: lead.atualizado_em
+                    ? new Date(lead.atualizado_em).toLocaleDateString('pt-BR')
+                    : null,
+                dados: {
+                    nome: lead.nome_completo,
+                    cpf: lead.cpf,
+                    cnpj: lead.cnpj,
+                    razao_social: lead.razao_social,
+                    tipo_negocio: lead.tipo_negocio,
+                    faturamento_mensal: lead.faturamento_mensal,
+                    tem_divida: lead.tem_divida,
+                    tipo_divida: lead.tipo_divida,
+                    valor_divida_federal: lead.valor_divida_federal,
+                    valor_divida_pgfn: lead.valor_divida_pgfn,
+                    situacao: lead.situacao,
+                    qualificacao: lead.qualificacao,
+                    procuracao_ativa: lead.procuracao_ativa ?? false,
+                    procuracao_validade: lead.procuracao_validade,
+                    status_atendimento: lead.status_atendimento,
+                    observacoes: lead.observacoes,
+                },
+            },
+            consultas_serpro: consultasFrescor,
+            documentos_validos: documentosValidos,
+            regras_frescor: FRESHNESS_DAYS,
+            instrucao: 'Se ainda_valido=true use o campo "resultado" diretamente. Só chame a tool Serpro se ainda_valido=false ou serviço ausente da lista.',
+        });
+    }
+    catch (error) {
+        log.error('getClientDataWithFreshness error:', error);
+        return JSON.stringify({ status: 'error', message: String(error) });
+    }
+}
 // ==================== Serpro ====================
 async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS', options = {}) {
     try {
@@ -592,13 +780,25 @@ async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS', options = {}) {
         const result = await (0, serpro_1.consultarServico)(service, cnpj, options);
         (0, serpro_db_1.saveConsultation)(cnpj, service, result, 200).catch(err => log.error('[checkCnpjSerpro] Error saving:', err));
         (0, serpro_db_1.maybeSavePdfFromBotResult)(cnpj, service, result, options.protocoloRelatorio).catch(err => log.error('[checkCnpjSerpro] Error saving PDF to R2:', err));
-        // Se o status é 200, significa que temos conexão/procuração ativa.
+        // Consulta bem-sucedida = procuração ativa. Sincroniza em leads_processo + lead_empresa.
         try {
             const cleanCnpj = cnpj.replace(/\D/g, '');
-            const resLead = await db_1.default.query("SELECT id AS lead_id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1", [cleanCnpj]);
+            // Resolve lead via CNPJ principal (leads.cnpj) ou vínculo adicional (lead_empresa.cnpj)
+            const resLead = await db_1.default.query(`SELECT l.id AS lead_id, NULL::integer AS empresa_id
+                 FROM leads l
+                 WHERE REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') = $1
+                 UNION ALL
+                 SELECT le.lead_id, le.id AS empresa_id
+                 FROM lead_empresa le
+                 WHERE REGEXP_REPLACE(le.cnpj, '[^0-9]', '', 'g') = $1
+                 LIMIT 1`, [cleanCnpj]);
             if (resLead.rows.length > 0) {
-                await markProcuracaoCompleted(resLead.rows[0].lead_id);
-                log.info(`[checkCnpjSerpro] Status de procuração sincronizado para CNPJ ${cleanCnpj}`);
+                const { lead_id, empresa_id } = resLead.rows[0];
+                await markProcuracaoCompleted(lead_id);
+                if (empresa_id) {
+                    await db_1.default.query(`UPDATE lead_empresa SET procuracao_ativa = true, updated_at = NOW() WHERE id = $1`, [empresa_id]);
+                }
+                log.info(`[checkCnpjSerpro] Procuração sincronizada para CNPJ ${cleanCnpj} (lead_id=${lead_id}${empresa_id ? `, empresa_id=${empresa_id}` : ''})`);
             }
         }
         catch (syncErr) {
@@ -622,6 +822,87 @@ async function checkCnpjSerpro(cnpj, service = 'CCMEI_DADOS', options = {}) {
 }
 async function consultarProcuracaoSerpro(cnpj) {
     return checkCnpjSerpro(cnpj, 'PROCURACAO');
+}
+/**
+ * Consulta dados PÚBLICOS de qualquer CNPJ usando a BrasilAPI e VERIFICA acesso Serpro.
+ * Esta ferramenta é a principal validação para saber se a procuração e-CAC está ativa.
+ */
+async function consultarCnpjPublico(cnpj, userPhone) {
+    const cleanCnpj = cnpj.replace(/\D/g, '');
+    const results = {
+        cnpj: cleanCnpj,
+        public_data: null,
+        is_mei: false,
+        ficha_auto_preenchida: {},
+        serpro_access: {
+            active: false,
+            error_type: null,
+            message: null
+        }
+    };
+    try {
+        // 1. Dados públicos via BrasilAPI
+        const publicResult = await cnpj_service_1.cnpjService.consultarCNPJ(cnpj);
+        if (publicResult.success && publicResult.data) {
+            const d = publicResult.data;
+            results.public_data = d;
+            (0, serpro_db_1.saveConsultation)(cleanCnpj, 'CNPJ_API', d, 200, 'bot').catch(() => { });
+            // Detecta MEI via natureza jurídica (código 213-5 = Empresário Individual = MEI)
+            const natJur = (d.natureza_juridica || '').toLowerCase();
+            results.is_mei = natJur.includes('213-5') || natJur.includes('empresário (individual)') || natJur.includes('empresario (individual)');
+            // Monta ficha a partir de dados públicos para auto-preenchimento
+            const ficha = {
+                cnpj: cleanCnpj,
+                razao_social: d.razao_social || undefined,
+                nome_fantasia: d.nome_fantasia || undefined,
+                tipo_negocio: d.atividades_principais?.[0]?.text || undefined,
+                endereco: d.endereco?.logradouro || undefined,
+                numero: d.endereco?.numero || undefined,
+                complemento: d.endereco?.complemento || undefined,
+                bairro: d.endereco?.bairro || undefined,
+                cidade: d.endereco?.municipio || undefined,
+                estado: d.endereco?.uf || undefined,
+                cep: d.endereco?.cep || undefined,
+            };
+            // Email público só se presente
+            if (d.email)
+                ficha.email = d.email;
+            // Remove undefined
+            Object.keys(ficha).forEach(k => ficha[k] === undefined && delete ficha[k]);
+            results.ficha_auto_preenchida = ficha;
+            // Auto-popula o lead se tiver telefone (contexto do bot)
+            if (userPhone && Object.keys(ficha).length > 0) {
+                updateUser({ telefone: userPhone, ...ficha }).catch(err => log.error('[consultarCnpjPublico] Erro ao auto-preencher lead:', err));
+            }
+        }
+        else {
+            log.warn(`[consultarCnpjPublico] Falha BrasilAPI para ${cleanCnpj}: ${publicResult.error?.message}`);
+        }
+        // 2. Valida Procuração via Serpro
+        try {
+            const serproRaw = await checkCnpjSerpro(cleanCnpj, 'PROCURACAO');
+            const serproData = JSON.parse(serproRaw);
+            if (serproData.status === 'error') {
+                results.serpro_access = { active: false, error_type: serproData.error_type || 'unknown_error', message: serproData.message };
+            }
+            else {
+                results.serpro_access = { active: true, error_type: null, message: 'Procuração e-CAC ativa no Serpro.' };
+            }
+        }
+        catch (serproErr) {
+            results.serpro_access = { active: false, error_type: 'connection_error', message: String(serproErr) };
+        }
+        const instruction = results.serpro_access.active
+            ? 'Procuração ATIVA. Prossiga com consultas Serpro (PGMEI, SITFIS).'
+            : results.is_mei
+                ? 'Lead é MEI. Procuração AUSENTE — explique que a procuração e-CAC é OBRIGATÓRIA para prestarmos o serviço corretamente. Use enviar_processo_autonomo para enviar o tutorial.'
+                : 'Procuração AUSENTE — explique que a procuração e-CAC é OBRIGATÓRIA para prestarmos o serviço corretamente. Use enviar_processo_autonomo para enviar o tutorial.';
+        return JSON.stringify({ status: 'success', ...results, instruction });
+    }
+    catch (error) {
+        log.error(`[consultarCnpjPublico] Fatal error for ${cleanCnpj}:`, error);
+        return JSON.stringify({ status: 'error', message: String(error) });
+    }
 }
 async function consultarDividaAtivaGeralSerpro(cnpj) {
     return checkCnpjSerpro(cnpj, 'PGFN_CONSULTAR');
@@ -773,6 +1054,12 @@ async function markProcuracaoCompleted(leadId) {
                 updated_at           = NOW()
         `, [leadId, validoAte, JSON.stringify(recursoEntry)]);
         log.info(`[markProcuracaoCompleted] Lead ${leadId} marcado como COM PROCURAÇÃO (válida até ${validoAte}).`);
+        // Cadastro automático no Integra Contador + enriquecimento via chat (fire-and-forget)
+        (0, empresa_auto_register_1.autoRegisterEmpresa)(leadId).then(({ empresaId, phone }) => {
+            if (empresaId && phone) {
+                (0, empresa_auto_register_1.enrichEmpresaFromChat)(empresaId, phone).catch(() => undefined);
+            }
+        }).catch(() => undefined);
     }
     catch (error) {
         log.error('markProcuracaoCompleted error:', error);

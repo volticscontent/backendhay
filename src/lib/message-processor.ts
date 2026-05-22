@@ -80,6 +80,7 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
         return { status: 'ignored_invalid' };
     }
 
+
     const logMsg = typeof message === 'string' ? message : '[Conteúdo Multimodal/Imagem]';
     log.info(`📩 [${payload.instance}] Mensagem de ${userPhone} (${chatId}): ${logMsg}`);
 
@@ -93,10 +94,11 @@ export async function processIncomingMessage(payload: IncomingMessagePayload) {
         );
     }
 
-    // Cancelar follow-ups pendentes (cliente respondeu)
+    // Cancelar follow-ups pendentes e resetar contador de etapas (cliente respondeu)
     cancelPendingFollowUps(userPhone).catch(err =>
         log.error('Erro ao cancelar follow-ups:', err)
     );
+    redis.del(`followup_count:${userPhone}`).catch(() => {});
 
     // Registrar atividade no Redis
     redis.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });

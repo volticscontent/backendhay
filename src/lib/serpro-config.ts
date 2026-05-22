@@ -189,13 +189,14 @@ export const SERVICE_CONFIG: Record<string, ServiceConfigItem> = {
         tipo: 'Consultar',
         descricao: 'Consulta de Procurações Eletrônicas.',
     },
-    // Alias de PGMEI sem versaoSistema:'2.4' explícita (usa '1.0' default).
+    // Alias de PGMEI com versaoSistema:'2.4' para garantir mesmo formato de resposta (PDF base64 → pdf-parse).
     // Separado para permitir override via env INTEGRA_PGFN_* se a Serpro publicar endpoint PGFN dedicado.
     PGFN_CONSULTAR: {
         env_sistema: 'INTEGRA_PGFN_ID_SISTEMA',
         env_servico: 'INTEGRA_PGFN_CONSULTA_ID_SERVICO',
         default_sistema: 'PGMEI',
         default_servico: 'DIVIDAATIVA24',
+        versaoSistema: '2.4',
         tipo: 'Consultar',
         descricao: 'Consulta de débitos em Dívida Ativa da União (MEI). Para geral, use SITFIS.',
     },

@@ -16,7 +16,7 @@ const VALID_REGIMES = ['mei', 'simples', 'presumido', 'real'];
 
 /**
  * Cria empresa em integra_empresas logo após procuração ser confirmada.
- * Usa dados já disponíveis em leads (cnpj_ativo || cnpj, razao_social).
+ * Usa dados já disponíveis em leads (cnpj, razao_social).
  * Idempotente via ON CONFLICT DO NOTHING.
  */
 export async function autoRegisterEmpresa(
@@ -24,7 +24,7 @@ export async function autoRegisterEmpresa(
 ): Promise<{ empresaId: number | null; phone: string | null }> {
     try {
         const { rows } = await query(
-            `SELECT id, telefone, cnpj, cnpj_ativo, razao_social, nome_completo
+            `SELECT id, telefone, cnpj, razao_social, nome_completo
              FROM leads WHERE id = $1`,
             [leadId],
         );
@@ -34,12 +34,11 @@ export async function autoRegisterEmpresa(
             id: number;
             telefone: string;
             cnpj: string | null;
-            cnpj_ativo: string | null;
             razao_social: string | null;
             nome_completo: string | null;
         };
 
-        const cnpj = ((lead.cnpj_ativo || lead.cnpj) ?? '').replace(/\D/g, '');
+        const cnpj = (lead.cnpj ?? '').replace(/\D/g, '');
         if (cnpj.length !== 14) {
             log.warn(`[autoRegisterEmpresa] Lead ${leadId} sem CNPJ válido — empresa não criada`);
             return { empresaId: null, phone: lead.telefone };

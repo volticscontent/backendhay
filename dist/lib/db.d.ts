@@ -1,5 +1,6 @@
 import { Pool, QueryResult, PoolClient } from 'pg';
 declare const pool: Pool;
+export declare const evolutionPool: Pool;
 /**
  * Executa uma query simples usando o pool diretamente.
  * O pool gerencia automaticamente o acquire/release da conexão.

@@ -71,7 +71,8 @@ async function parseIncomingMessage(msgData, base64FromBody, messageId) {
         return caption || '[Imagem recebida, mas não foi possível processar]';
     }
     // 3. Document extraction (PDF)
-    const docMsg = msgData.documentMessage;
+    // documentWithCaptionMessage é o formato usado por clientes Android recentes (WhatsApp v2.23+)
+    const docMsg = (msgData.documentMessage ?? msgData.documentWithCaptionMessage);
     if (docMsg) {
         const caption = docMsg.caption || '';
         const fileName = docMsg.fileName || 'documento.pdf';

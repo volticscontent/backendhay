@@ -21,7 +21,7 @@ exports.caixaPostalQueue = new bullmq_1.Queue(QUEUE_NAME, {
 });
 async function processEmpresa(execucaoId, empresaId, cnpj) {
     try {
-        const result = await (0, serpro_1.consultarServico)('CAIXAPOSTAL', cnpj);
+        const result = await (0, serpro_1.consultarServico)('CAIXA_POSTAL', cnpj);
         const mensagens = Array.isArray(result) ? result : result?.mensagens ?? [];
         for (const msg of mensagens) {
             await (0, db_1.query)(`INSERT INTO integra_caixa_postal
@@ -47,9 +47,15 @@ async function processEmpresa(execucaoId, empresaId, cnpj) {
 }
 function startCaixaPostalWorker() {
     const worker = new bullmq_1.Worker(QUEUE_NAME, async (job) => {
-        const { execucaoId } = job.data;
-        const empresas = await (0, db_1.query)(`SELECT id, cnpj FROM integra_empresas
-                 WHERE ativo = true AND servicos_habilitados ? 'CAIXAPOSTAL'`);
+        const { execucaoId, empresaId } = job.data;
+        let querySql = `SELECT id, cnpj FROM integra_empresas
+                 WHERE ativo = true AND servicos_habilitados ? 'CAIXAPOSTAL'`;
+        const queryParams = [];
+        if (empresaId) {
+            querySql += ` AND id = $1`;
+            queryParams.push(empresaId);
+        }
+        const empresas = await (0, db_1.query)(querySql, queryParams);
         const total = empresas.rows.length;
         let sucesso = 0, falhas = 0;
         await (0, db_1.query)(`UPDATE integra_execucoes SET total_empresas = $1 WHERE id = $2`, [total, execucaoId]);
@@ -75,7 +81,7 @@ function startCaixaPostalWorker() {
     worker.on('failed', (_job, err) => logger_1.cronLogger.error('[CAIXA-POSTAL] Job falhou:', err));
     return worker;
 }
-async function enqueueRoboCaixaPostal(execucaoId) {
-    await exports.caixaPostalQueue.add('run', { execucaoId }, { jobId: `caixa-postal-${execucaoId}` });
+async function enqueueRoboCaixaPostal(execucaoId, empresaId) {
+    await exports.caixaPostalQueue.add('run', { execucaoId, empresaId }, { jobId: `caixa-postal-${execucaoId}` });
 }
 //# sourceMappingURL=job-caixa-postal.js.map

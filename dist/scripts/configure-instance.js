@@ -48,7 +48,7 @@ async function configureInstance() {
         logger_1.evolutionLogger.info('ℹ️ Nota: As configurações de Hardware (Chrome/Windows) devem ser mantidas no .env do servidor Evolution API conforme configurado no Easy Panel.');
     }
     catch (error) {
-        logger_1.evolutionLogger.error('❌ Erro ao configurar instância:', error.message);
+        logger_1.evolutionLogger.error('❌ Erro ao configurar instância:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }

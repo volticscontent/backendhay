@@ -154,6 +154,9 @@ export async function request(
                 });
             });
             req.on('error', (e) => reject(e));
+            req.on('timeout', () => {
+                req.destroy(new Error(`Serpro timeout após 30s: ${urlStr}`));
+            });
             if (body) req.write(body);
             req.end();
         } catch (e) {
@@ -229,6 +232,14 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
     const idSistema = process.env[config.env_sistema] || config.default_sistema;
     const idServico = process.env[config.env_servico] || config.default_servico;
 
+    // Warn when PGFN_CONSULTAR or DIVIDA_ATIVA fall back to DIVIDAATIVA24 (env vars not configured)
+    if (nomeServico === 'PGFN_CONSULTAR' || nomeServico === 'DIVIDA_ATIVA') {
+        const missingEnvs = [config.env_sistema, config.env_servico].filter(k => !process.env[k]);
+        if (missingEnvs.length > 0) {
+            serproLogger.warn(`[${nomeServico}] Usando fallback DIVIDAATIVA24 — env vars não configuradas: ${missingEnvs.join(', ')}. Configure para usar endpoint dedicado quando disponível.`);
+        }
+    }
+
     if (!idSistema || !idServico) {
         const missing = [];
         if (!idSistema) missing.push(config.env_sistema);
@@ -266,7 +277,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         const mesPad = options.mes.padStart(2, '0');
         const anoParaMes = options.ano || new Date().getFullYear().toString();
         if (nomeServico === 'DCTFWEB') {
-            dadosServico.mesPA = mesPad;
+            dadosServico.mesPA = (options.mes || String(new Date().getMonth() + 1)).padStart(2, '0');
         } else if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico)) {
             // Serpro exige formato YYYYMM
             dadosServico.periodoApuracao = `${anoParaMes}${mesPad}`;
@@ -276,14 +287,21 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
     // Exceções e Campos Específicos por Serviço
     if (nomeServico === 'DCTFWEB') {
         dadosServico.categoria = options.categoria || 'GERAL_MENSAL';
+        if (dadosServico.categoria === 'GERAL_MENSAL' || dadosServico.categoria === 'ESPETACULO_DESPORTIVO') {
+            dadosServico.mesPA = (options.mes || String(new Date().getMonth() + 1)).padStart(2, '0');
+        } else {
+            delete dadosServico.mesPA;
+            delete dadosServico.mes;
+        }
     }
 
     if (nomeServico === 'CAIXA_POSTAL') {
-        // Doc exige cnpjReferencia e NÃO aceita campo cnpj simples em muitas versões
-        // E 2024/2025: campo 'ano' gera erro se presente.
         delete dadosServico.cnpj;
         delete dadosServico.ano;
+        delete dadosServico.mes;
         dadosServico.cnpjReferencia = cnpjNumero;
+        dadosServico.statusLeitura = options.statusLeitura || 'TODAS';
+        dadosServico.indicadorPagina = options.indicadorPagina || '1';
     }
 
     if (options.numeroDas) {

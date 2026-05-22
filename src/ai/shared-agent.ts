@@ -33,7 +33,7 @@ export async function prepareAgentContext(context: AgentContext): Promise<Shared
             const allowedKeys = [
                 'telefone', 'nome_completo', 'email', 'situacao', 'qualificacao',
                 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio',
-                'possui_socio', 'sexo', 'cnpj', 'cnpj_ativo', 'cnpjs_adicionais',
+                'possui_socio', 'sexo', 'cnpj', 'empresas',
                 'razao_social', 'tipo_divida', 'valor_divida_federal'
             ];
             userData = Object.entries(parsed)
@@ -117,7 +117,16 @@ QUANDO RED-FLAG: situacao=red_flag + motivo_qualificacao com o tipo (PROCURACAO_
                     possui_socio: { type: 'boolean' },
                     cpf: { type: 'string' },
                     cnpj: { type: 'string', description: 'CNPJ principal do cliente (substitui o existente). Para ADICIONAR uma segunda empresa sem sobrescrever, use cnpj_adicionar.' },
-                    cnpj_adicionar: { type: 'string', description: 'Adiciona um CNPJ extra à lista de empresas do cliente sem sobrescrever o CNPJ principal. Use quando o cliente tiver mais de uma empresa.' },
+                    cnpj_adicionar: {
+                        type: 'object',
+                        description: 'Adiciona uma empresa à lista do cliente sem sobrescrever o CNPJ principal. Passe {cnpj, tipo, razao_social}.',
+                        properties: {
+                            cnpj:        { type: 'string', description: 'CNPJ da empresa (com ou sem formatação).' },
+                            tipo:        { type: 'string', enum: ['proprietario', 'socio', 'representante'], description: 'Tipo de vínculo do cliente com essa empresa.' },
+                            razao_social: { type: 'string', description: 'Razão social da empresa (opcional, preencha se já souber).' },
+                        },
+                        required: ['cnpj', 'tipo'],
+                    },
                     cnpj_ativo: { type: 'string', description: 'Define qual CNPJ está sendo consultado/operado agora. Mude este campo quando o cliente quiser operar sobre uma empresa específica (útil para clientes com múltiplos CNPJs).' },
                     razao_social: { type: 'string' },
                     email: { type: 'string' },

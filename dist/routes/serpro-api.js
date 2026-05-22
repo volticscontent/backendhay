@@ -26,7 +26,14 @@ router.post('/serpro', async (req, res) => {
                 finalResult = { primary: result, fallback: pgmei };
             }
         }
-        (0, serpro_db_1.saveConsultation)(cnpj, target, finalResult, 200, 'admin');
+        // Resolve lead_id by CNPJ for traceability
+        const cleanCnpj = cnpj.replace(/\D/g, '');
+        const leadRow = await (0, db_1.query)(`SELECT id
+       FROM leads
+       WHERE REGEXP_REPLACE(COALESCE(cnpj, ''), '[^0-9]', '', 'g') = $1
+       LIMIT 1`, [cleanCnpj]);
+        const leadId = leadRow.rows[0]?.id ?? null;
+        (0, serpro_db_1.saveConsultation)(cnpj, target, finalResult, 200, 'admin', leadId);
         res.json(finalResult);
     }
     catch (err) {
@@ -35,31 +42,79 @@ router.post('/serpro', async (req, res) => {
     }
 });
 // GET /serpro/clients — last consulted clients
+// source=admin  → only consultations where CNPJ matches a registered lead, by admin
+// source=bot    → only consultations where CNPJ matches a registered lead, by bot
+// source=test   → consultations where CNPJ does NOT match any registered lead (test/orphan)
 router.get('/serpro/clients', async (req, res) => {
     const source = req.query.source;
-    const ALLOWED_SOURCES = new Set(['admin', 'bot']);
-    const safeSource = source && ALLOWED_SOURCES.has(source) ? source : null;
-    const sourceCondition = safeSource ? `WHERE source = $1` : '';
-    const queryParams = safeSource ? [safeSource] : [];
-    const betterQuery = `
-    WITH LatestConsultations AS (
-      SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro ${sourceCondition} GROUP BY cnpj
-    )
+    const NAMED_SOURCES = new Set(['admin', 'bot']);
+    const isTest = source === 'test';
+    const safeNamedSource = source && NAMED_SOURCES.has(source) ? source : null;
+    // Para source=test: mostra consultas sem lead correspondente (comportamento original)
+    if (isTest) {
+        const testQuery = `
+      WITH LatestConsultations AS (
+        SELECT cnpj, MAX(created_at) AS last_consultation_date FROM consultas_serpro GROUP BY cnpj
+      )
+      SELECT
+        lc.cnpj AS raw_cnpj, lc.last_consultation_date AS created_at, c.resultado,
+        NULL::int AS lead_id, NULL::text AS nome_completo, NULL::text AS telefone, NULL::text AS email,
+        true AS procuracao_ativa, NULL::text AS procuracao_validade
+      FROM LatestConsultations lc
+      JOIN consultas_serpro c ON c.cnpj = lc.cnpj AND c.created_at = lc.last_consultation_date
+      LEFT JOIN leads l ON LTRIM(REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g'), '0') = LTRIM(REGEXP_REPLACE(lc.cnpj, '[^0-9]', '', 'g'), '0')
+      WHERE l.id IS NULL
+      ORDER BY lc.last_consultation_date DESC LIMIT 20
+    `;
+        try {
+            const result = await (0, db_1.query)(testQuery);
+            return void res.json(result.rows.map((row) => ({
+                id: row.raw_cnpj, nome: 'CNPJ sem cadastro',
+                cnpj: row.raw_cnpj, telefone: null, email: null,
+                data_ultima_consulta: row.created_at,
+                procuracao_ativa: false, procuracao_validade: null,
+            })));
+        }
+        catch (err) {
+            console.error('Error fetching test serpro clients:', err);
+            return void res.status(500).json({ error: 'Internal Server Error' });
+        }
+    }
+    // Para source=admin ou source=bot (ou sem filtro):
+    // Parte 1 — leads com procuração ativa (aparecem mesmo sem consulta prévia)
+    // Parte 2 — consultas que têm lead correspondente (para histórico de data/resultado)
+    const sourceFilter = safeNamedSource ? `AND c.source = $1` : '';
+    const queryParams = safeNamedSource ? [safeNamedSource] : [];
+    const combinedQuery = `
     SELECT
-      lc.cnpj AS raw_cnpj, lc.last_consultation_date AS created_at, c.resultado,
+      REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') AS raw_cnpj,
+      MAX(c.created_at) AS created_at,
+      (SELECT resultado FROM consultas_serpro
+       WHERE cnpj = REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g')
+         ${safeNamedSource ? `AND source = $1` : ''}
+       ORDER BY created_at DESC LIMIT 1) AS resultado,
       l.id AS lead_id, l.nome_completo, l.telefone, l.email,
-      (COALESCE(lp.procuracao, false) OR COALESCE(lp.procuracao_ativa, false) OR (c.resultado IS NOT NULL)) AS procuracao_ativa,
+      (COALESCE(lp.procuracao, false) OR COALESCE(lp.procuracao_ativa, false) OR MAX(c.created_at) IS NOT NULL) AS procuracao_ativa,
       lp.procuracao_validade
-    FROM LatestConsultations lc
-    JOIN consultas_serpro c ON c.cnpj = lc.cnpj AND c.created_at = lc.last_consultation_date
-    LEFT JOIN leads l ON LTRIM(REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g'), '0') = LTRIM(REGEXP_REPLACE(lc.cnpj, '[^0-9]', '', 'g'), '0')
+    FROM leads l
     LEFT JOIN leads_processo lp ON l.id = lp.lead_id
-    ORDER BY lc.last_consultation_date DESC LIMIT 20
+    LEFT JOIN consultas_serpro c
+      ON REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') = c.cnpj ${sourceFilter}
+    WHERE COALESCE(l.cnpj, '') != ''
+      AND (
+        COALESCE(lp.procuracao_ativa, false) = true
+        OR COALESCE(lp.procuracao, false) = true
+        OR c.id IS NOT NULL
+      )
+    GROUP BY l.id, l.nome_completo, l.telefone, l.email, l.cnpj,
+             lp.procuracao, lp.procuracao_ativa, lp.procuracao_validade
+    ORDER BY MAX(c.created_at) DESC NULLS LAST
+    LIMIT 50
   `;
     try {
-        const result = await (0, db_1.query)(betterQuery, queryParams);
+        const result = await (0, db_1.query)(combinedQuery, queryParams);
         const clients = result.rows.map((row) => {
-            let nome = row.nome_completo || 'Nome não disponível';
+            let nome = row.nome_completo || 'CNPJ sem cadastro';
             if (!row.nome_completo && row.resultado) {
                 try {
                     const resData = row.resultado;
@@ -111,12 +166,12 @@ router.get('/serpro/carteira', async (req, res) => {
         const leadsResult = await (0, db_1.query)(`
       SELECT
         l.id AS lead_id, l.nome_completo, l.telefone, l.email,
-        REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS cnpj,
+        REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') AS cnpj,
         COALESCE(lp.procuracao_ativa, lp.procuracao, false) AS procuracao_ativa,
         lp.procuracao_validade
       FROM leads l
       LEFT JOIN leads_processo lp ON l.id = lp.lead_id
-      WHERE l.cnpj IS NOT NULL AND l.cnpj != ''
+      WHERE COALESCE(l.cnpj, '') != ''
       ORDER BY l.nome_completo ASC
       LIMIT 200
     `);
@@ -257,6 +312,10 @@ router.put('/serpro/procuracao/:leadId', async (req, res) => {
         procuracao_validade = $3,
         updated_at = NOW()
     `, [leadId, ativo, validoAte]);
+        await (0, db_1.query)(`
+      INSERT INTO leads_procuracao_historico (lead_id, ativo, validade, origem)
+      VALUES ($1, $2, $3, 'admin')
+    `, [leadId, ativo, validoAte ? new Date(validoAte).toISOString().split('T')[0] : null]);
         res.json({ success: true, procuracao_ativa: ativo, procuracao_validade: validoAte });
     }
     catch (err) {

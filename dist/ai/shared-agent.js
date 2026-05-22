@@ -1,10 +1,14 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.prepareAgentContext = prepareAgentContext;
 exports.getSharedTools = getSharedTools;
 const server_tools_1 = require("./server-tools");
 const knowledge_base_1 = require("./knowledge-base");
 const logger_1 = require("../lib/logger");
+const redis_1 = __importDefault(require("../lib/redis"));
 async function prepareAgentContext(context) {
     let userDataJson = "{}";
     try {
@@ -20,8 +24,8 @@ async function prepareAgentContext(context) {
             const allowedKeys = [
                 'telefone', 'nome_completo', 'email', 'situacao', 'qualificacao',
                 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio',
-                'possui_socio', 'sexo', 'cnpj', 'razao_social', 'tipo_divida',
-                'valor_divida_federal'
+                'possui_socio', 'sexo', 'cnpj', 'empresas',
+                'razao_social', 'tipo_divida', 'valor_divida_federal'
             ];
             userData = Object.entries(parsed)
                 .filter(([k]) => allowedKeys.includes(k))
@@ -37,6 +41,20 @@ async function prepareAgentContext(context) {
     }
     catch (e) {
         logger_1.agentLogger.warn("Error fetching media/context:", e);
+    }
+    // Inject proactive context sent by the frontend (e.g., "client attended meeting")
+    try {
+        const frontendCtxRaw = await redis_1.default.get(`bot_context:${context.userPhone}`);
+        if (frontendCtxRaw) {
+            const frontendCtx = JSON.parse(frontendCtxRaw);
+            const lines = Object.entries(frontendCtx)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('\n');
+            dynamicContext += `\n\n[CONTEXTO DO PAINEL ADMIN]\n${lines}`;
+        }
+    }
+    catch (e) {
+        logger_1.agentLogger.warn("Error loading frontend context from Redis:", e);
     }
     const attendantWarning = context.attendantRequestedReason
         ? `\n[ATENÇÃO: ATENDENTE HUMANO SOLICITADO]\nO cliente solicitou atendimento humano pelo seguinte motivo: "${context.attendantRequestedReason}". O humano já foi notificado e responderá em breve. Enquanto o humano não chega, mantenha o diálogo e tente ir adiantando as informações ou acolhendo o cliente de forma empática avisando que a equipe humana está a caminho.\n`
@@ -63,14 +81,21 @@ function getSharedTools(context) {
         },
         {
             name: 'update_user',
-            description: 'Atualizar dados do usuário. OBRIGATÓRIO informar observacoes com resumo e motivo_qualificacao ao qualificar/desqualificar.',
+            description: `Atualizar dados do lead no banco. Use sempre que coletar uma informação nova ou mudar o estágio do lead.
+
+QUANDO QUALIFICAR (MQL ou SQL): preencha qualificacao + motivo_qualificacao (TAG obrigatória: RESGATE_URGENTE | GESTAO_E_CRESCIMENTO | NUTRICAO) + observacoes com resumo BANT completo.
+QUANDO DESQUALIFICAR: situacao=desqualificado + motivo_qualificacao explicando o motivo.
+QUANDO RED-FLAG: situacao=red_flag + motivo_qualificacao com o tipo (PROCURACAO_RECUSADA | SUMIU_POS_PROCURACAO | SUMIU_POS_PROPOSTA | PRECO_RECUSADO). Red-flag NÃO encerra o lead — marca para follow-up humano.`,
             parameters: {
                 type: 'object',
                 properties: {
-                    situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'Ativo'] },
+                    situacao: { type: 'string', enum: ['nao_respondido', 'desqualificado', 'qualificado', 'cliente', 'atendimento_humano', 'red_flag', 'Ativo'] },
                     qualificacao: { type: 'string', enum: ['ICP', 'MQL', 'SQL'] },
-                    motivo_qualificacao: { type: 'string', description: 'Por que foi qualificado ou desqualificado?' },
-                    observacoes: { type: 'string', description: 'Relato do contexto, escolhas (ex: autonomo) e histórico do lead para os humanos.' },
+                    motivo_qualificacao: {
+                        type: 'string',
+                        description: 'TAG de abordagem ao qualificar (RESGATE_URGENTE | GESTAO_E_CRESCIMENTO | NUTRICAO), tipo de red-flag, ou motivo de desqualificação. Sempre preenchido.'
+                    },
+                    observacoes: { type: 'string', description: 'Resumo BANT para o Haylander: necessidade declarada, urgência, capacidade de pagamento, próximo passo.' },
                     faturamento_mensal: { type: 'string' },
                     tipo_negocio: { type: 'string' },
                     tem_divida: { type: 'boolean' },
@@ -78,7 +103,18 @@ function getSharedTools(context) {
                     valor_divida_federal: { type: 'string' },
                     possui_socio: { type: 'boolean' },
                     cpf: { type: 'string' },
-                    cnpj: { type: 'string' },
+                    cnpj: { type: 'string', description: 'CNPJ principal do cliente (substitui o existente). Para ADICIONAR uma segunda empresa sem sobrescrever, use cnpj_adicionar.' },
+                    cnpj_adicionar: {
+                        type: 'object',
+                        description: 'Adiciona uma empresa à lista do cliente sem sobrescrever o CNPJ principal. Passe {cnpj, tipo, razao_social}.',
+                        properties: {
+                            cnpj: { type: 'string', description: 'CNPJ da empresa (com ou sem formatação).' },
+                            tipo: { type: 'string', enum: ['proprietario', 'socio', 'representante'], description: 'Tipo de vínculo do cliente com essa empresa.' },
+                            razao_social: { type: 'string', description: 'Razão social da empresa (opcional, preencha se já souber).' },
+                        },
+                        required: ['cnpj', 'tipo'],
+                    },
+                    cnpj_ativo: { type: 'string', description: 'Define qual CNPJ está sendo consultado/operado agora. Mude este campo quando o cliente quiser operar sobre uma empresa específica (útil para clientes com múltiplos CNPJs).' },
                     razao_social: { type: 'string' },
                     email: { type: 'string' },
                     nome_completo: { type: 'string' },
@@ -91,6 +127,12 @@ function getSharedTools(context) {
                 if (args.qualificacao) {
                     await (0, server_tools_1.setAgentRouting)(context.userPhone, 'vendedor');
                     logger_1.agentLogger.info(`🔀 Roteamento ativado: ${context.userPhone} → Vendedor (qualificação: ${args.qualificacao})`);
+                }
+                if (args.situacao === 'red_flag') {
+                    const tipo = args.motivo_qualificacao || 'não especificado';
+                    const reason = `🚩 RED-FLAG detectado\nLead: ${context.userPhone}\nTipo: ${tipo}\nAção: follow-up humano necessário`;
+                    await (0, server_tools_1.callAttendant)(context.userPhone, reason);
+                    logger_1.agentLogger.warn(`🚩 Red-flag marcado: ${context.userPhone} — ${tipo}`);
                 }
                 return result;
             }
@@ -114,10 +156,10 @@ function getSharedTools(context) {
             function: async (args) => await (0, server_tools_1.interpreter)(context.userPhone, args.action, args.text, args.category)
         },
         {
-            name: 'select_User',
-            description: 'Buscar informações atualizadas do lead no banco de dados.',
+            name: 'consultar_dados_cliente',
+            description: 'Retorna dados cadastrais do banco + histórico de consultas Serpro com indicador de frescor (ainda_valido). USE SEMPRE ANTES de qualquer tool Serpro para evitar consultas redundantes ao governo.',
             parameters: { type: 'object', properties: {} },
-            function: async () => await (0, server_tools_1.getUser)(context.userPhone)
+            function: async () => await (0, server_tools_1.getClientDataWithFreshness)(context.userPhone)
         }
     ];
 }

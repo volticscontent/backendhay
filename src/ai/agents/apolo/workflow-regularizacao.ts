@@ -2,8 +2,10 @@ import pdfParse from 'pdf-parse';
 import { ToolDefinition } from '../../openai-client';
 import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser } from '../../server-tools';
 import pool from '../../../lib/db';
+import redis from '../../../lib/redis';
 import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, createSituacaoFormSegments, MessageSegment } from '../../regularizacao-system';
 import { AgentContext } from '../../types';
+import { consultarDividaAtivaPorDevedor } from '../../../lib/pgfn';
 
 async function processMessageSegments(phone: string, segments: MessageSegment[], sender: (segment: MessageSegment) => Promise<void>): Promise<void> {
     for (const segment of segments) {
@@ -14,7 +16,12 @@ async function processMessageSegments(phone: string, segments: MessageSegment[],
     }
 }
 
-async function resolveUserCnpjAndProcuracaoStatus(userData: any): Promise<{
+const ADMIN_PHONES = (process.env.ADMIN_PHONES ?? '')
+    .split(',')
+    .map(p => p.trim().replace(/\D/g, ''))
+    .filter(Boolean);
+
+async function resolveUserCnpjAndProcuracaoStatus(userData: any, callerPhone?: string): Promise<{
     ok: boolean;
     cnpj?: string;
     message?: string;
@@ -23,29 +30,48 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any): Promise<{
         return { ok: false, message: 'Usuário sem identificação interna. Atualize o cadastro antes da consulta.' };
     }
 
-    // cnpj_ativo tem prioridade (empresa selecionada para esta consulta)
-    let cnpj = (userData.cnpj_ativo || userData.cnpj) as string | undefined;
-    if (!cnpj) {
-        const resLead = await pool.query('SELECT cnpj_ativo, cnpj FROM leads WHERE id = $1 LIMIT 1', [userData.id]);
-        if (resLead.rows.length > 0) {
-            cnpj = resLead.rows[0].cnpj_ativo || resLead.rows[0].cnpj;
-        }
-    }
+    const isAdmin = callerPhone
+        ? ADMIN_PHONES.some(ap => callerPhone.replace(/\D/g, '').endsWith(ap))
+        : false;
+
+    // cnpj_ativo vem do Redis — evita race condition entre sessões paralelas
+    const redisCnpjAtivo = await redis.get(`session:cnpj_ativo:${userData.id}`).catch(() => null);
+
+    const resLead = await pool.query('SELECT cnpj FROM leads WHERE id = $1 LIMIT 1', [userData.id]);
+    const leadRow = resLead.rows[0] || {};
+    const cnpj = (redisCnpjAtivo?.replace(/\D/g, '') || leadRow.cnpj) as string | undefined;
 
     if (!cnpj) {
         return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais (use update_user com o campo cnpj).' };
     }
 
-    const procRes = await pool.query(
-        'SELECT procuracao, procuracao_ativa FROM leads_processo WHERE lead_id = $1 LIMIT 1',
-        [userData.id]
-    );
-    const procRow = procRes.rows[0] || {};
-    const hasFormalProcuracao = Boolean(procRow.procuracao) || Boolean(procRow.procuracao_ativa);
+    if (isAdmin) return { ok: true, cnpj };
+
+    // Verifica se é empresa principal ou adicional
+    const isPrincipal = !redisCnpjAtivo ||
+        redisCnpjAtivo.replace(/\D/g, '') === (leadRow.cnpj || '').replace(/\D/g, '');
+
+    let hasFormalProcuracao = false;
+    if (isPrincipal) {
+        const procRes = await pool.query(
+            `SELECT procuracao, procuracao_ativa FROM leads_processo WHERE lead_id = $1 LIMIT 1`,
+            [userData.id]
+        );
+        const row = procRes.rows[0] || {};
+        hasFormalProcuracao = Boolean(row.procuracao) || Boolean(row.procuracao_ativa);
+    } else {
+        const procRes = await pool.query(
+            `SELECT procuracao, procuracao_ativa FROM lead_empresa
+             WHERE lead_id = $1 AND REGEXP_REPLACE(cnpj,'[^0-9]','','g') = $2 LIMIT 1`,
+            [userData.id, cnpj.replace(/\D/g, '')]
+        );
+        const row = procRes.rows[0] || {};
+        hasFormalProcuracao = Boolean(row.procuracao) || Boolean(row.procuracao_ativa);
+    }
+
     const hasTrackedCompletion = await checkProcuracaoStatus(userData.id);
 
     if (!hasFormalProcuracao && !hasTrackedCompletion) {
-        // Tenta verificar procuração diretamente no Serpro antes de bloquear
         try {
             const serproResult = await consultarProcuracaoSerpro(cnpj);
             const parsed = JSON.parse(serproResult) as Record<string, unknown>;
@@ -56,15 +82,16 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any): Promise<{
                             bodyStr.includes('procuracao nao') ||
                             (parsed.ok === false);
             if (!ausente) {
-                // Procuração encontrada no Serpro — registra localmente e libera
                 await markProcuracaoCompleted(userData.id);
                 return { ok: true, cnpj };
             }
-        } catch { /* ignora erro e cai no bloqueio abaixo */ }
-
+        } catch {
+            // Serpro indisponível — não bloqueia, deixa passar
+            return { ok: true, cnpj };
+        }
         return {
             ok: false,
-            message: 'Consulta Serpro bloqueada: Procuração e-CAC não confirmada. Use verificar_procuracao_status ou oriente o cliente a concluir o e-CAC (Opção A).'
+            message: `Procuração e-CAC não localizada para o CNPJ ${cnpj}. O cliente precisa cadastrá-la antes da consulta.`,
         };
     }
 
@@ -110,6 +137,58 @@ function extractSitfisProtocolo(envelope: Record<string, unknown>): string | und
     }
 
     return undefined;
+}
+
+const ANOS_RETROATIVOS = 5; // Consulta os últimos 6 anos (atual - 5 até atual)
+
+type AnoConsulta = { ano: number; tem_debitos: boolean | null; detalhe?: string };
+type ServicoResult = {
+    situacao: 'COM_DEBITO' | 'SEM_DEBITO' | 'INCONCLUSIVO';
+    anos_consultados: number[];
+    anos_com_debito: number[];
+    anos_sem_debito: number[];
+    anos_inconclusivos: number[];
+};
+
+function formatServicoResult(anoConsultas: AnoConsulta[]): ServicoResult {
+    const anos_com_debito = anoConsultas.filter(r => r.tem_debitos === true).map(r => r.ano);
+    const anos_sem_debito = anoConsultas.filter(r => r.tem_debitos === false).map(r => r.ano);
+    const anos_inconclusivos = anoConsultas.filter(r => r.tem_debitos === null).map(r => r.ano);
+
+    const situacao: ServicoResult['situacao'] =
+        anos_com_debito.length > 0 ? 'COM_DEBITO'
+        : anos_inconclusivos.length === anoConsultas.length ? 'INCONCLUSIVO'
+        : 'SEM_DEBITO';
+
+    return {
+        situacao,
+        anos_consultados: anoConsultas.map(r => r.ano),
+        anos_com_debito,
+        anos_sem_debito,
+        anos_inconclusivos,
+    };
+}
+
+function buildResumoExecutivo(pgmei: ServicoResult, pgfn: ServicoResult, pgfnResumo?: { resumo_texto?: string }): string {
+    const linhas: string[] = [];
+
+    if (pgmei.situacao === 'COM_DEBITO') {
+        linhas.push(`PGMEI (guias DAS): débitos detectados em ${pgmei.anos_com_debito.join(', ')}`);
+    } else if (pgmei.situacao === 'SEM_DEBITO') {
+        linhas.push(`PGMEI (guias DAS): situação regular em todos os anos consultados`);
+    } else {
+        linhas.push(`PGMEI (guias DAS): resultado inconclusivo — verificação adicional necessária`);
+    }
+
+    if (pgfn.situacao === 'COM_DEBITO') {
+        linhas.push(pgfnResumo?.resumo_texto || `PGFN (Dívida Ativa): inscrição em dívida ativa detectada`);
+    } else if (pgfn.situacao === 'SEM_DEBITO') {
+        linhas.push(`PGFN (Dívida Ativa): sem débitos inscritos na dívida ativa`);
+    } else {
+        linhas.push(`PGFN (Dívida Ativa): resultado inconclusivo — verificação adicional necessária`);
+    }
+
+    return linhas.join('\n');
 }
 
 export const REGULARIZACAO_RULES = `
@@ -163,14 +242,48 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
 - Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
 
 #### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
-A resposta tem os campos: \`pgmei\`, \`pgfn\`, e opcionalmente \`aviso\`.
+A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Campos principais:
+- \`resumo_executivo\`: diagnóstico em texto — use como base para comunicar ao cliente.
+- \`pgmei.situacao\` / \`pgfn.situacao\`: \`COM_DEBITO\` | \`SEM_DEBITO\` | \`INCONCLUSIVO\`
+- \`pgmei.anos_com_debito\` / \`pgfn.anos_com_debito\`: lista de anos com débitos detectados
+- \`aviso\` (se presente): instrução adicional — leia e siga.
 
-**Regra de ouro — NUNCA diga "sem dívidas" prematuramente:**
-- Se \`aviso\` está presente → leia-o e siga a instrução. Há pendências ou resultado inconclusivo.
-- Se \`pgmei.tem_debitos_detectado === true\` OU \`pgfn.tem_debitos_detectado === true\` → HÁ DÍVIDAS.
-- Se \`pgmei.tem_documento_binario === true\` OU \`pgfn.tem_documento_binario === true\` → A Serpro retornou um DOCUMENTO em vez de texto. **ASSUMA QUE HÁ DÉBITOS** — o cliente tem pendências, mesmo que não haja texto estruturado.
-- Se \`tem_debitos_detectado === null\` (inconclusivo) → NÃO diga "sem dívidas". Diga "não foi possível obter confirmação" e sugira verificação adicional ou agendamento de reunião.
-- Somente diga "sem dívidas" se \`pgmei.tem_debitos_detectado === false\` E \`pgfn.tem_debitos_detectado === false\` E não houver \`aviso\`.
+**Regras de ouro:**
+- \`COM_DEBITO\` → HÁ DÍVIDAS. Informe ao cliente os anos listados em \`anos_com_debito\`.
+- \`SEM_DEBITO\` → situação regular em todos os anos consultados. Pode confirmar ao cliente.
+- \`INCONCLUSIVO\` → NÃO diga "sem dívidas". Diga "não consegui confirmar" e sugira verificação ou reunião.
+- Use \`resumo_executivo\` como base, adaptando para linguagem simples e amigável.
+- Nunca exiba os campos brutos JSON ao cliente — traduza tudo para português claro.
+
+#### GATE is_mei — Obrigatório antes da Camada 1
+ANTES de chamar 'consultar_pgmei_serpro':
+- Se is_mei = true (ou indefinido) → prossiga normalmente com Camada 1.
+- Se is_mei = false → NÃO chame PGMEI. Use 'consultar_situacao_fiscal_serpro' (SITFIS) pois o cliente é Simples Nacional ou outro regime, e PGMEI só funciona para MEI.
+- Se não souber → chame 'consultar_ccmei_serpro' primeiro para confirmar enquadramento.
+
+#### APÓS RESULTADO SERPRO — Atualização Obrigatória no Banco
+Imediatamente após comunicar o resultado ao cliente, salve com update_user:
+- update_user(situacao_fiscal='COM_DEBITO' | 'SEM_DEBITO' | 'INCONCLUSIVO')
+- Se COM_DEBITO: update_user(tem_divida=true, situacao='negociacao')
+- Se SEM_DEBITO: update_user(tem_divida=false)
+- Sempre: update_user(observacoes='SERPRO [data]: PGMEI=[situacao], PGFN=[situacao], anos=[lista]')
+
+#### TEMPLATE WHATSAPP — Resultado Serpro (use sempre, nunca JSON bruto)
+
+COM_DEBITO:
+"Consultei o CNPJ [cnpj] aqui no Serpro e encontrei:|||⚠️ *PGMEI (guias DAS):* débitos nos anos [lista_anos] — guias em aberto|||⚠️ *PGFN (Dívida Ativa):* [COM_DEBITO: pendência nos anos [lista] | SEM_DEBITO: sem inscrição em dívida ativa]|||Para regularizar, o caminho mais rápido é [próximo passo concreto]. Quer que eu explique como funciona?"
+
+SEM_DEBITO:
+"Boa notícia! Consultei o CNPJ [cnpj] no Serpro:|||✅ *PGMEI (guias DAS):* em dia — nenhuma pendência encontrada|||✅ *PGFN (Dívida Ativa):* sem inscrições em dívida ativa|||Tudo certo! Quer que eu emita a CND (Certidão Negativa) como comprovante?"
+
+INCONCLUSIVO:
+"Consultei o CNPJ [cnpj], mas o resultado veio inconclusivo:|||⚠️ Não consegui confirmar a situação com precisão — isso pode indicar documentos pendentes ou resposta parcial da Receita|||Recomendo uma reunião rápida para analisarmos juntos. Quer agendar?"
+
+REGRAS DE OURO DO TEMPLATE:
+- NUNCA diga "sem dívidas" se pgmei.situacao OU pgfn.situacao for INCONCLUSIVO
+- Sempre use '|||' para separar cada bloco de informação
+- Substitua [cnpj] pelo CNPJ real — nunca exiba o campo bruto
+- Termine com trial close (pergunta ou ação concreta)
 `;
 
 /**
@@ -207,15 +320,14 @@ function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; res
     ];
 
     if (INDICADORES_DEBITO.some(i => t.includes(i))) {
-        // Extrai trecho relevante para contexto (primeiros 800 chars do texto)
-        const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+        const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
         return { tem_debitos: true, resumo_pdf };
     }
     if (INDICADORES_REGULAR.some(i => t.includes(i))) {
-        const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+        const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
         return { tem_debitos: false, resumo_pdf };
     }
-    const resumo_pdf = texto.slice(0, 800).replace(/\s+/g, ' ').trim();
+    const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
     return { tem_debitos: null, resumo_pdf };
 }
 
@@ -230,7 +342,7 @@ function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; res
  *
  * Retorna `tem_debitos_detectado` para evitar falsos negativos na IA.
  */
-async function parseSerproData(envelope: unknown): Promise<{
+export async function parseSerproData(envelope: unknown): Promise<{
     tem_debitos_detectado: boolean | null;
     dados: Record<string, unknown> | null;
     tem_documento_binario: boolean;
@@ -249,6 +361,33 @@ async function parseSerproData(envelope: unknown): Promise<{
     let texto_pdf: string | null = null;
 
     const dadosRaw = env.dados;
+
+    // ── Array de itens (PGFN_CONSULTAR / DIVIDA_ATIVA retornam array de débitos) ──
+    if (Array.isArray(dadosRaw)) {
+        if (dadosRaw.length > 0) {
+            const DEBITO_STATUS  = ['ENVIADO A PFN', 'DEVEDOR', 'INADIMPLENTE', 'PENDENTE', 'IRREGULAR', 'DEBITO'];
+            const REGULAR_STATUS = ['ADIMPLENTE', 'REGULAR', 'SEM_DEBITO', 'SEM DEBITO'];
+            let temDebito = false, temRegular = false;
+            for (const item of dadosRaw as Array<Record<string, unknown>>) {
+                const s = String(item.situacaoDebito ?? item.situacao ?? '').toUpperCase().trim();
+                if (DEBITO_STATUS.some(d => s.includes(d)))  { temDebito  = true; break; }
+                if (REGULAR_STATUS.some(d => s.includes(d))) { temRegular = true; }
+            }
+            return {
+                tem_debitos_detectado: temDebito ? true : (temRegular ? false : null),
+                dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+            };
+        }
+        // Array vazio → sinal definitivo vem das mensagens (ex: código 25001 = sem débitos)
+        const msTexto = mensagensRaw.map(m => `${m.codigo ?? ''} ${m.texto ?? ''}`).join(' ')
+            .normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+        const comDebito = ['ENVIADO A PFN', 'EM DEBITO', 'DEVEDOR', 'INADIMPLENTE'].some(s => msTexto.includes(s));
+        const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
+        return {
+            tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
+            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+        };
+    }
 
     if (typeof dadosRaw === 'string' && dadosRaw.length > 0) {
         try {
@@ -293,7 +432,15 @@ async function parseSerproData(envelope: unknown): Promise<{
     }
 
     if (!dados) {
-        return { tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro };
+        // Sem dados estruturados — tenta mensagens como último sinal
+        const msTexto = mensagensRaw.map(m => `${m.codigo ?? ''} ${m.texto ?? ''}`).join(' ')
+            .normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+        const comDebito = ['ENVIADO A PFN', 'EM DEBITO', 'DEVEDOR', 'INADIMPLENTE'].some(s => msTexto.includes(s));
+        const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
+        return {
+            tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
+            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+        };
     }
 
     // Detectar débitos a partir dos campos JSON conhecidos
@@ -321,7 +468,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
     // ── Camada 1 ────────────────────────────────────────────────────────────────
     {
         name: 'consultar_pgmei_serpro',
-        description: 'Camada 1: busca débitos PGMEI (DAS MEI) e Dívida Ativa PGFN simultaneamente. Primeira consulta após Procuração confirmada.',
+        description: 'Camada 1: busca débitos PGMEI (DAS MEI) e Dívida Ativa PGFN nos últimos 6 anos automaticamente. Primeira consulta após Procuração confirmada.',
         parameters: { type: 'object', properties: {} },
         function: async () => {
             try {
@@ -330,35 +477,61 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
 
-                const [pgmeiResult, pgfnResult] = await Promise.allSettled([
-                    checkCnpjSerpro(gate.cnpj, 'PGMEI'),
-                    checkCnpjSerpro(gate.cnpj, 'PGFN_CONSULTAR'),
+                const currentYear = new Date().getFullYear();
+                const anos = Array.from({ length: ANOS_RETROATIVOS + 1 }, (_, i) => currentYear - ANOS_RETROATIVOS + i);
+
+                const [pgmeiRawAll, pgfnRaw] = await Promise.all([
+                    Promise.allSettled(anos.map(ano => checkCnpjSerpro(gate.cnpj!, 'PGMEI', { ano: String(ano) }))),
+                    Promise.resolve(consultarDividaAtivaPorDevedor(gate.cnpj!)).then(
+                        result => ({ status: 'fulfilled' as const, value: result }),
+                        reason => ({ status: 'rejected' as const, reason })
+                    ),
                 ]);
 
-                const pgmeiRaw = pgmeiResult.status === 'fulfilled' ? JSON.parse(pgmeiResult.value) : null;
-                const pgfnRaw  = pgfnResult.status  === 'fulfilled' ? JSON.parse(pgfnResult.value)  : null;
+                const parseAnoResults = async (rawAll: PromiseSettledResult<string>[]): Promise<AnoConsulta[]> =>
+                    Promise.all(rawAll.map(async (result, i) => {
+                        const ano = anos[i];
+                        if (result.status === 'rejected') return { ano, tem_debitos: null };
+                        try {
+                            const envelope = JSON.parse(result.value);
+                            const parsed = await parseSerproData(envelope);
+                            return {
+                                ano,
+                                tem_debitos: parsed.tem_debitos_detectado,
+                                detalhe: parsed.texto_pdf ? parsed.texto_pdf.slice(0, 200) : undefined,
+                            };
+                        } catch {
+                            return { ano, tem_debitos: null };
+                        }
+                    }));
 
-                const [pgmei, pgfn] = await Promise.all([
-                    pgmeiRaw ? parseSerproData(pgmeiRaw) : Promise.resolve({ tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: ['Falha ao consultar PGMEI'] }),
-                    pgfnRaw  ? parseSerproData(pgfnRaw)  : Promise.resolve({ tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: ['Falha ao consultar PGFN'] }),
-                ]);
+                const pgmeiPorAno = await parseAnoResults(pgmeiRawAll);
+                const pgfnPorAno: AnoConsulta[] = pgfnRaw.status === 'fulfilled'
+                    ? [{
+                        ano: currentYear,
+                        tem_debitos: pgfnRaw.value.tem_debitos_detectado,
+                        detalhe: pgfnRaw.value.mensagens_pgfn.join(' | ') || undefined,
+                    }]
+                    : [{ ano: currentYear, tem_debitos: null, detalhe: String(pgfnRaw.reason) }];
 
-                const temDocumentoBinario = pgmei.tem_documento_binario || pgfn.tem_documento_binario;
-                const temDebitos = pgmei.tem_debitos_detectado === true || pgfn.tem_debitos_detectado === true;
-                const inconclusivo = !temDebitos && (pgmei.tem_debitos_detectado === null || pgfn.tem_debitos_detectado === null);
+                const pgmei = formatServicoResult(pgmeiPorAno);
+                const pgfn  = formatServicoResult(pgfnPorAno);
+                const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
+                const resumo_executivo = buildResumoExecutivo(pgmei, pgfn, pgfn_detalhes);
 
-                const aviso = temDocumentoBinario
-                    ? '⚠️ ATENÇÃO: A Serpro retornou conteúdo em formato de DOCUMENTO (PDF/binário) em vez de dados estruturados de texto. Isso ocorre quando há débitos ou guias. NÃO INFORME "sem dívidas" — há pendências no PGMEI/PGFN. Oriente o cliente a regularizar ou consulte o portal da Receita Federal.'
-                    : inconclusivo
-                    ? '⚠️ ATENÇÃO: Não foi possível determinar a situação fiscal com certeza. Não informe "sem dívidas" sem confirmação adicional. Use consultar_situacao_fiscal_serpro ou oriente verificação direta no portal.'
-                    : undefined;
+                const aviso =
+                    pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO'
+                        ? '⚠️ Débitos encontrados. Informe ao cliente os anos com pendências e oriente a regularização.'
+                        : pgmei.situacao === 'INCONCLUSIVO' || pgfn.situacao === 'INCONCLUSIVO'
+                        ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
+                        : undefined;
 
-                return JSON.stringify({ status: 'success', pgmei, pgfn, aviso });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, aviso });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
@@ -449,11 +622,14 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                let cnpj = p.cnpj as string | undefined;
-                if (!cnpj && p.id) {
-                    const res = await pool.query('SELECT cnpj FROM leads WHERE id = $1 LIMIT 1', [p.id]);
-                    if (res.rows.length > 0) cnpj = res.rows[0].cnpj;
-                }
+                if (!p.id) return JSON.stringify({ status: 'error', message: 'Usuário sem ID interno. Atualize o cadastro.' });
+                const redisCnpjAtivo = await redis.get(`session:cnpj_ativo:${p.id}`).catch(() => null);
+                const resLead = await pool.query(
+                    'SELECT cnpj FROM leads WHERE id = $1 LIMIT 1',
+                    [p.id]
+                );
+                const leadRow = resLead.rows[0] || {};
+                const cnpj = (redisCnpjAtivo?.replace(/\D/g, '') || leadRow.cnpj) as string | undefined;
                 if (!cnpj) return JSON.stringify({ status: 'error', message: 'CNPJ não cadastrado. Peça o print.' });
 
                 const serproResult = await consultarProcuracaoSerpro(cnpj);
@@ -466,7 +642,16 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     return JSON.stringify({ status: 'error', message: `Erro Serpro: ${parsed.message}` });
                 }
 
-                return JSON.stringify({ status: 'success', message: 'Procuração validada com sucesso via Serpro.', serpro_dados: parsed });
+                // Sincroniza imediatamente no banco para refletir na lista sem depender
+                // de chamada adicional de ferramenta.
+                await markProcuracaoCompleted(p.id);
+
+                return JSON.stringify({
+                    status: 'success',
+                    message: 'Procuração validada com sucesso via Serpro e sincronizada no cadastro.',
+                    procuracao_ativa: true,
+                    serpro_dados: parsed,
+                });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
@@ -511,7 +696,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
@@ -535,21 +720,31 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
     },
     {
         name: 'consultar_divida_ativa_serpro',
-        description: 'Consulta débitos em Dívida Ativa da União (somente após Procuração confirmada).',
-        parameters: { type: 'object', properties: { ano: { type: 'string', description: 'Ano (ex: "2024"). Padrão: ano atual.' } } },
-        function: async (args: any) => {
+        description: 'Consulta débitos em Dívida Ativa da União pela API PGFN avulsa (token próprio). Use somente após Procuração confirmada.',
+        parameters: { type: 'object', properties: {} },
+        function: async () => {
             try {
                 const ud = await getUser(context.userPhone);
                 if (!ud) return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
 
-                return await checkCnpjSerpro(gate.cnpj, 'DIVIDA_ATIVA', { ano: args.ano || String(new Date().getFullYear()) });
+                const pgfn = await consultarDividaAtivaPorDevedor(gate.cnpj);
+                return JSON.stringify({
+                    status: 'success',
+                    origem: pgfn.origem,
+                    consulta: pgfn.consulta,
+                    parametro: pgfn.parametro,
+                    tem_debitos_detectado: pgfn.tem_debitos_detectado,
+                    resumo: pgfn.resumo,
+                    dados: pgfn.dados,
+                    mensagens_pgfn: pgfn.mensagens_pgfn,
+                });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
@@ -566,7 +761,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
@@ -609,7 +804,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
@@ -651,7 +846,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const p = JSON.parse(ud);
                 if (p.status === 'error' || p.status === 'not_found') return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
 
-                const gate = await resolveUserCnpjAndProcuracaoStatus(p);
+                const gate = await resolveUserCnpjAndProcuracaoStatus(p, context.userPhone);
                 if (!gate.ok || !gate.cnpj) {
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }

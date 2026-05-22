@@ -16,8 +16,18 @@ export declare function searchServices(searchQuery: string): Promise<string>;
 export declare function getAvailableMedia(): Promise<string>;
 export declare function sendMedia(phone: string, keyOrUrl: string): Promise<string>;
 export declare function sendCommercialPresentation(phone: string, type?: 'apc' | 'video'): Promise<string>;
+/**
+ * Retorna dados cadastrais do banco + histórico de consultas Serpro com indicador de frescor.
+ * O bot deve chamar isso ANTES de qualquer tool Serpro para evitar consultas redundantes.
+ */
+export declare function getClientDataWithFreshness(phone: string): Promise<string>;
 export declare function checkCnpjSerpro(cnpj: string, service?: keyof typeof SERVICE_CONFIG, options?: any): Promise<string>;
 export declare function consultarProcuracaoSerpro(cnpj: string): Promise<string>;
+/**
+ * Consulta dados PÚBLICOS de qualquer CNPJ usando a BrasilAPI e VERIFICA acesso Serpro.
+ * Esta ferramenta é a principal validação para saber se a procuração e-CAC está ativa.
+ */
+export declare function consultarCnpjPublico(cnpj: string, userPhone?: string): Promise<string>;
 export declare function consultarDividaAtivaGeralSerpro(cnpj: string): Promise<string>;
 export declare function interpreter(phone: string, action: 'post' | 'get', text: string, category?: 'qualificacao' | 'vendas' | 'atendimento'): Promise<string>;
 export declare function trackResourceDelivery(leadId: number, resourceType: string, resourceKey: string, metadata?: Record<string, unknown>): Promise<void>;

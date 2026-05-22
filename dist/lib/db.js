@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.evolutionPool = void 0;
 exports.query = query;
 exports.withClient = withClient;
 const pg_1 = require("pg");
@@ -12,6 +13,17 @@ const pool = new pg_1.Pool({
 });
 pool.on('error', (err) => {
     logger_1.dbLogger.error('Pool error:', err);
+});
+// Pool separado para o banco da Evolution API (systembots)
+// As tabelas Message, Contact, Chat, Instance vivem aqui
+exports.evolutionPool = new pg_1.Pool({
+    connectionString: process.env.EVOLUTION_DB_URL || process.env.DATABASE_URL,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+});
+exports.evolutionPool.on('error', (err) => {
+    logger_1.dbLogger.error('Evolution pool error:', err);
 });
 /**
  * Executa uma query simples usando o pool diretamente.

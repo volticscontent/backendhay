@@ -17,6 +17,14 @@ function fullLeadSelect(keyParam) {
     SELECT
       l.id, l.telefone, l.nome_completo, l.email, l.cpf, l.data_nascimento, l.nome_mae, l.sexo,
       l.cnpj, l.razao_social, l.nome_fantasia, l.tipo_negocio, l.faturamento_mensal,
+      COALESCE((
+          SELECT jsonb_agg(jsonb_build_object(
+              'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
+              'razao_social', le.razao_social,
+              'procuracao_ativa', le.procuracao_ativa
+          ) ORDER BY le.created_at)
+          FROM lead_empresa le WHERE le.lead_id = l.id
+      ), '[]'::jsonb) AS empresas,
       l.endereco, l.numero, l.complemento, l.bairro, l.cidade, l.estado, l.cep,
       l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
       l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
@@ -172,6 +180,53 @@ router.put('/leads/user/:phone', async (req, res) => {
     catch (err) {
         console.error('PUT /leads/user error:', err);
         res.status(500).json({ error: 'Internal Server Error', details: String(err) });
+    }
+});
+// ─── GET /leads/list ──────────────────────────────────────────────────────────
+router.get('/leads/list', async (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(200, parseInt(req.query.limit) || 50);
+    const offset = (page - 1) * limit;
+    try {
+        const [countRes, dataRes] = await Promise.all([
+            (0, db_1.query)('SELECT COUNT(*) FROM leads'),
+            (0, db_1.query)(`
+        SELECT
+          l.id, l.telefone, l.nome_completo, l.email, l.data_cadastro, l.atualizado_em,
+          l.needs_attendant, l.attendant_requested_at,
+          l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+          COALESCE((
+              SELECT jsonb_agg(jsonb_build_object(
+                  'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
+                  'razao_social', le.razao_social,
+                  'procuracao_ativa', le.procuracao_ativa
+              ) ORDER BY le.created_at)
+              FROM lead_empresa le WHERE le.lead_id = l.id
+          ), '[]'::jsonb) AS empresas,
+          l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
+          l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
+          l.calculo_parcelamento, l.tipo_divida,
+          l.valor_divida_municipal, l.valor_divida_estadual, l.valor_divida_federal,
+          l.valor_divida_pgfn AS valor_divida_ativa,
+          lp.observacoes, lp.data_controle_24h, lp.envio_disparo,
+          lp.servico AS servico_negociado, lp.servico AS servico_escolhido,
+          lp.procuracao, lp.status_atendimento, lp.cliente, lp.data_reuniao,
+          (lp.data_reuniao IS NOT NULL) AS reuniao_agendada,
+          NULL::text        AS cartao_cnpj,
+          NULL::timestamptz AS data_ultima_consulta
+        FROM leads l
+        LEFT JOIN leads_processo lp ON l.id = lp.lead_id
+        ORDER BY l.atualizado_em DESC
+        LIMIT $1 OFFSET $2
+      `, [limit, offset]),
+        ]);
+        res.json({
+            data: dataRes.rows,
+            total: parseInt(countRes.rows[0].count),
+        });
+    }
+    catch (err) {
+        res.status(500).json({ error: 'Erro ao buscar leads' });
     }
 });
 // ─── GET /leads/unique-values ─────────────────────────────────────────────────

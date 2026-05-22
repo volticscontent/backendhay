@@ -203,11 +203,31 @@ async function runMigrations() {
         CREATE INDEX IF NOT EXISTS idx_serpro_docs_valido ON serpro_documentos(valido_ate) WHERE deletado_em IS NULL;
     `);
 
-    // ── Multi-empresa: colunas cnpjs_adicionais e cnpj_ativo em leads ────────
+    // ── Multi-empresa: tabela lead_empresa (migration 016 — substituiu cnpjs_adicionais/cnpj_ativo) ──
     await pool.query(`
-        ALTER TABLE leads
-            ADD COLUMN IF NOT EXISTS cnpjs_adicionais JSONB    NOT NULL DEFAULT '[]',
-            ADD COLUMN IF NOT EXISTS cnpj_ativo        TEXT;
+        CREATE TABLE IF NOT EXISTS lead_empresa (
+            id                  SERIAL PRIMARY KEY,
+            lead_id             INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            cnpj                VARCHAR(18) NOT NULL,
+            tipo_vinculo        VARCHAR(20) NOT NULL DEFAULT 'proprietario'
+                                CHECK (tipo_vinculo IN ('proprietario', 'socio', 'representante')),
+            razao_social        VARCHAR(255),
+            tipo_negocio        VARCHAR(100),
+            faturamento_mensal  VARCHAR(50),
+            procuracao          BOOLEAN DEFAULT FALSE,
+            procuracao_ativa    BOOLEAN DEFAULT FALSE,
+            procuracao_validade DATE,
+            tem_divida          BOOLEAN,
+            valor_divida_pgfn   NUMERIC(12,2),
+            valor_divida_municipal NUMERIC(12,2),
+            valor_divida_estadual  NUMERIC(12,2),
+            valor_divida_federal   NUMERIC(12,2),
+            created_at          TIMESTAMPTZ DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (lead_id, cnpj)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_empresa_lead_id ON lead_empresa(lead_id);
+        CREATE INDEX IF NOT EXISTS idx_lead_empresa_cnpj    ON lead_empresa(cnpj);
     `);
 
     // ── Fix: video_ecac era type='media' mas valor é URL do Instagram ─────────

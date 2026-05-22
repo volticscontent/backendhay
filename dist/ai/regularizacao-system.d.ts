@@ -10,5 +10,6 @@ export interface MessageSegment {
 }
 export declare function createRegularizacaoMessageSegments(): MessageSegment[];
 export declare function createAutonomoMessageSegments(): MessageSegment[];
+export declare function createSituacaoFormSegments(): MessageSegment[];
 export declare function createAssistidoMessageSegments(): MessageSegment[];
 //# sourceMappingURL=regularizacao-system.d.ts.map

@@ -73,8 +73,9 @@ async function processIncomingMessage(payload) {
     if (remoteJid?.includes('@lid') && userPhone && !sender.includes('@lid')) {
         (0, lid_map_1.saveLidPhoneMapping)(remoteJid, userPhone, pushName).catch(err => log.error('Erro ao salvar mapeamento LID:', err));
     }
-    // Cancelar follow-ups pendentes (cliente respondeu)
+    // Cancelar follow-ups pendentes e resetar contador de etapas (cliente respondeu)
     (0, message_queue_1.cancelPendingFollowUps)(userPhone).catch(err => log.error('Erro ao cancelar follow-ups:', err));
+    redis_1.default.del(`followup_count:${userPhone}`).catch(() => { });
     // Registrar atividade no Redis
     redis_1.default.set(`last_activity:${userPhone}`, Date.now().toString(), 'EX', 86400).catch(() => { });
     // 1. Deduplicação Atômica por Message ID para evitar processamento duplo (Webhook + WebSocket + Retries)

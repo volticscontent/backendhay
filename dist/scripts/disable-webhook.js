@@ -18,7 +18,7 @@ async function disableWebhook() {
         logger_1.evolutionLogger.info('💡 Agora o backend receberá mensagens exclusivamente via WebSocket.');
     }
     catch (error) {
-        logger_1.evolutionLogger.error('❌ Erro ao desativar webhook:', error.message);
+        logger_1.evolutionLogger.error('❌ Erro ao desativar webhook:', error instanceof Error ? error.message : String(error));
         process.exit(1);
     }
 }

@@ -16,6 +16,7 @@ exports.evolutionGetBase64FromMedia = evolutionGetBase64FromMedia;
 exports.evolutionUpdateInstanceSettings = evolutionUpdateInstanceSettings;
 exports.evolutionSetWebhook = evolutionSetWebhook;
 exports.evolutionFindChats = evolutionFindChats;
+exports.evolutionFindContacts = evolutionFindContacts;
 exports.checkWhatsAppNumbers = checkWhatsAppNumbers;
 exports.toWhatsAppJid = toWhatsAppJid;
 const logger_1 = require("./logger");
@@ -135,6 +136,10 @@ async function evolutionSetWebhook(config) {
 }
 async function evolutionFindChats() {
     const result = await evolutionRequest(`/chat/findChats/${EVOLUTION_INSTANCE_NAME}`, 'POST', {});
+    return Array.isArray(result) ? result : [];
+}
+async function evolutionFindContacts() {
+    const result = await evolutionRequest(`/chat/findContacts/${EVOLUTION_INSTANCE_NAME}`, 'POST', { where: {} });
     return Array.isArray(result) ? result : [];
 }
 async function checkWhatsAppNumbers(numbers) {

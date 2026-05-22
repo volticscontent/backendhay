@@ -4,7 +4,7 @@ export declare const VALIDITY_DAYS: Record<string, number>;
  * e persiste o registro em serpro_documentos. Silencioso em caso de falha.
  */
 export declare function maybeSavePdfFromBotResult(cnpj: string, service: string, result: unknown, protocolo?: string): Promise<void>;
-export declare function saveConsultation(cnpj: string, service: string, result: unknown, status: number, source?: string): Promise<void>;
+export declare function saveConsultation(cnpj: string, service: string, result: unknown, status: number, source?: string, leadId?: number | null): Promise<void>;
 export interface SerproDocumentoInput {
     cnpj: string;
     tipo_servico: string;

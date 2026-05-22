@@ -50,16 +50,21 @@ async function runAgent(systemPrompt, userMessage, context, tools) {
             { role: 'system', content: systemPrompt }
         ];
         // 2. Adicionar histórico (evitando duplicar a mensagem atual se ela já foi salva no webhook)
-        const currentMsgText = typeof userMessage === 'string' ? userMessage : JSON.stringify(userMessage);
+        // Para mensagens multimodais, comparar apenas o texto extraído (base64 não é armazenado no histórico)
+        const currentMsgText = typeof userMessage === 'string'
+            ? userMessage
+            : userMessage
+                .filter(p => p.type === 'text')
+                .map(p => p.text || '')
+                .join(' ');
         for (const h of history) {
-            // Se a última mensagem do histórico for idêntica à atual, ignoramos para não duplicar
             if (h.role === 'user' && h.content === currentMsgText && h === history[history.length - 1]) {
                 continue;
             }
             messages.push({ role: h.role, content: h.content });
         }
-        // 3. Adicionar a mensagem atual do usuário
-        messages.push({ role: 'user', content: currentMsgText });
+        // 3. Adicionar a mensagem atual — multimodal (imagem) passa como ContentPart[], texto como string
+        messages.push({ role: 'user', content: userMessage });
         let round = 0;
         let accumulatedContent = '';
         while (round < MAX_TOOL_ROUNDS) {

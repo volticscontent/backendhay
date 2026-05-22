@@ -11,8 +11,65 @@ const PRESETS: Record<string, string[]> = {
 };
 
 // GET /integra/empresas
-router.get('/integra/empresas', async (_req: Request, res: Response) => {
+router.get('/integra/empresas', async (req: Request, res: Response) => {
     try {
+        const search = String(req.query.search ?? '').trim();
+        const regime = String(req.query.regime ?? '').trim().toLowerCase();
+        const ativoRaw = String(req.query.ativo ?? '').trim().toLowerCase();
+        const leadIdRaw = String(req.query.lead_id ?? '').trim();
+        const certVencendoRaw = String(req.query.cert_vencendo ?? '').trim().toLowerCase();
+        const servico = String(req.query.servico ?? '').trim();
+        const limitRaw = Number(req.query.limit ?? 200);
+        const offsetRaw = Number(req.query.offset ?? 0);
+        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
+        const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+
+        const where: string[] = [];
+        const values: unknown[] = [];
+
+        if (search) {
+            const numeric = search.replace(/\D/g, '');
+            values.push(`%${search}%`);
+            const searchParam = `$${values.length}`;
+            if (numeric.length >= 6) {
+                values.push(`%${numeric}%`);
+                const cnpjParam = `$${values.length}`;
+                where.push(`(ie.razao_social ILIKE ${searchParam} OR l.nome_completo ILIKE ${searchParam} OR ie.cnpj ILIKE ${cnpjParam})`);
+            } else {
+                where.push(`(ie.razao_social ILIKE ${searchParam} OR l.nome_completo ILIKE ${searchParam})`);
+            }
+        }
+
+        if (regime && ['mei', 'simples', 'presumido', 'real'].includes(regime)) {
+            values.push(regime);
+            where.push(`ie.regime_tributario = $${values.length}`);
+        }
+
+        if (ativoRaw === 'true' || ativoRaw === 'false') {
+            values.push(ativoRaw === 'true');
+            where.push(`ie.ativo = $${values.length}`);
+        }
+
+        if (leadIdRaw && /^\d+$/.test(leadIdRaw)) {
+            values.push(Number(leadIdRaw));
+            where.push(`ie.lead_id = $${values.length}`);
+        }
+
+        if (certVencendoRaw === 'true') {
+            where.push(`ie.certificado_validade IS NOT NULL AND ie.certificado_validade <= (CURRENT_DATE + INTERVAL '30 day')`);
+        }
+
+        if (servico) {
+            values.push(servico);
+            where.push(`ie.servicos_habilitados ? $${values.length}`);
+        }
+
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+        values.push(limit);
+        const limitParam = `$${values.length}`;
+        values.push(offset);
+        const offsetParam = `$${values.length}`;
+
         const result = await query(
             `SELECT ie.id, ie.cnpj, ie.razao_social, ie.regime_tributario, ie.ativo,
                     ie.servicos_habilitados, ie.lead_id, ie.certificado_validade, ie.observacoes,
@@ -21,7 +78,10 @@ router.get('/integra/empresas', async (_req: Request, res: Response) => {
                     l.telefone     AS lead_telefone
              FROM integra_empresas ie
              LEFT JOIN leads l ON ie.lead_id = l.id
-             ORDER BY ie.razao_social ASC`
+             ${whereSql}
+             ORDER BY ie.razao_social ASC
+             LIMIT ${limitParam} OFFSET ${offsetParam}`,
+            values
         );
         res.json(result.rows);
     } catch (err: any) {
@@ -57,29 +117,13 @@ router.post('/integra/empresas', async (req: Request, res: Response) => {
 
         const servicos = servicos_habilitados ?? PRESETS[regime_tributario] ?? PRESETS.mei;
 
-        // Se veio com lead_id, buscar razao_social real do lead para evitar gravar nome_completo como razão social
-        let finalRazaoSocial = razao_social;
-        if (lead_id) {
-            const leadRow = await query(`SELECT razao_social FROM leads WHERE id = $1`, [lead_id]);
-            const leadRazao = leadRow.rows[0]?.razao_social as string | null | undefined;
-            if (leadRazao) finalRazaoSocial = leadRazao;
-        }
-
         const result = await query(
             `INSERT INTO integra_empresas
                (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados, lead_id, certificado_validade, observacoes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING *`,
-            [cnpj, finalRazaoSocial, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
+            [cnpj, razao_social, regime_tributario, ativo, JSON.stringify(servicos), lead_id ?? null, certificado_validade ?? null, observacoes ?? null]
         );
-
-        // Garantir que leads.razao_social esteja preenchido com o valor usado
-        if (lead_id) {
-            await query(
-                `UPDATE leads SET razao_social = COALESCE(razao_social, $1), atualizado_em = NOW() WHERE id = $2`,
-                [finalRazaoSocial, lead_id]
-            );
-        }
 
         res.status(201).json(result.rows[0]);
     } catch (err: any) {
@@ -115,15 +159,6 @@ router.patch('/integra/empresas/:id', async (req: Request, res: Response) => {
         );
 
         if (result.rows.length === 0) return void res.status(404).json({ error: 'Empresa não encontrada' });
-
-        // Sincronizar razao_social de volta ao lead quando atualizada (integra_empresas é fonte de verdade fiscal)
-        const updated = result.rows[0] as { lead_id?: number; razao_social?: string };
-        if ('razao_social' in fields && updated.lead_id) {
-            await query(
-                `UPDATE leads SET razao_social = $1, atualizado_em = NOW() WHERE id = $2`,
-                [updated.razao_social, updated.lead_id]
-            );
-        }
 
         res.json(result.rows[0]);
     } catch (err: any) {

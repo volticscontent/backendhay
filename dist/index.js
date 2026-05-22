@@ -17,6 +17,12 @@ const settings_1 = __importDefault(require("./routes/settings"));
 const colaboradores_1 = __importDefault(require("./routes/colaboradores"));
 const empresas_1 = __importDefault(require("./routes/integra/empresas"));
 const robos_1 = __importDefault(require("./routes/integra/robos"));
+const dashboard_1 = __importDefault(require("./routes/integra/dashboard"));
+const guias_1 = __importDefault(require("./routes/integra/guias"));
+const caixa_postal_1 = __importDefault(require("./routes/integra/caixa-postal"));
+const billing_1 = __importDefault(require("./routes/integra/billing"));
+const bot_context_1 = __importDefault(require("./routes/bot-context"));
+const cnpj_1 = __importDefault(require("./routes/cnpj"));
 const message_queue_1 = require("./queues/message-queue");
 const message_debounce_1 = require("./queues/message-debounce");
 const job_pgmei_1 = require("./queues/integra/job-pgmei");
@@ -47,6 +53,12 @@ app.use('/api', settings_1.default);
 app.use('/api', colaboradores_1.default);
 app.use('/api', empresas_1.default);
 app.use('/api', robos_1.default);
+app.use('/api', dashboard_1.default);
+app.use('/api', guias_1.default);
+app.use('/api', caixa_postal_1.default);
+app.use('/api', billing_1.default);
+app.use('/api', bot_context_1.default);
+app.use('/api', cnpj_1.default);
 // Root health check
 app.get('/', (_req, res) => {
     res.json({
@@ -63,6 +75,164 @@ app.get('/', (_req, res) => {
         cron: 'registered',
     });
 });
+async function runMigrations() {
+    // ── Integra Contador: tabelas principais ─────────────────────────────────
+    await db_1.default.query(`
+        CREATE TABLE IF NOT EXISTS integra_empresas (
+            id                    SERIAL PRIMARY KEY,
+            cnpj                  VARCHAR(14)  NOT NULL UNIQUE,
+            razao_social          TEXT         NOT NULL,
+            regime_tributario     VARCHAR(20)  NOT NULL DEFAULT 'mei',
+            ativo                 BOOLEAN      NOT NULL DEFAULT true,
+            servicos_habilitados  JSONB        NOT NULL DEFAULT '[]',
+            lead_id               INTEGER      REFERENCES leads(id) ON DELETE SET NULL,
+            certificado_validade  DATE,
+            observacoes           TEXT,
+            created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_robos (
+            tipo_robo        VARCHAR(30)  PRIMARY KEY,
+            ativo            BOOLEAN      NOT NULL DEFAULT false,
+            dia_execucao     INTEGER      NOT NULL DEFAULT 10,
+            hora_execucao    TIME         NOT NULL DEFAULT '08:00',
+            ultima_execucao  TIMESTAMPTZ,
+            proxima_execucao TIMESTAMPTZ,
+            updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        INSERT INTO integra_robos (tipo_robo) VALUES ('pgmei'), ('cnd'), ('caixa_postal')
+            ON CONFLICT (tipo_robo) DO NOTHING;
+
+        -- Seed empresa teste E2E
+        INSERT INTO integra_empresas (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados)
+        VALUES ('00000000000191', 'EMPRESA MOCK E2E - BANCO DO BRASIL', 'mei', true, '["PGMEI", "CND"]')
+        ON CONFLICT (cnpj) DO NOTHING;
+
+        CREATE TABLE IF NOT EXISTS integra_execucoes (
+            id              SERIAL PRIMARY KEY,
+            robo_tipo       VARCHAR(30)  NOT NULL,
+            status          VARCHAR(20)  NOT NULL DEFAULT 'running',
+            total_empresas  INTEGER      DEFAULT 0,
+            sucesso         INTEGER      DEFAULT 0,
+            falhas          INTEGER      DEFAULT 0,
+            ignoradas       INTEGER      DEFAULT 0,
+            iniciado_em     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            concluido_em    TIMESTAMPTZ,
+            duracao_ms      INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_integra_exec_robo ON integra_execucoes(robo_tipo, iniciado_em DESC);
+
+        CREATE TABLE IF NOT EXISTS integra_execucao_itens (
+            id            SERIAL PRIMARY KEY,
+            execucao_id   INTEGER      NOT NULL REFERENCES integra_execucoes(id) ON DELETE CASCADE,
+            empresa_id    INTEGER      NOT NULL REFERENCES integra_empresas(id)  ON DELETE CASCADE,
+            status        VARCHAR(20)  NOT NULL DEFAULT 'pending',
+            dados_resposta JSONB,
+            mensagem      TEXT,
+            custo_estimado DECIMAL(10, 4),
+            created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_guias (
+            id               SERIAL PRIMARY KEY,
+            empresa_id       INTEGER      NOT NULL REFERENCES integra_empresas(id) ON DELETE CASCADE,
+            tipo             VARCHAR(30)  NOT NULL DEFAULT 'das_mei',
+            competencia      VARCHAR(6),
+            valor            DECIMAL(12, 2),
+            vencimento       DATE,
+            codigo_barras    TEXT,
+            dados_originais  JSONB,
+            status_pagamento VARCHAR(20)  NOT NULL DEFAULT 'pendente',
+            pdf_r2_key       TEXT,
+            created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE (empresa_id, tipo, competencia)
+        );
+
+        CREATE TABLE IF NOT EXISTS integra_caixa_postal (
+            id             SERIAL PRIMARY KEY,
+            empresa_id     INTEGER      NOT NULL REFERENCES integra_empresas(id) ON DELETE CASCADE,
+            assunto        TEXT,
+            conteudo       TEXT,
+            data_mensagem  TIMESTAMPTZ,
+            dados_originais JSONB,
+            lida           BOOLEAN      NOT NULL DEFAULT false,
+            created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE (empresa_id, assunto, data_mensagem)
+        );
+    `);
+    // ── integra_precos — tabela de preços Serpro por robô (Billing) ──────────
+    await db_1.default.query(`
+        CREATE TABLE IF NOT EXISTS integra_precos (
+            id            SERIAL PRIMARY KEY,
+            tipo_robo     VARCHAR(30) NOT NULL UNIQUE,
+            preco_unitario DECIMAL(10, 4) NOT NULL DEFAULT 0,
+            descricao     TEXT,
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        );
+        INSERT INTO integra_precos (tipo_robo, preco_unitario, descricao) VALUES
+            ('pgmei',        0.05, 'PGMEI — por empresa consultada'),
+            ('pgdas',        0.05, 'PGDAS — por empresa consultada'),
+            ('cnd',          0.10, 'CND — por empresa consultada'),
+            ('caixa_postal', 0.03, 'Caixa Postal — por empresa consultada')
+        ON CONFLICT (tipo_robo) DO NOTHING;
+
+        ALTER TABLE integra_execucao_itens
+            ADD COLUMN IF NOT EXISTS custo_estimado DECIMAL(10, 4);
+    `);
+    await db_1.default.query(`
+        CREATE TABLE IF NOT EXISTS serpro_documentos (
+            id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            cnpj          VARCHAR(14)  NOT NULL,
+            tipo_servico  VARCHAR(50)  NOT NULL,
+            protocolo     VARCHAR(100),
+            r2_key        TEXT         NOT NULL,
+            r2_url        TEXT         NOT NULL,
+            tamanho_bytes INTEGER,
+            valido_ate    TIMESTAMPTZ,
+            gerado_por    VARCHAR(20)  NOT NULL DEFAULT 'admin',
+            lead_id       INTEGER      REFERENCES leads(id) ON DELETE SET NULL,
+            metadata      JSONB,
+            deletado_em   TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_cnpj   ON serpro_documentos(cnpj);
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_tipo   ON serpro_documentos(tipo_servico);
+        CREATE INDEX IF NOT EXISTS idx_serpro_docs_valido ON serpro_documentos(valido_ate) WHERE deletado_em IS NULL;
+    `);
+    // ── Multi-empresa: tabela lead_empresa (migration 016 — substituiu cnpjs_adicionais/cnpj_ativo) ──
+    await db_1.default.query(`
+        CREATE TABLE IF NOT EXISTS lead_empresa (
+            id                  SERIAL PRIMARY KEY,
+            lead_id             INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            cnpj                VARCHAR(18) NOT NULL,
+            tipo_vinculo        VARCHAR(20) NOT NULL DEFAULT 'proprietario'
+                                CHECK (tipo_vinculo IN ('proprietario', 'socio', 'representante')),
+            razao_social        VARCHAR(255),
+            tipo_negocio        VARCHAR(100),
+            faturamento_mensal  VARCHAR(50),
+            procuracao          BOOLEAN DEFAULT FALSE,
+            procuracao_ativa    BOOLEAN DEFAULT FALSE,
+            procuracao_validade DATE,
+            tem_divida          BOOLEAN,
+            valor_divida_pgfn   NUMERIC(12,2),
+            valor_divida_municipal NUMERIC(12,2),
+            valor_divida_estadual  NUMERIC(12,2),
+            valor_divida_federal   NUMERIC(12,2),
+            created_at          TIMESTAMPTZ DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (lead_id, cnpj)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_empresa_lead_id ON lead_empresa(lead_id);
+        CREATE INDEX IF NOT EXISTS idx_lead_empresa_cnpj    ON lead_empresa(cnpj);
+    `);
+    // ── Fix: video_ecac era type='media' mas valor é URL do Instagram ─────────
+    await db_1.default.query(`
+        UPDATE system_settings
+        SET type = 'link', updated_at = NOW()
+        WHERE key = 'video_ecac' AND type = 'media';
+    `);
+}
 // ==================== Inicialização ====================
 async function bootstrap() {
     logger_1.bootLogger.info('='.repeat(50));
@@ -70,6 +240,10 @@ async function bootstrap() {
     logger_1.bootLogger.info(`🔗 Ambiente: ${process.env.NODE_ENV || 'development'}`);
     logger_1.bootLogger.info(`📝 Log Level: ${process.env.LOG_LEVEL || 'INFO'}`);
     logger_1.bootLogger.info('='.repeat(50));
+    // 0. Migrations
+    logger_1.bootLogger.info('Executando migrations...');
+    await runMigrations();
+    logger_1.bootLogger.info('✅ Migrations aplicadas');
     // 1. Workers BullMQ
     logger_1.bootLogger.info('Iniciando workers BullMQ...');
     const messageWorker = (0, message_queue_1.startMessageWorker)();

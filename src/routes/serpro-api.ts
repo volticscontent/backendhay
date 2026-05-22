@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../lib/db';
 import { consultarServico, getSerproTokens, SERVICE_CONFIG } from '../lib/serpro';
+import { consultarDividaAtivaPorDevedor } from '../lib/pgfn';
 import { saveConsultation, saveDocumento, listDocumentos, softDeleteDocumento } from '../lib/serpro-db';
 import { getPresignedDownloadUrl } from '../lib/r2';
 
@@ -21,7 +22,9 @@ router.post('/serpro', async (req: Request, res: Response) => {
   const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf };
 
   try {
-    const result = await consultarServico(target, cnpj, options);
+    const result = target === 'PGFN_API'
+      ? await consultarDividaAtivaPorDevedor(cnpj)
+      : await consultarServico(target, cnpj, options);
     let finalResult = result;
 
     if (target === 'CCMEI_DADOS' && result && typeof result === 'object') {
@@ -39,12 +42,16 @@ router.post('/serpro', async (req: Request, res: Response) => {
 
     // Resolve lead_id by CNPJ for traceability
     const cleanCnpj = cnpj.replace(/\D/g, '');
+    const serviceKey = target === 'PGFN_API' ? 'PGFN_API' : target;
     const leadRow = await query(
-      `SELECT id FROM leads WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1 LIMIT 1`,
+      `SELECT id
+       FROM leads
+       WHERE REGEXP_REPLACE(COALESCE(cnpj, ''), '[^0-9]', '', 'g') = $1
+       LIMIT 1`,
       [cleanCnpj],
     );
     const leadId = (leadRow.rows[0]?.id as number | undefined) ?? null;
-    saveConsultation(cnpj, target, finalResult, 200, 'admin', leadId);
+    saveConsultation(cnpj, serviceKey, finalResult, 200, 'admin', leadId);
     res.json(finalResult);
   } catch (err: unknown) {
     console.error('SERPRO API Error:', err);
@@ -100,10 +107,10 @@ router.get('/serpro/clients', async (req: Request, res: Response) => {
 
   const combinedQuery = `
     SELECT
-      REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS raw_cnpj,
+      REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') AS raw_cnpj,
       MAX(c.created_at) AS created_at,
       (SELECT resultado FROM consultas_serpro
-       WHERE cnpj = REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g')
+       WHERE cnpj = REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g')
          ${safeNamedSource ? `AND source = $1` : ''}
        ORDER BY created_at DESC LIMIT 1) AS resultado,
       l.id AS lead_id, l.nome_completo, l.telefone, l.email,
@@ -112,8 +119,8 @@ router.get('/serpro/clients', async (req: Request, res: Response) => {
     FROM leads l
     LEFT JOIN leads_processo lp ON l.id = lp.lead_id
     LEFT JOIN consultas_serpro c
-      ON REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') = c.cnpj ${sourceFilter}
-    WHERE l.cnpj IS NOT NULL AND l.cnpj != ''
+      ON REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') = c.cnpj ${sourceFilter}
+    WHERE COALESCE(l.cnpj, '') != ''
       AND (
         COALESCE(lp.procuracao_ativa, false) = true
         OR COALESCE(lp.procuracao, false) = true
@@ -181,12 +188,12 @@ router.get('/serpro/carteira', async (req: Request, res: Response) => {
     const leadsResult = await query(`
       SELECT
         l.id AS lead_id, l.nome_completo, l.telefone, l.email,
-        REGEXP_REPLACE(l.cnpj, '[^0-9]', '', 'g') AS cnpj,
+        REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') AS cnpj,
         COALESCE(lp.procuracao_ativa, lp.procuracao, false) AS procuracao_ativa,
         lp.procuracao_validade
       FROM leads l
       LEFT JOIN leads_processo lp ON l.id = lp.lead_id
-      WHERE l.cnpj IS NOT NULL AND l.cnpj != ''
+      WHERE COALESCE(l.cnpj, '') != ''
       ORDER BY l.nome_completo ASC
       LIMIT 200
     `);
