@@ -157,7 +157,7 @@ function formatServicoResult(anoConsultas: AnoConsulta[]): ServicoResult {
 
     const situacao: ServicoResult['situacao'] =
         anos_com_debito.length > 0 ? 'COM_DEBITO'
-        : anos_inconclusivos.length === anoConsultas.length ? 'INCONCLUSIVO'
+        : anos_inconclusivos.length > 0 ? 'INCONCLUSIVO'
         : 'SEM_DEBITO';
 
     return {
@@ -308,10 +308,10 @@ function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; res
     const t = texto.toUpperCase();
 
     const INDICADORES_DEBITO = [
-        'DEVEDOR', 'DÉBITO', 'DEBITO', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE',
+        'DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE',
         'EM ABERTO', 'VENCIDO', 'DÍVIDA ATIVA', 'DIVIDA ATIVA',
         'GUIA EM ABERTO', 'DAS EM ABERTO', 'PARCELA EM ABERTO',
-        'VALOR DEVIDO', 'TOTAL DEVIDO',
+        'VALOR DEVIDO', 'TOTAL DEVIDO', 'DEBITO'
     ];
     const INDICADORES_REGULAR = [
         'SEM DÉBITO', 'SEM DEBITO', 'SEM PENDÊNCIA', 'SEM PENDENCIA',
@@ -319,13 +319,16 @@ function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; res
         'NÃO POSSUI DÉBITO', 'NAO POSSUI DEBITO',
     ];
 
-    if (INDICADORES_DEBITO.some(i => t.includes(i))) {
-        const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
-        return { tem_debitos: true, resumo_pdf };
-    }
     if (INDICADORES_REGULAR.some(i => t.includes(i))) {
         const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
         return { tem_debitos: false, resumo_pdf };
+    }
+    
+    // Testa débito apenas se não encontrou indicador explícito de regularidade
+    // (evita que 'SEM DEBITO' dispare 'DEBITO')
+    if (INDICADORES_DEBITO.some(i => t.includes(i)) || t.includes('DÉBITO')) {
+        const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
+        return { tem_debitos: true, resumo_pdf };
     }
     const resumo_pdf = texto.slice(0, 2500).replace(/\s+/g, ' ').trim();
     return { tem_debitos: null, resumo_pdf };
@@ -404,6 +407,18 @@ export async function parseSerproData(envelope: unknown): Promise<{
         dados = dadosRaw as Record<string, unknown>;
     }
 
+    // Se dados contém um campo 'pdf' ou 'documento' em base64, extrai o texto
+    if (dados && !texto_pdf) {
+        const pdfBase64 = typeof dados.pdf === 'string' ? dados.pdf 
+            : typeof dados.documento === 'string' ? dados.documento 
+            : null;
+            
+        if (pdfBase64 && pdfBase64.length > 100) {
+            tem_documento_binario = true;
+            texto_pdf = await extractPdfText(pdfBase64);
+        }
+    }
+
     // documentos no topo do envelope também podem conter PDFs
     const documentos = Array.isArray(env.documentos) ? env.documentos : [];
     for (const doc of documentos as Array<Record<string, unknown>>) {
@@ -448,13 +463,13 @@ export async function parseSerproData(envelope: unknown): Promise<{
         dados.situacaoContribuinte ?? dados.situacao ?? dados.statusContribuinte ?? ''
     ).toUpperCase();
 
-    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? null;
+    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? dados.guias ?? dados.das ?? dados.parcelas ?? dados.itens ?? dados.lista ?? null;
     const hasGuias = Array.isArray(guiasRaw) ? guiasRaw.length > 0
         : typeof guiasRaw === 'number' ? guiasRaw > 0
         : false;
 
     const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO'];
-    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO', 'ATIVO'];
+    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO'];
 
     const tem_debitos_detectado =
         INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias ? true
