@@ -300,7 +300,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         delete dadosServico.ano;
         delete dadosServico.mes;
         dadosServico.cnpjReferencia = cnpjNumero;
-        dadosServico.statusLeitura = options.statusLeitura || 'TODAS';
+        dadosServico.statusLeitura = options.statusLeitura || 'T'; // T=Todas, N=Não Lidas, L=Lidas
         dadosServico.indicadorPagina = options.indicadorPagina || '1';
     }
 
@@ -325,6 +325,10 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
 
     if (nomeServico === 'PGDASD' && !options.numeroDas) {
         throw new Error('HTTP 400: Parâmetros de entrada inválidos. Número do DAS é obrigatório para Extrato PGDASD.');
+    }
+
+    if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico) && !options.mes) {
+        throw new Error(`HTTP 400: Parâmetros de entrada inválidos. O mês (período de apuração) é obrigatório para ${nomeServico}.`);
     }
 
     if (nomeServico === 'PAGAMENTO' && !options.numeroDas && !options.numeroRecibo) {

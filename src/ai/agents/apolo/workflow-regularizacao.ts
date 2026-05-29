@@ -239,7 +239,7 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
   - 'consultar_cnd_serpro' → Certidão Negativa de Débitos. Requer situação fiscal limpa.
   - 'consultar_caixa_postal_serpro' → mensagens da Receita Federal para o cliente.
 - O uso desenfreado de consultas profundas gasta recursos e expõe nossos IPs. Prefira sempre a Camada 1.
-- NUNCA use ferramentas/integrações não assinadas ou inativas na Loja Serpro (ex: DASN_SIMEI, DCTFWEB, PGDASD, PGMEI_EXTRATO, PROCESSOS, etc.). Se o usuário pedir algo dessas, informe que a integração está desabilitada temporariamente e faça manualmente.
+- NUNCA use ferramentas/integrações não assinadas ou inativas na Loja Serpro (ex: DASN_SIMEI). Se o usuário pedir algo relacionado a declaração anual (DASN), informe que a integração está desabilitada temporariamente e faça manualmente.
 - Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
 
 #### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
