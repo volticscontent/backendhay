@@ -719,8 +719,8 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     const p = JSON.parse(ud);
                     if (p.status !== 'error' && p.status !== 'not_found') leadId = p.id;
                 }
-                const segments = createSituacaoFormSegments();
-                await processMessageSegments(context.userPhone, segments, (s) => sendMessageSegment(context.userPhone, s));
+                // Removido o envio de formulário web (createSituacaoFormSegments)
+                // Agora o Apolo apenas recebe a instrução para iniciar a coleta conversacional
                 if (leadId) await trackResourceDelivery(leadId, 'situacao-form-whatsapp', 'started');
                 return JSON.stringify({
                     status: 'success',
