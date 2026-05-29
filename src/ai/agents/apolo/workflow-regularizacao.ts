@@ -499,15 +499,20 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 }
 
                 const currentYear = new Date().getFullYear();
-                const anos = Array.from({ length: ANOS_RETROATIVOS + 1 }, (_, i) => currentYear - ANOS_RETROATIVOS + i);
+                  const anos = Array.from({ length: ANOS_RETROATIVOS + 1 }, (_, i) => currentYear - ANOS_RETROATIVOS + i);
 
-                const [pgmeiRawAll, pgfnRaw] = await Promise.all([
-                    Promise.allSettled(anos.map(ano => checkCnpjSerpro(gate.cnpj!, 'PGMEI', { ano: String(ano) }))),
-                    Promise.resolve(consultarDividaAtivaPorDevedor(gate.cnpj!)).then(
-                        result => ({ status: 'fulfilled' as const, value: result }),
-                        reason => ({ status: 'rejected' as const, reason })
-                    ),
-                ]);
+                  const [pgmeiRawAll, pgfnRaw, dasnRaw] = await Promise.all([
+                      Promise.allSettled(anos.map(ano => checkCnpjSerpro(gate.cnpj!, 'PGMEI', { ano: String(ano) }))),
+                      Promise.resolve(consultarDividaAtivaPorDevedor(gate.cnpj!)).then(
+                          result => ({ status: 'fulfilled' as const, value: result }),
+                          reason => ({ status: 'rejected' as const, reason })
+                      ),
+                      // Tenta consultar DASN_SIMEI, mas não quebra se der 403 (não assinada)
+                      Promise.resolve(checkCnpjSerpro(gate.cnpj!, 'DASN_SIMEI', { ano: String(currentYear - 1) })).then(
+                          result => ({ status: 'fulfilled' as const, value: result }),
+                          reason => ({ status: 'rejected' as const, reason })
+                      )
+                  ]);
 
                 const parseAnoResults = async (rawAll: PromiseSettledResult<string>[]): Promise<AnoConsulta[]> =>
                     Promise.all(rawAll.map(async (result, i) => {
@@ -538,6 +543,17 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const pgmei = formatServicoResult(pgmeiPorAno);
                 const pgfn  = formatServicoResult(pgfnPorAno);
                 const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
+                
+                let dasn_info = 'Não verificado';
+                if (dasnRaw.status === 'fulfilled') {
+                    const dasnParsed = JSON.parse(dasnRaw.value);
+                    if (dasnParsed.status === 'error' || dasnParsed.error) {
+                        dasn_info = 'DASN-SIMEI não assinada ou indisponível.';
+                    } else {
+                        dasn_info = 'DASN-SIMEI consultada com sucesso. Verifique os dados brutos.';
+                    }
+                }
+
                 const resumo_executivo = buildResumoExecutivo(pgmei, pgfn, pgfn_detalhes);
 
                 const aviso =
@@ -547,7 +563,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                         ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
                         : undefined;
 
-                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, aviso });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, aviso });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
