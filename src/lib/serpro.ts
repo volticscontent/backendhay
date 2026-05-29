@@ -323,6 +323,14 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         }
     }
 
+    if (nomeServico === 'PGDASD' && !options.numeroDas) {
+        throw new Error('HTTP 400: Parâmetros de entrada inválidos. Número do DAS é obrigatório para Extrato PGDASD.');
+    }
+
+    if (nomeServico === 'PAGAMENTO' && !options.numeroDas && !options.numeroRecibo) {
+        throw new Error('HTTP 400: Parâmetros de entrada inválidos. Informe número do documento de arrecadação.');
+    }
+
     const contratanteCnpj = onlyDigits(process.env.CONTRATANTE_CNPJ || process.env.SERPRO_CNPJ_BASE || '51564549000140');
     const isParcelamentoConsulta = ['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico);
 
