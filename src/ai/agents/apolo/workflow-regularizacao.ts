@@ -1,6 +1,6 @@
 import pdfParse from 'pdf-parse';
 import { ToolDefinition } from '../../openai-client';
-import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser } from '../../server-tools';
+import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser, updateUser } from '../../server-tools';
 import pool from '../../../lib/db';
 import redis from '../../../lib/redis';
 import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, createSituacaoFormSegments, MessageSegment } from '../../regularizacao-system';
@@ -562,6 +562,22 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                         : pgmei.situacao === 'INCONCLUSIVO' || pgfn.situacao === 'INCONCLUSIVO'
                         ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
                         : undefined;
+
+                // Atualiza a ficha do lead com os dados reais encontrados
+                const tem_divida = pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO';
+                let tipo_divida = '';
+                if (pgmei.situacao === 'COM_DEBITO' && pgfn.situacao === 'COM_DEBITO') tipo_divida = 'Federal e DAS';
+                else if (pgfn.situacao === 'COM_DEBITO') tipo_divida = 'Federal';
+                else if (pgmei.situacao === 'COM_DEBITO') tipo_divida = 'DAS';
+
+                const valor_divida_pgfn = pgfn_detalhes?.valor_total_consolidado || 0;
+
+                updateUser({
+                    telefone: context.userPhone,
+                    tem_divida,
+                    tipo_divida: tipo_divida || undefined,
+                    valor_divida_pgfn
+                }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
 
                 return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, aviso });
             } catch (error) {
