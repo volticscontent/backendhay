@@ -263,11 +263,11 @@ ANTES de chamar 'consultar_pgmei_serpro':
 - Se não souber → chame 'consultar_ccmei_serpro' primeiro para confirmar enquadramento.
 
 #### APÓS RESULTADO SERPRO — Atualização Obrigatória no Banco
-Imediatamente após comunicar o resultado ao cliente, salve com update_user:
-- update_user(situacao_fiscal='COM_DEBITO' | 'SEM_DEBITO' | 'INCONCLUSIVO')
-- Se COM_DEBITO: update_user(tem_divida=true, situacao='negociacao')
-- Se SEM_DEBITO: update_user(tem_divida=false)
-- Sempre: update_user(observacoes='SERPRO [data]: PGMEI=[situacao], PGFN=[situacao], anos=[lista]')
+  Imediatamente após comunicar o resultado ao cliente, salve com update_user:
+  - update_user(situacao_fiscal='COM_DEBITO' | 'SEM_DEBITO' | 'INCONCLUSIVO')
+  - Se COM_DEBITO: update_user(tem_divida=true, situacao='negociacao')
+  - Se SEM_DEBITO: update_user(tem_divida=false)
+  - Sempre: update_user(observacoes='SERPRO [data]: PGMEI=[situacao], PGFN=[situacao], anos=[lista]')
 
 #### TEMPLATE WHATSAPP — Resultado Serpro (use sempre, nunca JSON bruto)
 
@@ -364,16 +364,27 @@ export async function parseSerproData(envelope: unknown): Promise<{
     let tem_documento_binario = false;
     let texto_pdf: string | null = null;
 
-    const dadosRaw = env.dados;
+    let dadosRaw = env.dados;
+
+    // If dadosRaw is a string, try to parse it first
+    let parsedDados: unknown = dadosRaw;
+    if (typeof dadosRaw === 'string' && dadosRaw.length > 0) {
+        try {
+            parsedDados = JSON.parse(dadosRaw);
+        } catch {
+            // Not valid JSON, keep as is
+        }
+    }
 
     // ── Array de itens (PGFN_CONSULTAR / DIVIDA_ATIVA retornam array de débitos) ──
-    if (Array.isArray(dadosRaw)) {
-        if (dadosRaw.length > 0) {
+    if (Array.isArray(parsedDados)) {
+        if (parsedDados.length > 0) {
             const DEBITO_STATUS  = ['ENVIADO A PFN', 'DEVEDOR', 'INADIMPLENTE', 'PENDENTE', 'IRREGULAR', 'DEBITO'];
             const REGULAR_STATUS = ['ADIMPLENTE', 'REGULAR', 'SEM_DEBITO', 'SEM DEBITO'];
             let temDebito = false, temRegular = false;
-            for (const item of dadosRaw as Array<Record<string, unknown>>) {
-                const s = String(item.situacaoDebito ?? item.situacao ?? '').toUpperCase().trim();
+            for (const item of parsedDados as Array<Record<string, unknown>>) {
+                const s = String(item.situacaoDebito ?? item.situacao ?? '')
+                    .toUpperCase().trim().replace(/\s+/g, ' '); // Normalize multiple spaces
                 if (DEBITO_STATUS.some(d => s.includes(d)))  { temDebito  = true; break; }
                 if (REGULAR_STATUS.some(d => s.includes(d))) { temRegular = true; }
             }
@@ -384,7 +395,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
         }
         // Array vazio → sinal definitivo vem das mensagens (ex: código 25001 = sem débitos)
         const msTexto = mensagensRaw.map(m => `${m.codigo ?? ''} ${m.texto ?? ''}`).join(' ')
-            .normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+            .normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' '); // Normalize multiple spaces
         const comDebito = ['ENVIADO A PFN', 'EM DEBITO', 'DEVEDOR', 'INADIMPLENTE'].some(s => msTexto.includes(s));
         const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
         return {
