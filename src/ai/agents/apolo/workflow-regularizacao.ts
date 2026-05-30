@@ -352,8 +352,9 @@ export async function parseSerproData(envelope: unknown): Promise<{
     tem_documento_binario: boolean;
     texto_pdf: string | null;
     mensagens_serpro: string[];
+    raw_envelope: unknown;
 }> {
-    const NOT_FOUND = { tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: [] };
+    const NOT_FOUND = { tem_debitos_detectado: null, dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro: [], raw_envelope: envelope };
     if (!envelope || typeof envelope !== 'object') return NOT_FOUND;
 
     const env = envelope as Record<string, unknown>;
@@ -385,12 +386,12 @@ export async function parseSerproData(envelope: unknown): Promise<{
             for (const item of parsedDados as Array<Record<string, unknown>>) {
                 const s = String(item.situacaoDebito ?? item.situacao ?? '')
                     .toUpperCase().trim().replace(/\s+/g, ' '); // Normalize multiple spaces
-                if (DEBITO_STATUS.some(d => s.includes(d)))  { temDebito  = true; break; }
+                if (DEBITO_STATUS.some(d => s.includes(d)))  { temDebito = true; break; }
                 if (REGULAR_STATUS.some(d => s.includes(d))) { temRegular = true; }
             }
             return {
                 tem_debitos_detectado: temDebito ? true : (temRegular ? false : null),
-                dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+                dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
             };
         }
         // Array vazio → sinal definitivo vem das mensagens (ex: código 25001 = sem débitos)
@@ -400,7 +401,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
         const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
         return {
             tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
-            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
         };
     }
 
@@ -450,12 +451,13 @@ export async function parseSerproData(envelope: unknown): Promise<{
             tem_documento_binario: true,
             texto_pdf: resumo_pdf,
             mensagens_serpro,
+            raw_envelope: envelope,
         };
     }
 
     // Documento sem texto legível (PDF escaneado ou erro de extração)
     if (tem_documento_binario) {
-        return { tem_debitos_detectado: null, dados: null, tem_documento_binario: true, texto_pdf: null, mensagens_serpro };
+        return { tem_debitos_detectado: null, dados: null, tem_documento_binario: true, texto_pdf: null, mensagens_serpro, raw_envelope: envelope };
     }
 
     if (!dados) {
@@ -466,7 +468,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
         const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
         return {
             tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
-            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro,
+            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
         };
     }
 
@@ -488,7 +490,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
         : INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
         : null;
 
-    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, mensagens_serpro };
+    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope };
 }
 
 export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] => [
@@ -555,13 +557,23 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const pgfn  = formatServicoResult(pgfnPorAno);
                 const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
                 
+                let dasn_result: unknown = null;
                 let dasn_info = 'Não verificado';
                 if (dasnRaw.status === 'fulfilled') {
-                    const dasnParsed = JSON.parse(dasnRaw.value);
-                    if (dasnParsed.status === 'error' || dasnParsed.error) {
-                        dasn_info = 'DASN-SIMEI não assinada ou indisponível.';
-                    } else {
-                        dasn_info = 'DASN-SIMEI consultada com sucesso. Verifique os dados brutos.';
+                    try {
+                        const dasnParsed = JSON.parse(dasnRaw.value);
+                        dasn_result = dasnParsed;
+                        if (dasnParsed.status === 'error' || dasnParsed.error) {
+                            dasn_info = 'DASN-SIMEI não assinada ou indisponível.';
+                        } else {
+                            const dasnDataParsed = await parseSerproData(dasnParsed);
+                            dasn_info = dasnDataParsed.mensagens_serpro.length > 0
+                                ? dasnDataParsed.mensagens_serpro.join(' | ')
+                                : 'DASN-SIMEI consultada com sucesso.';
+                        }
+                    } catch (e) {
+                        dasn_info = 'Erro ao parsear resultado DASN-SIMEI: ' + (e instanceof Error ? e.message : String(e));
+                        dasn_result = { status: 'error', message: String(e) };
                     }
                 }
 
@@ -590,7 +602,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     valor_divida_pgfn
                 }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
 
-                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, aviso });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }
