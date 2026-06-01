@@ -131,6 +131,22 @@ Regras:
 `;
 const getComercialTools = (context) => [
     {
+        name: 'iniciar_qualificacao_whatsapp',
+        description: 'Inicia o fluxo de qualificação BANT de forma conversacional pelo WhatsApp. Use esta tool em vez de enviar links de formulários.',
+        parameters: { type: 'object', properties: {} },
+        function: async () => {
+            try {
+                return JSON.stringify({
+                    status: 'success',
+                    next_steps: 'Faça perguntas conversacionais, UMA POR VEZ, para coletar: 1) CNPJ, 2) Faturamento mensal médio, 3) Se possui dívidas, 4) Qual a maior dificuldade hoje. Salve cada resposta com update_user. Ao concluir, acione agendar_reuniao_fechamento ou enviar_link_reuniao dependendo da qualificação.'
+                });
+            }
+            catch (error) {
+                return JSON.stringify({ status: 'error', message: String(error) });
+            }
+        }
+    },
+    {
         name: 'enviar_apresentacao_comercial',
         description: 'Envia a apresentação comercial (PDF) para o cliente. Use na primeira mensagem, após a saudação.',
         parameters: { type: 'object', properties: {} },

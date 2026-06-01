@@ -91,6 +91,30 @@ async function getPgfnToken(forceRefresh = false) {
     logger_1.serproLogger.info(`Token PGFN renovado. Expira em: ${new Date(cachedPgfnToken.expiresAt).toISOString()}`);
     return cachedPgfnToken;
 }
+function normalizeText(value) {
+    return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toUpperCase()
+        .trim();
+}
+function toStringOrNull(value) {
+    if (value === null || value === undefined || value === '')
+        return null;
+    return String(value);
+}
+function parseMoney(value) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return value;
+    if (typeof value !== 'string' || !value.trim())
+        return null;
+    const normalized = value.replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+function formatMoney(value) {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+}
 function extrairMensagensPgfn(data) {
     if (!data || typeof data !== 'object')
         return [];
@@ -105,31 +129,84 @@ function extrairMensagensPgfn(data) {
         return String(msg.texto || msg.message || msg.descricao || msg.codigo || JSON.stringify(msg));
     }).filter(Boolean);
 }
-function detectarDebitoPgfn(data) {
-    if (Array.isArray(data))
-        return data.length > 0;
-    if (!data || typeof data !== 'object')
-        return null;
-    const obj = data;
-    const candidatos = [
-        obj.inscricoes,
-        obj.dividas,
-        obj.debitos,
-        obj.resultado,
-        obj.items,
-        obj.content,
-        obj.dados,
-    ];
-    for (const candidato of candidatos) {
-        if (Array.isArray(candidato))
-            return candidato.length > 0;
-        if (candidato && typeof candidato === 'object') {
-            const nested = detectarDebitoPgfn(candidato);
-            if (nested !== null)
-                return nested;
-        }
+function asRecord(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+function collectRecords(value, output = []) {
+    if (Array.isArray(value)) {
+        for (const item of value)
+            collectRecords(item, output);
+        return output;
     }
-    const texto = JSON.stringify(obj)
+    const record = asRecord(value);
+    if (!record)
+        return output;
+    const hasInscricao = ['numeroInscricao', 'numero_inscricao', 'inscricao', 'numeroDaInscricao'].some(key => record[key]);
+    const hasValor = ['valorTotalConsolidadoMoeda', 'valorTotalConsolidado', 'valorConsolidado', 'valor'].some(key => record[key]);
+    const hasSituacao = ['situacaoDescricao', 'situacao', 'tipoRegularidade', 'situacaoInscricao'].some(key => record[key]);
+    if (hasInscricao || (hasValor && hasSituacao))
+        output.push(record);
+    for (const key of ['inscricoes', 'dividas', 'debitos', 'resultado', 'items', 'content', 'dados', 'lista']) {
+        if (record[key])
+            collectRecords(record[key], output);
+    }
+    return output;
+}
+function normalizeInscricao(record) {
+    const valorMoeda = toStringOrNull(record.valorTotalConsolidadoMoeda ?? record.valorConsolidadoMoeda ?? record.valorMoeda);
+    const valorNumero = parseMoney(record.valorTotalConsolidado ?? record.valorConsolidado ?? record.valor ?? valorMoeda);
+    const situacaoDescricao = toStringOrNull(record.situacaoDescricao ?? record.situacaoInscricao ?? record.situacao);
+    const regularidade = toStringOrNull(record.tipoRegularidade ?? record.regularidade);
+    const situacaoNorm = normalizeText(situacaoDescricao);
+    return {
+        numeroInscricao: toStringOrNull(record.numeroInscricao ?? record.numero_inscricao ?? record.inscricao ?? record.numeroDaInscricao),
+        numeroProcesso: toStringOrNull(record.numeroProcesso ?? record.processo ?? record.numero_processo),
+        devedorPrincipal: toStringOrNull(record.devedorPrincipal ?? record.nomeDevedor ?? record.nome ?? record.razaoSocial),
+        tipoDevedor: toStringOrNull(record.tipoDevedor ?? record.tipo_devedor),
+        situacaoDescricao,
+        tipoRegularidade: regularidade,
+        receitaPrincipal: toStringOrNull(record.receitaPrincipal ?? record.nomeReceita ?? record.receita),
+        codigoReceitaPrincipal: toStringOrNull(record.codigoReceitaPrincipal ?? record.codigoReceita ?? record.codReceita),
+        dataInscricao: toStringOrNull(record.dataInscricao ?? record.data_inscricao ?? record.dtInscricao),
+        valorTotalConsolidado: valorNumero,
+        valorTotalConsolidadoMoeda: valorMoeda ?? (valorNumero !== null ? formatMoney(valorNumero) : null),
+        ajuizada: situacaoNorm ? situacaoNorm.includes('AJUIZ') : null,
+        negociada: situacaoNorm ? situacaoNorm.includes('NEGOCIAD') || situacaoNorm.includes('SISPAR') : null,
+        raw: record,
+    };
+}
+function buildPgfnResumo(data, mensagens) {
+    const inscricoes = collectRecords(data).map(normalizeInscricao);
+    const uniqueInscricoes = Array.from(new Map(inscricoes.map((item, index) => [item.numeroInscricao || `idx-${index}`, item])).values());
+    const valorTotal = uniqueInscricoes.reduce((sum, item) => sum + (item.valorTotalConsolidado || 0), 0);
+    const situacoes = Array.from(new Set(uniqueInscricoes.map(i => i.situacaoDescricao).filter((v) => Boolean(v))));
+    const regularidades = Array.from(new Set(uniqueInscricoes.map(i => i.tipoRegularidade).filter((v) => Boolean(v))));
+    const totalAjuizadas = uniqueInscricoes.filter(i => i.ajuizada === true).length;
+    const totalNegociadas = uniqueInscricoes.filter(i => i.negociada === true).length;
+    const totalAtivas = uniqueInscricoes.filter(i => normalizeText(i.situacaoDescricao).includes('ATIVA')).length;
+    const total = uniqueInscricoes.length;
+    const resumoTexto = total > 0
+        ? `PGFN: ${total} inscrição(ões) encontrada(s), total consolidado ${formatMoney(valorTotal)}. Situações: ${situacoes.join('; ') || 'não informadas'}.`
+        : mensagens.length > 0
+            ? `PGFN: nenhuma inscrição estruturada encontrada. Mensagens: ${mensagens.join(' | ')}`
+            : 'PGFN: nenhuma inscrição em dívida ativa encontrada no retorno.';
+    return {
+        total_inscricoes: total,
+        total_ativas: totalAtivas,
+        total_ajuizadas: totalAjuizadas,
+        total_negociadas: totalNegociadas,
+        valor_total_consolidado: Number(valorTotal.toFixed(2)),
+        valor_total_consolidado_moeda: formatMoney(valorTotal),
+        situacoes,
+        regularidades,
+        inscricoes: uniqueInscricoes,
+        resumo_texto: resumoTexto,
+    };
+}
+function detectarDebitoPgfn(data, resumo) {
+    if (resumo.total_inscricoes > 0)
+        return true;
+    const texto = JSON.stringify(data)
         .normalize('NFD')
         .replace(/[̀-ͯ]/g, '')
         .toUpperCase();
@@ -150,14 +227,17 @@ async function consultarPgfn(path, consulta, parametro, forceRefresh = false) {
                 Accept: 'application/json',
             },
         });
+        const mensagens_pgfn = extrairMensagensPgfn(dados);
+        const resumo = buildPgfnResumo(dados, mensagens_pgfn);
         return {
             status: 'success',
             origem: 'pgfn_api',
             consulta,
             parametro,
             dados,
-            tem_debitos_detectado: detectarDebitoPgfn(dados),
-            mensagens_pgfn: extrairMensagensPgfn(dados),
+            tem_debitos_detectado: detectarDebitoPgfn(dados, resumo),
+            mensagens_pgfn,
+            resumo,
         };
     }
     catch (error) {

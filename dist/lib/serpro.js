@@ -270,7 +270,7 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
         const mesPad = options.mes.padStart(2, '0');
         const anoParaMes = options.ano || new Date().getFullYear().toString();
         if (nomeServico === 'DCTFWEB') {
-            dadosServico.mesPA = mesPad;
+            dadosServico.mesPA = (options.mes || String(new Date().getMonth() + 1)).padStart(2, '0');
         }
         else if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico)) {
             // Serpro exige formato YYYYMM
@@ -280,13 +280,21 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
     // Exceções e Campos Específicos por Serviço
     if (nomeServico === 'DCTFWEB') {
         dadosServico.categoria = options.categoria || 'GERAL_MENSAL';
+        if (dadosServico.categoria === 'GERAL_MENSAL' || dadosServico.categoria === 'ESPETACULO_DESPORTIVO') {
+            dadosServico.mesPA = (options.mes || String(new Date().getMonth() + 1)).padStart(2, '0');
+        }
+        else {
+            delete dadosServico.mesPA;
+            delete dadosServico.mes;
+        }
     }
     if (nomeServico === 'CAIXA_POSTAL') {
-        // Doc exige cnpjReferencia e NÃO aceita campo cnpj simples em muitas versões
-        // E 2024/2025: campo 'ano' gera erro se presente.
         delete dadosServico.cnpj;
         delete dadosServico.ano;
+        delete dadosServico.mes;
         dadosServico.cnpjReferencia = cnpjNumero;
+        dadosServico.statusLeitura = options.statusLeitura || 'T'; // T=Todas, N=Não Lidas, L=Lidas
+        dadosServico.indicadorPagina = options.indicadorPagina || '1';
     }
     if (options.numeroDas) {
         dadosServico.numeroDas = options.numeroDas; // Obrigatório para PGDASD CONSEXTRATO16
@@ -307,6 +315,15 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
             const now = new Date();
             dadosServico.parcelaParaEmitir = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
         }
+    }
+    if (nomeServico === 'PGDASD' && !options.numeroDas) {
+        throw new Error('HTTP 400: Parâmetros de entrada inválidos. Número do DAS é obrigatório para Extrato PGDASD.');
+    }
+    if (['PGMEI_EXTRATO', 'PGMEI_BOLETO'].includes(nomeServico) && !options.mes) {
+        throw new Error(`HTTP 400: Parâmetros de entrada inválidos. O mês (período de apuração) é obrigatório para ${nomeServico}.`);
+    }
+    if (nomeServico === 'PAGAMENTO' && !options.numeroDas && !options.numeroRecibo) {
+        throw new Error('HTTP 400: Parâmetros de entrada inválidos. Informe número do documento de arrecadação.');
     }
     const contratanteCnpj = onlyDigits(process.env.CONTRATANTE_CNPJ || process.env.SERPRO_CNPJ_BASE || '51564549000140');
     const isParcelamentoConsulta = ['PARCELAMENTO_SN_CONSULTAR', 'PARCELAMENTO_MEI_CONSULTAR'].includes(nomeServico);

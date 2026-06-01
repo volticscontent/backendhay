@@ -133,7 +133,12 @@ async function runAgent(systemPrompt, userMessage, context, tools) {
         return finalResponse.choices[0].message.content || '';
     }
     catch (error) {
-        logger_1.agentLogger.error('❌ Erro ao executar agente:', error);
+        if (error instanceof Error) {
+            logger_1.agentLogger.error('❌ Erro ao executar agente:', error.message, '\nStack:', error.stack);
+        }
+        else {
+            logger_1.agentLogger.error('❌ Erro ao executar agente (non-Error):', error);
+        }
         return 'Desculpe, tive um problema técnico. Tente novamente mais tarde.';
     }
 }

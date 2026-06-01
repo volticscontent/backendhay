@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const db_1 = require("../lib/db");
 const serpro_1 = require("../lib/serpro");
+const pgfn_1 = require("../lib/pgfn");
 const serpro_db_1 = require("../lib/serpro-db");
 const r2_1 = require("../lib/r2");
 const router = (0, express_1.Router)();
@@ -14,7 +15,9 @@ router.post('/serpro', async (req, res) => {
     const target = service || 'CCMEI_DADOS';
     const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf };
     try {
-        const result = await (0, serpro_1.consultarServico)(target, cnpj, options);
+        const result = target === 'PGFN_API'
+            ? await (0, pgfn_1.consultarDividaAtivaPorDevedor)(cnpj)
+            : await (0, serpro_1.consultarServico)(target, cnpj, options);
         let finalResult = result;
         if (target === 'CCMEI_DADOS' && result && typeof result === 'object') {
             const r = result;
@@ -28,12 +31,13 @@ router.post('/serpro', async (req, res) => {
         }
         // Resolve lead_id by CNPJ for traceability
         const cleanCnpj = cnpj.replace(/\D/g, '');
+        const serviceKey = target === 'PGFN_API' ? 'PGFN_API' : target;
         const leadRow = await (0, db_1.query)(`SELECT id
        FROM leads
        WHERE REGEXP_REPLACE(COALESCE(cnpj, ''), '[^0-9]', '', 'g') = $1
        LIMIT 1`, [cleanCnpj]);
         const leadId = leadRow.rows[0]?.id ?? null;
-        (0, serpro_db_1.saveConsultation)(cnpj, target, finalResult, 200, 'admin', leadId);
+        (0, serpro_db_1.saveConsultation)(cnpj, serviceKey, finalResult, 200, 'admin', leadId);
         res.json(finalResult);
     }
     catch (err) {

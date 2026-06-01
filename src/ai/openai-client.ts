@@ -158,7 +158,11 @@ export async function runAgent(
         finalTimer.end(usage ? `tokens: ${usage.prompt_tokens}→${usage.completion_tokens}` : undefined);
         return finalResponse.choices[0].message.content || '';
     } catch (error: unknown) {
-        agentLogger.error('❌ Erro ao executar agente:', error);
+        if (error instanceof Error) {
+            agentLogger.error('❌ Erro ao executar agente:', error.message, '\nStack:', error.stack);
+        } else {
+            agentLogger.error('❌ Erro ao executar agente (non-Error):', error);
+        }
         return 'Desculpe, tive um problema técnico. Tente novamente mais tarde.';
     }
 }

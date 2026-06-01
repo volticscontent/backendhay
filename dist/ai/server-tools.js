@@ -71,6 +71,7 @@ const utils_1 = require("../lib/utils");
 const evolution_1 = require("../lib/evolution");
 const embedding_1 = require("./embedding");
 const serpro_1 = require("../lib/serpro");
+const pgfn_1 = require("../lib/pgfn");
 const serpro_db_1 = require("../lib/serpro-db");
 const cnpj_service_1 = require("../lib/cnpj-service");
 const empresa_auto_register_1 = require("../lib/empresa-auto-register");
@@ -905,7 +906,15 @@ async function consultarCnpjPublico(cnpj, userPhone) {
     }
 }
 async function consultarDividaAtivaGeralSerpro(cnpj) {
-    return checkCnpjSerpro(cnpj, 'PGFN_CONSULTAR');
+    try {
+        const result = await (0, pgfn_1.consultarDividaAtivaPorDevedor)(cnpj);
+        return JSON.stringify(result);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error(`[consultarDividaAtivaGeralSerpro] Falha na API PGFN para CNPJ ${cnpj}:`, error);
+        return JSON.stringify({ status: 'error', origem: 'pgfn_api', message });
+    }
 }
 // ==================== Interpreter (Memory) ====================
 async function interpreter(phone, action, text, category = 'atendimento') {

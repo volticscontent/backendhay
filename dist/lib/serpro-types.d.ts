@@ -43,6 +43,8 @@ export interface SerproOptions {
     categoria?: string;
     numeroDas?: string;
     parcelaParaEmitir?: string;
+    statusLeitura?: string;
+    indicadorPagina?: string;
     /** Obrigatório para SIT_FISCAL_RELATORIO: protocolo retornado pelo SIT_FISCAL_SOLICITAR */
     protocoloRelatorio?: string;
     /** CPF do contribuinte (11 dígitos). Usado pelo SITFIS que consulta por CPF, não CNPJ. */
