@@ -369,17 +369,35 @@ export async function sendEnumeratedList(phone: string): Promise<string> {
 // ==================== Atendente ====================
 
 export async function callAttendant(phone: string, reason: string = 'Solicitação do cliente'): Promise<string> {
-    try {
-        const { getNextAvailableSlot } = await import('../lib/business-hours');
-        const now = new Date();
-        const scheduledDate = getNextAvailableSlot(now, 30);
-        const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    const { getNextAvailableSlot } = await import('../lib/business-hours');
+    const now = new Date();
+    const scheduledDate = getNextAvailableSlot(now, 30);
+    const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
 
-        // 1. Atualizar lead para sinalizar necessidade de humano
+    // 1. Notificação WhatsApp — executada PRIMEIRO, independente do BD
+    const attendantNumber = process.env.ATTENDANT_PHONE;
+    let evoLog: unknown = null;
+    if (attendantNumber) {
+        try {
+            const text = `🔔 *Solicitação de Atendimento*\n\n` +
+                         `👤 *Cliente:* ${phone}\n` +
+                         `📝 *Motivo:* ${reason}\n` +
+                         `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
+                         `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
+            evoLog = await evolutionSendTextMessage(toWhatsAppJid(attendantNumber), text);
+            log.info(`[callAttendant] Atendente notificado via WhatsApp (${attendantNumber})`);
+        } catch (evoErr) {
+            log.error('[callAttendant] Falha ao enviar WhatsApp para atendente:', evoErr);
+        }
+    } else {
+        log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
+    }
+
+    // 2. Persistência no BD — best-effort (BD pode estar fora do ar)
+    try {
         await query(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
-        
-        // 2. Tentar obter ID do lead para marcar na leads_processo
+
         const leadRes = await query(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
         if (leadRes.rows.length > 0) {
             const leadId = leadRes.rows[0].id;
@@ -392,45 +410,33 @@ export async function callAttendant(phone: string, reason: string = 'Solicitaç�
                     updated_at         = NOW()
             `, [leadId, scheduledDate]);
         }
-
-        await redis.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
-
-        // Notificar via WebSocket para o painel (ChatInterface/Frontend) atualizar realtime
-        try {
-            const { notifySocketServer } = await import('../lib/socket');
-            await notifySocketServer('haylander-chat-updates', {
-                type: 'attendant-requested',
-                phone: phone,
-                reason: reason
-            });
-        } catch (socketErr) {
-            log.warn('Erro ao notificar socket sobre request de atendente:', socketErr);
-        }
-
-        const attendantNumber = process.env.ATTENDANT_PHONE;
-
-        if (attendantNumber) {
-            const text = `🔔 *Solicitação de Atendimento*\n\n` +
-                         `👤 *Cliente:* ${phone}\n` +
-                         `📝 *Motivo:* ${reason}\n` +
-                         `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
-                         `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
-            
-            const evoLog = await evolutionSendTextMessage(toWhatsAppJid(attendantNumber), text);
-            log.info(`[callAttendant] Evolution response for notifying attendant (${attendantNumber}):`, { evolution_log: evoLog });
-            return JSON.stringify({ 
-                status: 'success', 
-                message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`, 
-                evolution_log: evoLog 
-            });
-        }
-
-        log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
-        return JSON.stringify({ status: 'success', message: 'Solicitação registrada. Aguarde um momento.' });
-    } catch (error) {
-        log.error('callAttendant error:', error);
-        return JSON.stringify({ status: 'error', message: String(error) });
+    } catch (dbErr) {
+        log.error('[callAttendant] Falha ao persistir no BD (BD pode estar fora):', dbErr);
     }
+
+    // 3. Redis e Socket — best-effort
+    try {
+        await redis.set(`attendant_requested:${phone}`, reason, 'EX', 86400);
+    } catch (redisErr) {
+        log.error('[callAttendant] Falha ao gravar no Redis:', redisErr);
+    }
+
+    try {
+        const { notifySocketServer } = await import('../lib/socket');
+        await notifySocketServer('haylander-chat-updates', {
+            type: 'attendant-requested',
+            phone: phone,
+            reason: reason
+        });
+    } catch (socketErr) {
+        log.warn('Erro ao notificar socket sobre request de atendente:', socketErr);
+    }
+
+    return JSON.stringify({
+        status: 'success',
+        message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`,
+        evolution_log: evoLog,
+    });
 }
 
 // ==================== Context & Services ====================

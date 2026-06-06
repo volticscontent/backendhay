@@ -254,9 +254,23 @@ async function sendFallback(sender: string, userPhone: string): Promise<void> {
             }],
             context: 'fallback-error',
         });
+    } catch (err) {
+        debounceLogger.error('Falha crítica no fallback (envio mensagem):', err);
+    }
+
+    // Notifica o atendente humano independente do estado do BD
+    try {
+        const { callAttendant } = await import('../ai/server-tools');
+        await callAttendant(userPhone, '[FALHA DE SISTEMA] Bot falhou ao processar a mensagem. Cliente notificado.');
+    } catch (err) {
+        debounceLogger.error('Falha ao notificar atendente no fallback:', err);
+    }
+
+    // Tenta registrar no BD (best-effort)
+    try {
         await updateUser({ telefone: userPhone, observacoes: '[FALHA DE SISTEMA] Erro no bot, encaminhado para humano' });
     } catch (err) {
-        debounceLogger.error('Falha crítica no fallback:', err);
+        debounceLogger.error('Falha ao atualizar usuário no fallback (BD pode estar fora):', err);
     }
 }
 
