@@ -9,17 +9,20 @@ const router = Router();
 
 // POST /serpro — consult a CNPJ
 router.post('/serpro', async (req: Request, res: Response) => {
-  const { cnpj, service, ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf } = req.body as {
+  const { cnpj, service, ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf, infoBeneficio, permitirEscrita } = req.body as {
     cnpj?: string;
     service?: keyof typeof SERVICE_CONFIG;
     ano?: string; mes?: string; numeroRecibo?: string; codigoReceita?: string; categoria?: string;
     protocoloRelatorio?: string; cpf?: string;
+    infoBeneficio?: Array<{ periodoApuracao: string; indicadorBeneficio: boolean }>;
+    permitirEscrita?: boolean;
   };
 
   if (!cnpj) return void res.status(400).json({ error: 'CNPJ é obrigatório' });
 
   const target = service || 'CCMEI_DADOS';
-  const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf };
+  // permitirEscrita só vem true quando o operador confirma explicitamente uma ação de escrita no painel.
+  const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf, infoBeneficio, permitirEscrita: permitirEscrita === true };
 
   try {
     const result = target === 'PGFN_API'

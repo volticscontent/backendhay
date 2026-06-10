@@ -225,9 +225,21 @@ export async function getSerproTokens(forceRefresh: boolean = false): Promise<Se
 
 export type { SerproOptions, SerproTokens, TipoContribuinte } from './serpro-types';
 
+/**
+ * Serviços de ESCRITA na Receita (alteram dados do contribuinte, não apenas consultam/emitem documento).
+ * Exigem options.permitirEscrita === true para serem acionados. O atendimento automatizado (Apolo)
+ * nunca envia essa flag, então fica bloqueado por padrão; apenas o painel admin (Haylander), após
+ * confirmação explícita, a envia.
+ */
+const MUTATION_SERVICES = new Set<keyof typeof SERVICE_CONFIG>(['PGMEI_ATU_BENEFICIO']);
+
 export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG, cnpj: string, options: SerproOptions = {}) {
     const config = SERVICE_CONFIG[nomeServico];
     if (!config) throw new Error(`Serviço ${nomeServico} não configurado`);
+
+    if (MUTATION_SERVICES.has(nomeServico) && options.permitirEscrita !== true) {
+        throw new Error(`Operação de escrita "${nomeServico}" bloqueada: requer autorização explícita (permitirEscrita). Não disponível para atendimento automatizado.`);
+    }
 
     const idSistema = process.env[config.env_sistema] || config.default_sistema;
     const idServico = process.env[config.env_servico] || config.default_servico;
@@ -295,12 +307,32 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
         }
     }
 
+    // PGMEI_ATU_BENEFICIO (ATUBENEFICIO23): payload exige anoCalendario (número) + infoBeneficio (lista de meses).
+    if (nomeServico === 'PGMEI_ATU_BENEFICIO') {
+        const info = options.infoBeneficio;
+        if (!Array.isArray(info) || info.length === 0) {
+            throw new Error('HTTP 400: PGMEI_ATU_BENEFICIO requer infoBeneficio — lista de { periodoApuracao: "AAAAMM", indicadorBeneficio: boolean }.');
+        }
+        for (const item of info) {
+            if (!/^\d{6}$/.test(String(item?.periodoApuracao ?? '')) || typeof item?.indicadorBeneficio !== 'boolean') {
+                throw new Error('HTTP 400: infoBeneficio inválido — cada item precisa de periodoApuracao "AAAAMM" e indicadorBeneficio boolean.');
+            }
+        }
+        dadosServico.anoCalendario = Number(options.ano) || new Date().getFullYear();
+        delete dadosServico.mes;
+        dadosServico.infoBeneficio = info;
+    }
+
     if (nomeServico === 'CAIXA_POSTAL') {
         delete dadosServico.cnpj;
         delete dadosServico.ano;
         delete dadosServico.mes;
         dadosServico.cnpjReferencia = cnpjNumero;
-        dadosServico.statusLeitura = options.statusLeitura || 'T'; // T=Todas, N=Não Lidas, L=Lidas
+        // Serpro exige 1 dígito: 0=Todas, 1=Lidas, 2=Não Lidas. (Letras como 'T' são rejeitadas com HTTP 400.)
+        const LEITURA_LEGADO: Record<string, string> = { T: '0', L: '1', N: '2' };
+        const leituraRaw = options.statusLeitura ? String(options.statusLeitura).trim().toUpperCase() : '0';
+        const leitura = LEITURA_LEGADO[leituraRaw] ?? leituraRaw;
+        dadosServico.statusLeitura = /^[0-2]$/.test(leitura) ? leitura : '0';
         dadosServico.indicadorPagina = options.indicadorPagina || '1';
     }
 

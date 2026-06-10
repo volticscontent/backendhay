@@ -515,14 +515,12 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const currentYear = new Date().getFullYear();
                   const anos = Array.from({ length: ANOS_RETROATIVOS + 1 }, (_, i) => currentYear - ANOS_RETROATIVOS + i);
 
-                  const [pgmeiRawAll, pgfnRaw, dasnRaw] = await Promise.all([
+                  // DASN-SIMEI NÃO é consultada aqui: o serviço está "em prospecção" na Serpro
+                  // (ainda não liberado em produção — ICGERENCIADOR-044). Chamá-la só desperdiçaria
+                  // uma requisição que sempre retorna 403. Reativar quando a Serpro publicar o serviço.
+                  const [pgmeiRawAll, pgfnRaw] = await Promise.all([
                       Promise.allSettled(anos.map(ano => checkCnpjSerpro(gate.cnpj!, 'PGMEI', { ano: String(ano) }))),
                       Promise.resolve(consultarDividaAtivaPorDevedor(gate.cnpj!)).then(
-                          result => ({ status: 'fulfilled' as const, value: result }),
-                          reason => ({ status: 'rejected' as const, reason })
-                      ),
-                      // Tenta consultar DASN_SIMEI, mas não quebra se der 403 (não assinada)
-                      Promise.resolve(checkCnpjSerpro(gate.cnpj!, 'DASN_SIMEI', { ano: String(currentYear - 1) })).then(
                           result => ({ status: 'fulfilled' as const, value: result }),
                           reason => ({ status: 'rejected' as const, reason })
                       )
@@ -558,25 +556,9 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 const pgfn  = formatServicoResult(pgfnPorAno);
                 const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
                 
-                let dasn_result: unknown = null;
-                let dasn_info = 'Não verificado';
-                if (dasnRaw.status === 'fulfilled') {
-                    try {
-                        const dasnParsed = JSON.parse(dasnRaw.value);
-                        dasn_result = dasnParsed;
-                        if (dasnParsed.status === 'error' || dasnParsed.error) {
-                            dasn_info = 'DASN-SIMEI não assinada ou indisponível.';
-                        } else {
-                            const dasnDataParsed = await parseSerproData(dasnParsed);
-                            dasn_info = dasnDataParsed.mensagens_serpro.length > 0
-                                ? dasnDataParsed.mensagens_serpro.join(' | ')
-                                : 'DASN-SIMEI consultada com sucesso.';
-                        }
-                    } catch (e) {
-                        dasn_info = 'Erro ao parsear resultado DASN-SIMEI: ' + (e instanceof Error ? e.message : String(e));
-                        dasn_result = { status: 'error', message: String(e) };
-                    }
-                }
+                // DASN-SIMEI indisponível na Serpro (em prospecção). Não consultada — não afirmar nada sobre ela.
+                const dasn_result: unknown = null;
+                const dasn_info = 'DASN-SIMEI indisponível (serviço ainda não liberado pela Serpro).';
 
                 const resumo_executivo = buildResumoExecutivo(pgmei, pgfn, pgfn_detalhes);
 
