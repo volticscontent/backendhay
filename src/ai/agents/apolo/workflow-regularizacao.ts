@@ -25,6 +25,7 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any, callerPhone?: s
     ok: boolean;
     cnpj?: string;
     message?: string;
+    bypass_reason?: 'admin' | 'serpro_down';
 }> {
     if (!userData?.id) {
         return { ok: false, message: 'Usuário sem identificação interna. Atualize o cadastro antes da consulta.' };
@@ -45,7 +46,7 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any, callerPhone?: s
         return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais (use update_user com o campo cnpj).' };
     }
 
-    if (isAdmin) return { ok: true, cnpj };
+    if (isAdmin) return { ok: true, cnpj, bypass_reason: 'admin' };
 
     // Verifica se é empresa principal ou adicional
     const isPrincipal = !redisCnpjAtivo ||
@@ -87,7 +88,7 @@ async function resolveUserCnpjAndProcuracaoStatus(userData: any, callerPhone?: s
             }
         } catch {
             // Serpro indisponível — não bloqueia, deixa passar
-            return { ok: true, cnpj };
+            return { ok: true, cnpj, bypass_reason: 'serpro_down' };
         }
         return {
             ok: false,
@@ -148,6 +149,7 @@ type ServicoResult = {
     anos_com_debito: number[];
     anos_sem_debito: number[];
     anos_inconclusivos: number[];
+    detalhes?: string;
 };
 
 function formatServicoResult(anoConsultas: AnoConsulta[]): ServicoResult {
@@ -160,12 +162,15 @@ function formatServicoResult(anoConsultas: AnoConsulta[]): ServicoResult {
         : anos_inconclusivos.length > 0 ? 'INCONCLUSIVO'
         : 'SEM_DEBITO';
 
+    const detalhes = anoConsultas.filter(a => a.detalhe).map(a => `${a.ano}: ${a.detalhe}`).join(' | ');
+
     return {
         situacao,
         anos_consultados: anoConsultas.map(r => r.ano),
         anos_com_debito,
         anos_sem_debito,
         anos_inconclusivos,
+        detalhes: detalhes || undefined,
     };
 }
 
@@ -174,6 +179,7 @@ function buildResumoExecutivo(pgmei: ServicoResult, pgfn: ServicoResult, pgfnRes
 
     if (pgmei.situacao === 'COM_DEBITO') {
         linhas.push(`PGMEI (guias DAS): débitos detectados em ${pgmei.anos_com_debito.join(', ')}`);
+        if (pgmei.detalhes) linhas.push(`  Detalhes PGMEI: ${pgmei.detalhes}`);
     } else if (pgmei.situacao === 'SEM_DEBITO') {
         linhas.push(`PGMEI (guias DAS): situação regular em todos os anos consultados`);
     } else {
@@ -240,7 +246,17 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
   - 'consultar_caixa_postal_serpro' → mensagens da Receita Federal para o cliente.
 - O uso desenfreado de consultas profundas gasta recursos e expõe nossos IPs. Prefira sempre a Camada 1.
 - NUNCA use ferramentas/integrações não assinadas ou inativas na Loja Serpro (ex: DASN_SIMEI). Se o usuário pedir algo relacionado a declaração anual (DASN) ou qualquer serviço indisponível: chame 'chamar_atendente' com resumo do caso e informe ao cliente que um especialista vai entrar em contato. **NÃO sugira agendar reunião — o atendente que vai retornar.**
+- **MUITO IMPORTANTE SOBRE VALORES:** Ao apresentar o resultado da consulta Serpro, você DEVE, OBRIGATORIAMENTE, informar ao cliente o **valor monetário exato** das dívidas (Soma pendente, R$, etc.) caso os detalhes da consulta tragam essa informação. Nunca esconda os valores. Dar essa clareza financeira é crucial para conscientizar o cliente do tamanho da dívida!
 - Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
+
+### FECHAMENTO E COLETA DE DADOS (FORMULÁRIO INVISÍVEL/CONVERSACIONAL)
+Os formulários externos foram DESCONTINUADOS. Você, Apolo, atuará como um formulário inteligente e conversacional.
+Assim que o cliente aprovar seguir com a regularização das pendências, siga este fluxo:
+1. **Auditoria de Dados:** Analise silenciosamente a tag `<user_data>`. Para concluir o cadastro e gerar a ata de fechamento, precisamos ter no banco: **Nome/Razão Social, CNPJ, CPF, Telefone e E-mail**. (E **Senha GOV** *apenas* se o cliente estiver seguindo a Opção B - Atendimento Humano sem procuração).
+2. **Dados Existentes:** Vários desses dados (como Razão Social, CNPJ e CPF) já podem estar no banco porque vieram das próprias consultas Serpro/CCMEI. Não pergunte do zero aquilo que você já sabe; se for o caso, peça apenas confirmação de forma natural.
+3. **Coleta Progressiva:** Se algum dado essencial (como o E-mail) não estiver no `<user_data>`, pergunte de forma amigável: *"Excelente! Para formalizarmos o serviço e eu preparar a sua ata de fechamento, me confirma só o seu [DADO FALTANTE]?"*. Pergunte UMA COISA POR VEZ.
+4. **Atualização Imediata:** Salve imediatamente a resposta usando a tool `update_user` (ex: `update_user(email='cliente@...`, `cpf='...'`).
+5. **Ata de Fechamento:** Assim que **todos** os dados estiverem presentes na ficha do cliente, avise-o que o cadastro está pronto e registre internamente: `update_user(observacoes='Cadastro completo. Ata de fechamento pronta para faturamento e integração.')`. Mantenha o cliente engajado para os próximos passos.
 
 #### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
 A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Campos principais:
@@ -286,6 +302,7 @@ REGRAS DE OURO DO TEMPLATE:
 - Sempre use '|||' para separar cada bloco de informação
 - Substitua [cnpj] pelo CNPJ real — nunca exiba o campo bruto
 - Termine com trial close (pergunta ou ação concreta)
+- Se **pgfn_sem_procuracao = true**: a PGFN foi consultada sem procuração formal (API pública). Contextualize: "Encontrei uma indicação de dívida ativa de R$ X, mas para analisar os detalhes completos e as guias DAS em aberto, preciso da procuração e-CAC." Use como gancho para incentivar a procuração.
 `;
 
 /**
@@ -313,7 +330,11 @@ function detectarDebitosNoPdf(texto: string): { tem_debitos: boolean | null; res
         'DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE',
         'EM ABERTO', 'VENCIDO', 'DÍVIDA ATIVA', 'DIVIDA ATIVA',
         'GUIA EM ABERTO', 'DAS EM ABERTO', 'PARCELA EM ABERTO',
-        'VALOR DEVIDO', 'TOTAL DEVIDO', 'DEBITO'
+        'VALOR DEVIDO', 'TOTAL DEVIDO', 'DEBITO',
+        'A VENCER', 'VENCIDA', 'NAO PAGO', 'NÃO PAGO',
+        'PENDENTE DE PAGAMENTO', 'PERIODO DE APURACAO', 'PERÍODO DE APURAÇÃO',
+        'VALOR PRINCIPAL', 'VALOR ORIGINAL', 'DAS EM ATRASO', 'GUIA VENCIDA',
+        'COMPETENCIA', 'COMPETÊNCIA', 'PA EM ABERTO'
     ];
     const INDICADORES_REGULAR = [
         'SEM DÉBITO', 'SEM DEBITO', 'SEM PENDÊNCIA', 'SEM PENDENCIA',
@@ -384,15 +405,20 @@ export async function parseSerproData(envelope: unknown): Promise<{
             const DEBITO_STATUS  = ['ENVIADO A PFN', 'DEVEDOR', 'INADIMPLENTE', 'PENDENTE', 'IRREGULAR', 'DEBITO'];
             const REGULAR_STATUS = ['ADIMPLENTE', 'REGULAR', 'SEM_DEBITO', 'SEM DEBITO'];
             let temDebito = false, temRegular = false;
+            let somaValores = 0;
             for (const item of parsedDados as Array<Record<string, unknown>>) {
                 const s = String(item.situacaoDebito ?? item.situacao ?? '')
                     .toUpperCase().trim().replace(/\s+/g, ' '); // Normalize multiple spaces
-                if (DEBITO_STATUS.some(d => s.includes(d)))  { temDebito = true; break; }
+                if (DEBITO_STATUS.some(d => s.includes(d)))  { 
+                    temDebito = true; 
+                    if (item.valor) somaValores += Number(item.valor) || 0;
+                }
                 if (REGULAR_STATUS.some(d => s.includes(d))) { temRegular = true; }
             }
+            const resumo_valores = somaValores > 0 ? `Soma pendente: R$ ${somaValores.toFixed(2)}` : null;
             return {
                 tem_debitos_detectado: temDebito ? true : (temRegular ? false : null),
-                dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
+                dados: null, tem_documento_binario: false, texto_pdf: null, resumo_valores, mensagens_serpro, raw_envelope: envelope,
             };
         }
         // Array vazio → sinal definitivo vem das mensagens (ex: código 25001 = sem débitos)
@@ -469,7 +495,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
         const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
         return {
             tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
-            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
+            dados: null, tem_documento_binario: false, texto_pdf: msTexto, resumo_valores: null, mensagens_serpro, raw_envelope: envelope,
         };
     }
 
@@ -478,20 +504,38 @@ export async function parseSerproData(envelope: unknown): Promise<{
         dados.situacaoContribuinte ?? dados.situacao ?? dados.statusContribuinte ?? ''
     ).toUpperCase();
 
-    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? dados.guias ?? dados.das ?? dados.parcelas ?? dados.itens ?? dados.lista ?? null;
+    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? dados.guias ?? dados.das ?? dados.parcelas ?? dados.itens ?? dados.lista ?? dados.periodos ?? dados.competencias ?? dados.guiaVencida ?? dados.dasGerado ?? null;
     const hasGuias = Array.isArray(guiasRaw) ? guiasRaw.length > 0
         : typeof guiasRaw === 'number' ? guiasRaw > 0
         : false;
 
-    const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO'];
-    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO'];
+    // Campos numéricos indicando dívida (Serpro pode retornar valorPrincipal, valorOriginal, etc.)
+    const valorPrincipal = typeof dados.valorPrincipal === 'number' ? dados.valorPrincipal
+        : typeof dados.valorOriginal === 'number' ? dados.valorOriginal
+        : typeof dados.periodoApuracao === 'string' ? 1 // presença de período = há guia
+        : 0;
 
+    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO', 'EM DIA', 'NADA CONSTA'];
+    const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO', 'VENCID', 'EM ABERTO', 'A VENCER', 'NAO PAGO'];
+
+    // Checar REGULAR primeiro — 'SEM_DEBITO' contém 'DEBITO' como substring
     const tem_debitos_detectado =
-        INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias ? true
-        : INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
+        INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
+        : INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias || valorPrincipal > 0 ? true
         : null;
 
-    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope };
+    let resumo_valores = null;
+    if (tem_debitos_detectado) {
+        const valores = [];
+        if (valorPrincipal > 0) valores.push(`R$ ${valorPrincipal.toFixed(2)}`);
+        if (Array.isArray(guiasRaw)) {
+            const sum = guiasRaw.reduce((acc, g) => acc + (Number(g.valor) || Number(g.valorPrincipal) || 0), 0);
+            if (sum > 0) valores.push(`Soma das guias R$ ${sum.toFixed(2)}`);
+        }
+        if (valores.length > 0) resumo_valores = valores.join(', ');
+    }
+
+    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, resumo_valores, mensagens_serpro, raw_envelope: envelope };
 }
 
 export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] => [
@@ -536,7 +580,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                             return {
                                 ano,
                                 tem_debitos: parsed.tem_debitos_detectado,
-                                detalhe: parsed.texto_pdf ? parsed.texto_pdf.slice(0, 200) : undefined,
+                                detalhe: parsed.resumo_valores || (parsed.texto_pdf ? parsed.texto_pdf.slice(0, 150).replace(/\\n/g, ' ') : undefined),
                             };
                         } catch {
                             return { ano, tem_debitos: null };
@@ -585,7 +629,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     valor_divida_pgfn
                 }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
 
-                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_sem_procuracao: !!gate.bypass_reason });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }

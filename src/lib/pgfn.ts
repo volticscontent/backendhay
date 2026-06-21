@@ -266,8 +266,19 @@ function detectarDebitoPgfn(data: unknown, resumo: PgfnResumo): boolean | null {
         .replace(/[̀-ͯ]/g, '')
         .toUpperCase();
 
-    if (['NAO HA DEBITOS', 'NADA CONSTA', 'SEM DEBITO', 'SEM DEBITOS'].some(s => texto.includes(s))) return false;
+    const SEM_DEBITO_PATTERNS = [
+        'NAO HA DEBITOS', 'NADA CONSTA', 'SEM DEBITO', 'SEM DEBITOS',
+        'NAO FORAM ENCONTRAD', 'NENHUMA INSCRICAO', 'DEVEDOR NAO LOCALIZADO',
+        'NAO LOCALIZADO', 'SEM INSCRICAO', 'NENHUM REGISTRO',
+        'NAO EXISTE INSCRICAO', 'NAO EXISTEM INSCRICOES'
+    ];
+    if (SEM_DEBITO_PATTERNS.some(s => texto.includes(s))) return false;
     if (['INSCRICAO', 'DIVIDA ATIVA', 'DEVEDOR', 'DEBITO', 'AJUIZADA', 'EXIGIVEL'].some(s => texto.includes(s))) return true;
+
+    // Se não há inscrições e nenhum pattern de débito ativo foi encontrado,
+    // considerar como sem débito (evita falso 'inconclusivo')
+    if (resumo.total_inscricoes === 0) return false;
+
     return null;
 }
 
@@ -300,6 +311,22 @@ async function consultarPgfn(path: string, consulta: 'devedor' | 'inscricao', pa
     } catch (error) {
         const message = String(error instanceof Error ? error.message : error);
         if (!forceRefresh && message.includes('401')) return consultarPgfn(path, consulta, parametro, true);
+
+        // PGFN 404 = devedor não encontrado = sem dívida ativa inscrita
+        if (message.includes('404')) {
+            const emptyResumo = buildPgfnResumo(null, []);
+            return {
+                status: 'success',
+                origem: 'pgfn_api',
+                consulta,
+                parametro,
+                dados: null,
+                tem_debitos_detectado: false,
+                mensagens_pgfn: ['Devedor não localizado na base da PGFN (HTTP 404).'],
+                resumo: emptyResumo,
+            };
+        }
+
         throw error;
     }
 }
