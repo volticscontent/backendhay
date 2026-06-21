@@ -142,7 +142,7 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
         }
 
         const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
-            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'regime',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
@@ -653,7 +653,7 @@ export async function getClientDataWithFreshness(phone: string): Promise<string>
         const leadRes = await query(`
             SELECT
                 l.id, l.telefone, l.nome_completo, l.email, l.cpf,
-                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal, l.regime,
                 l.tem_divida, l.tipo_divida, l.valor_divida_federal, l.valor_divida_pgfn,
                 l.situacao, l.qualificacao, l.atualizado_em,
                 lp.servico, lp.status_atendimento, lp.procuracao_ativa,
@@ -734,6 +734,7 @@ export async function getClientDataWithFreshness(phone: string): Promise<string>
                     razao_social: lead.razao_social,
                     tipo_negocio: lead.tipo_negocio,
                     faturamento_mensal: lead.faturamento_mensal,
+                    regime: lead.regime,
                     tem_divida: lead.tem_divida,
                     tipo_divida: lead.tipo_divida,
                     valor_divida_federal: lead.valor_divida_federal,
@@ -1168,7 +1169,7 @@ export async function sendMessageSegment(phone: string, segment: MessageSegment)
 export async function getUpdatableFields() {
     const tableMappings: Record<string, string[]> = {
         leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo',
-            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'regime',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',

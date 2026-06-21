@@ -236,6 +236,12 @@ async function runMigrations() {
         SET type = 'link', updated_at = NOW()
         WHERE key = 'video_ecac' AND type = 'media';
     `);
+
+    // ── Regime tributário no lead (coletado conversacionalmente pelo Apolo) ──
+    // O Apolo chama update_user(regime=...); sem esta coluna a escrita era descartada.
+    await pool.query(`
+        ALTER TABLE leads ADD COLUMN IF NOT EXISTS regime VARCHAR(20);
+    `);
 }
 
 // ==================== Inicialização ====================

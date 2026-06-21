@@ -32,7 +32,7 @@ export async function prepareAgentContext(context: AgentContext): Promise<Shared
         if (parsed.status !== 'error' && parsed.status !== 'not_found') {
             const allowedKeys = [
                 'telefone', 'nome_completo', 'email', 'cpf', 'situacao', 'qualificacao',
-                'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio',
+                'observacoes', 'faturamento_mensal', 'regime', 'tem_divida', 'tipo_negocio',
                 'possui_socio', 'sexo', 'cnpj', 'empresas',
                 'razao_social', 'tipo_divida', 'valor_divida_federal'
             ];
@@ -110,6 +110,8 @@ QUANDO RED-FLAG: situacao=red_flag + motivo_qualificacao com o tipo (PROCURACAO_
                     },
                     observacoes: { type: 'string', description: 'Resumo BANT para o Haylander: necessidade declarada, urgência, capacidade de pagamento, próximo passo.' },
                     faturamento_mensal: { type: 'string' },
+                    regime: { type: 'string', description: 'Regime tributário do cliente: MEI, Simples Nacional, Lucro Presumido, etc.' },
+                    senha_gov: { type: 'string', description: 'Senha Gov.br do cliente. Sensível — armazenada criptografada. Colete apenas na Opção B (atendimento humano sem procuração e-CAC).' },
                     tipo_negocio: { type: 'string' },
                     tem_divida: { type: 'boolean' },
                     tipo_divida: { type: 'string' },
