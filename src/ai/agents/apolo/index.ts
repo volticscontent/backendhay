@@ -5,7 +5,6 @@ import { BASE_PROMPT } from './prompt';
 import { COMERCIAL_RULES, getComercialTools } from './workflow-comercial';
 import { REGULARIZACAO_RULES, getRegularizacaoTools } from './workflow-regularizacao';
 import { SUPORTE_RULES, getSuporteTools } from './workflow-suporte';
-import { sendForm } from '../../server-tools';
 import { query } from '../../../lib/db';
 
 const DEFAULT_ECAC_TUTORIAL_LINK = 'https://www.instagram.com/reel/DWquc43Cdnm/?igsh=OXlzc2ZzNDVvaHU5';
@@ -50,13 +49,9 @@ export async function runApoloAgent(message: AgentMessage, context: AgentContext
         ...getComercialTools(context),
         ...getRegularizacaoTools(context),
         ...getSuporteTools(context),
-        // Adicionando a tool perdida do apolo
-        {
-            name: 'enviar_formulario',
-            description: 'Enviar link do formulário seguro.',
-            parameters: { type: 'object', properties: { observacao: { type: 'string' } } },
-            function: async (args: any) => await sendForm(context.userPhone, args.observacao)
-        }
+        // Formulário web externo DESCONTINUADO: a coleta de dados agora é 100% conversacional
+        // (ver workflow-regularizacao: concluir_cadastro_fechamento). A tool 'enviar_formulario'
+        // foi removida para o modelo nunca mais enviar o link do Vercel.
     ];
 
     const tools = [...getSharedTools(context), ...customTools];

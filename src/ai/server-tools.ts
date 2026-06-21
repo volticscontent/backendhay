@@ -153,6 +153,13 @@ export async function updateUser(data: Record<string, unknown>): Promise<string>
             'procuracao_ativa', 'procuracao_validade', 'cliente', 'atendente_id',
             'envio_disparo', 'observacoes'];
 
+        // Alerta de perda silenciosa: campos que não são persistidos por nenhum caminho.
+        const knownKeys = new Set([...leadsFields, ...processoFields, 'senha_gov', 'cnpj_adicionar', 'cnpj_ativo']);
+        const ignored = Object.keys(normalizedFields).filter(k => !knownKeys.has(k));
+        if (ignored.length > 0) {
+            log.warn(`[updateUser] Campos ignorados (não persistidos) para ${telefone}: ${ignored.join(', ')}`);
+        }
+
         // --- Update leads ---
         const leadsSetClauses: string[] = [];
         const leadsValues: unknown[] = [];

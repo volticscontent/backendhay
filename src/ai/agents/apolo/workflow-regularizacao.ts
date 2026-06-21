@@ -1,11 +1,12 @@
 import pdfParse from 'pdf-parse';
 import { ToolDefinition } from '../../openai-client';
-import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser, updateUser } from '../../server-tools';
+import { checkProcuracaoStatus, markProcuracaoCompleted, checkCnpjSerpro, consultarProcuracaoSerpro, trackResourceDelivery, sendMessageSegment, getUser, updateUser, callAttendant } from '../../server-tools';
 import pool from '../../../lib/db';
 import redis from '../../../lib/redis';
-import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, createAssistidoMessageSegments, createSituacaoFormSegments, MessageSegment } from '../../regularizacao-system';
+import { createRegularizacaoMessageSegments, createAutonomoMessageSegments, MessageSegment } from '../../regularizacao-system';
 import { AgentContext } from '../../types';
 import { consultarDividaAtivaPorDevedor } from '../../../lib/pgfn';
+import { auditarCadastroCompleto } from './closing-audit';
 
 async function processMessageSegments(phone: string, segments: MessageSegment[], sender: (segment: MessageSegment) => Promise<void>): Promise<void> {
     for (const segment of segments) {
@@ -201,13 +202,13 @@ export const REGULARIZACAO_RULES = `
 # Regras de Regularização e Conformidade Serpro
 ### Fluxo de Regularização (Dívidas, PGMEI, Abertura/Baixa)
 Se o cliente mencionar dívidas, pendências, boleto atrasado ou regularização:
-1. **NÃO ENVIE O FORMULÁRIO AINDA.**
+1. **NÃO existe mais formulário web.** Toda a coleta de dados é conversacional, feita por você (ver seção "FECHAMENTO E COLETA DE DADOS").
 2. Use a tool 'iniciar_fluxo_regularizacao' para introduzir o processo de forma natural.
 3. Aguarde a resposta do cliente (Opção A ou Opção B):
    - **Se Opção A (Procuração e-CAC):** Use 'enviar_processo_autonomo'. Após o cliente confirmar que concluiu, use 'verificar_serpro_pos_ecac' IMEDIATAMENTE.
      - Sucesso → chame 'marcar_procuracao_concluida' e em seguida 'consultar_pgmei_serpro'.
      - Falha → peça print do e-CAC.
-   - **Se Opção B (recusou e-CAC / prefere WhatsApp):** Use 'iniciar_coleta_situacao_whatsapp'. Em seguida, colete os dados conversacionalmente na seguinte ordem: CNPJ, Razão Social, CPF do empresário, faturamento mensal, se tem dívidas e quais. Salve cada informação obtida com update_user. Ao concluir (CNPJ + faturamento + tem_divida coletados), acione 'enviar_link_reuniao' proativamente.
+   - **Se Opção B (recusou e-CAC / prefere WhatsApp):** Use 'iniciar_coleta_situacao_whatsapp'. Em seguida, colete os dados conversacionalmente: CNPJ, Razão Social, CPF do empresário, E-mail, faturamento mensal, se tem dívidas e quais. Salve cada informação obtida com update_user. Quando o cliente aprovar fechar o serviço, finalize com 'concluir_cadastro_fechamento' (passando opcao_b=true). **NÃO acione 'enviar_link_reuniao' neste fluxo** — o fechamento é automático.
 
 ### COLETA INTELIGENTE DE DADOS DA EMPRESA E CADASTRO (MANDATÓRIO)
 Sempre que um lead entrar no fluxo de Regularização, Contabilidade ou iniciar o processo de Procuração, VOCÊ DEVE OBRIGATORIAMENTE coletar os dados da empresa.
@@ -252,11 +253,11 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
 ### FECHAMENTO E COLETA DE DADOS (FORMULÁRIO INVISÍVEL/CONVERSACIONAL)
 Os formulários externos foram DESCONTINUADOS. Você, Apolo, atuará como um formulário inteligente e conversacional.
 Assim que o cliente aprovar seguir com a regularização das pendências, siga este fluxo:
-1. **Auditoria de Dados:** Analise silenciosamente a tag `<user_data>`. Para concluir o cadastro e gerar a ata de fechamento, precisamos ter no banco: **Nome/Razão Social, CNPJ, CPF, Telefone e E-mail**. (E **Senha GOV** *apenas* se o cliente estiver seguindo a Opção B - Atendimento Humano sem procuração).
-2. **Dados Existentes:** Vários desses dados (como Razão Social, CNPJ e CPF) já podem estar no banco porque vieram das próprias consultas Serpro/CCMEI. Não pergunte do zero aquilo que você já sabe; se for o caso, peça apenas confirmação de forma natural.
-3. **Coleta Progressiva:** Se algum dado essencial (como o E-mail) não estiver no `<user_data>`, pergunte de forma amigável: *"Excelente! Para formalizarmos o serviço e eu preparar a sua ata de fechamento, me confirma só o seu [DADO FALTANTE]?"*. Pergunte UMA COISA POR VEZ.
-4. **Atualização Imediata:** Salve imediatamente a resposta usando a tool `update_user` (ex: `update_user(email='cliente@...`, `cpf='...'`).
-5. **Ata de Fechamento:** Assim que **todos** os dados estiverem presentes na ficha do cliente, avise-o que o cadastro está pronto e registre internamente: `update_user(observacoes='Cadastro completo. Ata de fechamento pronta para faturamento e integração.')`. Mantenha o cliente engajado para os próximos passos.
+1. **Lista canônica de campos obrigatórios para fechar:** **Nome/Razão Social, CNPJ, CPF e E-mail** (o Telefone já é conhecido). A **Senha GOV** só é obrigatória na Opção B (atendimento humano sem procuração e-CAC).
+2. **Auditoria de Dados:** Analise silenciosamente a tag \`<user_data>\` (que já inclui cpf, email, cnpj, razao_social, nome_completo). Se tiver dúvida sobre o que já existe no banco, chame \`consultar_dados_cliente\`.
+3. **Dados Existentes:** Vários desses dados (Razão Social, CNPJ, CPF) já podem ter vindo das consultas Serpro/CCMEI. Não pergunte do zero aquilo que já está preenchido; se precisar, peça apenas confirmação de forma natural.
+4. **Coleta Progressiva:** Para cada dado faltante (ex: E-mail), pergunte de forma amigável — UMA COISA POR VEZ: *"Excelente! Para formalizarmos o serviço e eu preparar a sua ata de fechamento, me confirma só o seu [DADO FALTANTE]?"*. Salve cada resposta na hora com \`update_user\` (ex: \`update_user(email='cliente@...')\`, \`update_user(cpf='...')\`).
+5. **Fechamento (Ata):** Quando achar que coletou tudo, chame \`concluir_cadastro_fechamento\` com \`servico_fechado\` (o que foi acordado) e \`opcao_b\` se aplicável. A tool audita o banco: se ainda faltar algo, ela devolve a lista — volte ao passo 4 e colete o que falta. Se estiver completo, ela marca o lead como **pronto_faturamento** e **notifica o Haylander** automaticamente. **Nunca** grave manualmente "cadastro completo" em observacoes nem envie link de reunião neste fluxo — a tool faz tudo.
 
 #### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
 A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Campos principais:
@@ -373,6 +374,7 @@ export async function parseSerproData(envelope: unknown): Promise<{
     dados: Record<string, unknown> | null;
     tem_documento_binario: boolean;
     texto_pdf: string | null;
+    resumo_valores?: string | null;
     mensagens_serpro: string[];
     raw_envelope: unknown;
 }> {
@@ -759,7 +761,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
     // ── Opção B: coleta in-chat ──────────────────────────────────────────────────
     {
         name: 'iniciar_coleta_situacao_whatsapp',
-        description: 'Inicia coleta conversacional de dados do lead pelo WhatsApp quando o cliente recusa a Opção A (e-CAC). Envia mensagem de boas-vindas e instrui o agente a coletar CNPJ, Razão Social, faturamento e dívidas via update_user. Ao concluir a coleta, acione enviar_link_reuniao.',
+        description: 'Inicia coleta conversacional de dados do lead pelo WhatsApp quando o cliente recusa a Opção A (e-CAC). Instrui o agente a coletar CNPJ, Razão Social, CPF, E-mail, faturamento e dívidas via update_user. Quando o cliente aprovar fechar o serviço, finalize com concluir_cadastro_fechamento (opcao_b=true).',
         parameters: { type: 'object', properties: {} },
         function: async () => {
             try {
@@ -774,7 +776,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 if (leadId) await trackResourceDelivery(leadId, 'situacao-form-whatsapp', 'started');
                 return JSON.stringify({
                     status: 'success',
-                    next_steps: 'Faça perguntas conversacionais para coletar: CNPJ, Razão Social, CPF empresário, faturamento_mensal, tem_divida, detalhes dívidas. Salve cada resposta com update_user. Ao concluir CNPJ + faturamento + tem_divida, acione enviar_link_reuniao.'
+                    next_steps: 'Faça perguntas conversacionais, UMA por vez, para coletar: CNPJ, Razão Social, CPF empresário, E-mail, faturamento_mensal, tem_divida, detalhes dívidas. Salve cada resposta com update_user. Quando o cliente aprovar fechar o serviço, finalize com concluir_cadastro_fechamento (opcao_b=true). NÃO use enviar_link_reuniao.'
                 });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
@@ -961,6 +963,78 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
 
                 const dados = (typeof dadosRaw === 'string' ? JSON.parse(dadosRaw) : dadosRaw);
                 return JSON.stringify({ status: 'success', dados });
+            } catch (error) {
+                return JSON.stringify({ status: 'error', message: String(error) });
+            }
+        }
+    },
+
+    // ── Fechamento: gera a ata e entrega o lead pronto para o Haylander faturar ────
+    {
+        name: 'concluir_cadastro_fechamento',
+        description: 'FECHAMENTO. Chame quando o cliente aprovou o serviço e você acredita ter coletado todos os dados obrigatórios (Nome/Razão Social, CNPJ, CPF, E-mail). A tool audita a ficha no banco: se faltar algo, retorna a lista de campos para você continuar a coleta conversacional (UMA pergunta por vez). Se estiver completa, marca o lead como pronto_faturamento e notifica o Haylander com a ata. NÃO envie link de reunião neste fluxo.',
+        parameters: {
+            type: 'object',
+            properties: {
+                servico_fechado: { type: 'string', description: 'O que foi acordado com o cliente (ex: "Regularização MEI — DAS 2021 a 2023" ou "Abertura de empresa").' },
+                opcao_b: { type: 'boolean', description: 'true se o cliente seguiu a Opção B (atendimento humano sem procuração e-CAC). Nesse caso a Senha GOV também é obrigatória.' }
+            },
+            required: ['servico_fechado']
+        },
+        function: async (args: any) => {
+            try {
+                const ud = await getUser(context.userPhone);
+                if (!ud) return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                const lead = JSON.parse(ud) as Record<string, unknown>;
+                if (lead.status === 'error' || lead.status === 'not_found') {
+                    return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                }
+
+                const precisaSenhaGov = args.opcao_b === true || args.opcao_b === 'true';
+                const { completo, faltando } = auditarCadastroCompleto(lead, precisaSenhaGov);
+
+                if (!completo) {
+                    return JSON.stringify({
+                        status: 'incompleto',
+                        faltando,
+                        next_steps: `Ainda faltam dados para fechar: ${faltando.join(', ')}. Peça-os de forma conversacional, UMA pergunta por vez, e salve cada resposta com update_user. Depois chame concluir_cadastro_fechamento de novo. NÃO chame enviar_link_reuniao.`
+                    });
+                }
+
+                const servico = String(args.servico_fechado || 'Serviço de regularização');
+                const observacao = `✅ CADASTRO COMPLETO — Ata de fechamento pronta para faturamento. Serviço: ${servico}.`;
+
+                // Não marcamos situacao='cliente' aqui: o pagamento ainda não foi confirmado.
+                // O sinal de "pronto para faturar" é o status_atendimento — Haylander marca
+                // cliente após a cobrança.
+                await updateUser({
+                    telefone: context.userPhone,
+                    servico,
+                    status_atendimento: 'pronto_faturamento',
+                    observacoes: observacao,
+                });
+
+                const nome = (lead.nome_completo || lead.razao_social || 'Cliente') as string;
+                const dividaInfo = lead.tem_divida
+                    ? `Dívida: ${lead.tipo_divida || 'sim'}${lead.valor_divida_pgfn ? ` (R$ ${lead.valor_divida_pgfn})` : ''}`
+                    : 'Sem dívida registrada';
+                const ata = `💰 LEAD PRONTO PARA FATURAR\n\n` +
+                    `Cliente: ${nome}\n` +
+                    `Telefone: ${context.userPhone}\n` +
+                    `CNPJ: ${lead.cnpj}\n` +
+                    `CPF: ${lead.cpf}\n` +
+                    `E-mail: ${lead.email}\n` +
+                    `Serviço fechado: ${servico}\n` +
+                    `${dividaInfo}\n\n` +
+                    `Ação: cadastro completo e procuração/dados ok. Só falta cobrar o pagamento.`;
+
+                await callAttendant(context.userPhone, ata);
+
+                return JSON.stringify({
+                    status: 'success',
+                    message: 'Cadastro fechado, lead marcado como pronto_faturamento e Haylander notificado.',
+                    next_steps: 'Avise o cliente que o cadastro está pronto e o processo foi oficialmente iniciado. Mantenha-o engajado para a etapa de pagamento. NÃO envie link de reunião.'
+                });
             } catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
             }

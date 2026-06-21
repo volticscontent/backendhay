@@ -31,7 +31,7 @@ export async function prepareAgentContext(context: AgentContext): Promise<Shared
         const parsed = JSON.parse(userDataJson);
         if (parsed.status !== 'error' && parsed.status !== 'not_found') {
             const allowedKeys = [
-                'telefone', 'nome_completo', 'email', 'situacao', 'qualificacao',
+                'telefone', 'nome_completo', 'email', 'cpf', 'situacao', 'qualificacao',
                 'observacoes', 'faturamento_mensal', 'tem_divida', 'tipo_negocio',
                 'possui_socio', 'sexo', 'cnpj', 'empresas',
                 'razao_social', 'tipo_divida', 'valor_divida_federal'
