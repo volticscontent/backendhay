@@ -49,5 +49,19 @@ export interface SerproOptions {
     protocoloRelatorio?: string;
     /** CPF do contribuinte (11 dígitos). Usado pelo SITFIS que consulta por CPF, não CNPJ. */
     cpf?: string;
+    /**
+     * PGMEI_ATU_BENEFICIO (ATUBENEFICIO23): meses do ano-calendário em que houve benefício
+     * previdenciário. Obrigatório para esse serviço. Ex: [{ periodoApuracao: '202401', indicadorBeneficio: true }].
+     */
+    infoBeneficio?: Array<{
+        periodoApuracao: string;
+        indicadorBeneficio: boolean;
+    }>;
+    /**
+     * Autoriza serviços de ESCRITA na Receita (ex: PGMEI_ATU_BENEFICIO, que altera a declaração
+     * de benefício do MEI). O atendimento automatizado (Apolo) NUNCA envia esta flag — só o painel
+     * admin a envia, e apenas após confirmação explícita do operador (Haylander).
+     */
+    permitirEscrita?: boolean;
 }
 //# sourceMappingURL=serpro-types.d.ts.map

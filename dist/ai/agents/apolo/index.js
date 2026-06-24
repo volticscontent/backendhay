@@ -7,7 +7,6 @@ const prompt_1 = require("./prompt");
 const workflow_comercial_1 = require("./workflow-comercial");
 const workflow_regularizacao_1 = require("./workflow-regularizacao");
 const workflow_suporte_1 = require("./workflow-suporte");
-const server_tools_1 = require("../../server-tools");
 const db_1 = require("../../../lib/db");
 const DEFAULT_ECAC_TUTORIAL_LINK = 'https://www.instagram.com/reel/DWquc43Cdnm/?igsh=OXlzc2ZzNDVvaHU5';
 async function getEcacTutorialLink() {
@@ -47,13 +46,9 @@ async function runApoloAgent(message, context) {
         ...(0, workflow_comercial_1.getComercialTools)(context),
         ...(0, workflow_regularizacao_1.getRegularizacaoTools)(context),
         ...(0, workflow_suporte_1.getSuporteTools)(context),
-        // Adicionando a tool perdida do apolo
-        {
-            name: 'enviar_formulario',
-            description: 'Enviar link do formulário seguro.',
-            parameters: { type: 'object', properties: { observacao: { type: 'string' } } },
-            function: async (args) => await (0, server_tools_1.sendForm)(context.userPhone, args.observacao)
-        }
+        // Formulário web externo DESCONTINUADO: a coleta de dados agora é 100% conversacional
+        // (ver workflow-regularizacao: concluir_cadastro_fechamento). A tool 'enviar_formulario'
+        // foi removida para o modelo nunca mais enviar o link do Vercel.
     ];
     const tools = [...(0, shared_agent_1.getSharedTools)(context), ...customTools];
     return (0, openai_client_1.runAgent)(systemPrompt, message, context, tools);

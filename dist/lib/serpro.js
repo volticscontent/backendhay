@@ -207,20 +207,36 @@ async function getSerproTokens(forceRefresh = false) {
     }, postData);
     const raw = response;
     if (raw.access_token && raw.jwt_token) {
+        // Usa o expires_in REAL do Serpro (~1h) com margem de 60s, limitado à meia-noite BRT
+        // (a Serpro também invalida o token na virada do dia). Antes assumíamos só nextMidnightBRT(),
+        // o que mantinha o token "vivo" no cache por até 24h enquanto a Serpro já o havia expirado —
+        // gerando 401 garantido na 1ª chamada após ~1h e thundering herd em consultas paralelas.
+        const expiresIn = Number(raw.expires_in) || 3300;
+        const byExpiresIn = Date.now() + Math.max(expiresIn - 60, 60) * 1000;
         cachedTokens = {
             access_token: raw.access_token,
             jwt_token: raw.jwt_token,
-            expiresAt: nextMidnightBRT(),
+            expiresAt: Math.min(byExpiresIn, nextMidnightBRT()),
         };
         logger_1.serproLogger.info(`Tokens Serpro renovados. Expiram em: ${new Date(cachedTokens.expiresAt).toISOString()}`);
         return cachedTokens;
     }
     throw new Error('Falha ao recuperar tokens do SERPRO');
 }
+/**
+ * Serviços de ESCRITA na Receita (alteram dados do contribuinte, não apenas consultam/emitem documento).
+ * Exigem options.permitirEscrita === true para serem acionados. O atendimento automatizado (Apolo)
+ * nunca envia essa flag, então fica bloqueado por padrão; apenas o painel admin (Haylander), após
+ * confirmação explícita, a envia.
+ */
+const MUTATION_SERVICES = new Set(['PGMEI_ATU_BENEFICIO']);
 async function consultarServico(nomeServico, cnpj, options = {}) {
     const config = serpro_config_1.SERVICE_CONFIG[nomeServico];
     if (!config)
         throw new Error(`Serviço ${nomeServico} não configurado`);
+    if (MUTATION_SERVICES.has(nomeServico) && options.permitirEscrita !== true) {
+        throw new Error(`Operação de escrita "${nomeServico}" bloqueada: requer autorização explícita (permitirEscrita). Não disponível para atendimento automatizado.`);
+    }
     const idSistema = process.env[config.env_sistema] || config.default_sistema;
     const idServico = process.env[config.env_servico] || config.default_servico;
     // Warn when PGFN_CONSULTAR or DIVIDA_ATIVA fall back to DIVIDAATIVA24 (env vars not configured)
@@ -288,12 +304,31 @@ async function consultarServico(nomeServico, cnpj, options = {}) {
             delete dadosServico.mes;
         }
     }
+    // PGMEI_ATU_BENEFICIO (ATUBENEFICIO23): payload exige anoCalendario (número) + infoBeneficio (lista de meses).
+    if (nomeServico === 'PGMEI_ATU_BENEFICIO') {
+        const info = options.infoBeneficio;
+        if (!Array.isArray(info) || info.length === 0) {
+            throw new Error('HTTP 400: PGMEI_ATU_BENEFICIO requer infoBeneficio — lista de { periodoApuracao: "AAAAMM", indicadorBeneficio: boolean }.');
+        }
+        for (const item of info) {
+            if (!/^\d{6}$/.test(String(item?.periodoApuracao ?? '')) || typeof item?.indicadorBeneficio !== 'boolean') {
+                throw new Error('HTTP 400: infoBeneficio inválido — cada item precisa de periodoApuracao "AAAAMM" e indicadorBeneficio boolean.');
+            }
+        }
+        dadosServico.anoCalendario = Number(options.ano) || new Date().getFullYear();
+        delete dadosServico.mes;
+        dadosServico.infoBeneficio = info;
+    }
     if (nomeServico === 'CAIXA_POSTAL') {
         delete dadosServico.cnpj;
         delete dadosServico.ano;
         delete dadosServico.mes;
         dadosServico.cnpjReferencia = cnpjNumero;
-        dadosServico.statusLeitura = options.statusLeitura || 'T'; // T=Todas, N=Não Lidas, L=Lidas
+        // Serpro exige 1 dígito: 0=Todas, 1=Lidas, 2=Não Lidas. (Letras como 'T' são rejeitadas com HTTP 400.)
+        const LEITURA_LEGADO = { T: '0', L: '1', N: '2' };
+        const leituraRaw = options.statusLeitura ? String(options.statusLeitura).trim().toUpperCase() : '0';
+        const leitura = LEITURA_LEGADO[leituraRaw] ?? leituraRaw;
+        dadosServico.statusLeitura = /^[0-2]$/.test(leitura) ? leitura : '0';
         dadosServico.indicadorPagina = options.indicadorPagina || '1';
     }
     if (options.numeroDas) {

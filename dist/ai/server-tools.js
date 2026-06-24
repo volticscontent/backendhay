@@ -204,7 +204,7 @@ async function updateUser(data) {
             delete normalizedFields['cnpj_ativo'];
         }
         const leadsFields = ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'sexo',
-            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'regime',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',
@@ -213,6 +213,12 @@ async function updateUser(data) {
         const processoFields = ['servico', 'status_atendimento', 'data_reuniao', 'procuracao',
             'procuracao_ativa', 'procuracao_validade', 'cliente', 'atendente_id',
             'envio_disparo', 'observacoes'];
+        // Alerta de perda silenciosa: campos que não são persistidos por nenhum caminho.
+        const knownKeys = new Set([...leadsFields, ...processoFields, 'senha_gov', 'cnpj_adicionar', 'cnpj_ativo']);
+        const ignored = Object.keys(normalizedFields).filter(k => !knownKeys.has(k));
+        if (ignored.length > 0) {
+            log.warn(`[updateUser] Campos ignorados (não persistidos) para ${telefone}: ${ignored.join(', ')}`);
+        }
         // --- Update leads ---
         const leadsSetClauses = [];
         const leadsValues = [];
@@ -404,15 +410,34 @@ async function sendEnumeratedList(phone) {
 }
 // ==================== Atendente ====================
 async function callAttendant(phone, reason = 'Solicitação do cliente') {
+    const { getNextAvailableSlot } = await Promise.resolve().then(() => __importStar(require('../lib/business-hours')));
+    const now = new Date();
+    const scheduledDate = getNextAvailableSlot(now, 30);
+    const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    // 1. Notificação WhatsApp — executada PRIMEIRO, independente do BD
+    const attendantNumber = process.env.ATTENDANT_PHONE;
+    let evoLog = null;
+    if (attendantNumber) {
+        try {
+            const text = `🔔 *Solicitação de Atendimento*\n\n` +
+                `👤 *Cliente:* ${phone}\n` +
+                `📝 *Motivo:* ${reason}\n` +
+                `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
+                `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
+            evoLog = await (0, evolution_1.evolutionSendTextMessage)((0, utils_1.toWhatsAppJid)(attendantNumber), text);
+            log.info(`[callAttendant] Atendente notificado via WhatsApp (${attendantNumber})`);
+        }
+        catch (evoErr) {
+            log.error('[callAttendant] Falha ao enviar WhatsApp para atendente:', evoErr);
+        }
+    }
+    else {
+        log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
+    }
+    // 2. Persistência no BD — best-effort (BD pode estar fora do ar)
     try {
-        const { getNextAvailableSlot } = await Promise.resolve().then(() => __importStar(require('../lib/business-hours')));
-        const now = new Date();
-        const scheduledDate = getNextAvailableSlot(now, 30);
-        const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const formattedDate = scheduledDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-        // 1. Atualizar lead para sinalizar necessidade de humano
         await (0, db_2.query)(`UPDATE leads SET needs_attendant = true, attendant_requested_at = NOW() WHERE telefone = $1`, [phone]);
-        // 2. Tentar obter ID do lead para marcar na leads_processo
         const leadRes = await (0, db_2.query)(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
         if (leadRes.rows.length > 0) {
             const leadId = leadRes.rows[0].id;
@@ -425,41 +450,33 @@ async function callAttendant(phone, reason = 'Solicitação do cliente') {
                     updated_at         = NOW()
             `, [leadId, scheduledDate]);
         }
-        await redis_1.default.set(`attendant_requested:${phone}`, reason, 'EX', 86400); // 24h
-        // Notificar via WebSocket para o painel (ChatInterface/Frontend) atualizar realtime
-        try {
-            const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
-            await notifySocketServer('haylander-chat-updates', {
-                type: 'attendant-requested',
-                phone: phone,
-                reason: reason
-            });
-        }
-        catch (socketErr) {
-            log.warn('Erro ao notificar socket sobre request de atendente:', socketErr);
-        }
-        const attendantNumber = process.env.ATTENDANT_PHONE;
-        if (attendantNumber) {
-            const text = `🔔 *Solicitação de Atendimento*\n\n` +
-                `👤 *Cliente:* ${phone}\n` +
-                `📝 *Motivo:* ${reason}\n` +
-                `📅 *Agendado para:* ${formattedDate} às ${formattedTime}\n` +
-                `🔗 *Chat:* https://wa.me/${phone.replace(/\D/g, '')}`;
-            const evoLog = await (0, evolution_1.evolutionSendTextMessage)((0, utils_1.toWhatsAppJid)(attendantNumber), text);
-            log.info(`[callAttendant] Evolution response for notifying attendant (${attendantNumber}):`, { evolution_log: evoLog });
-            return JSON.stringify({
-                status: 'success',
-                message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`,
-                evolution_log: evoLog
-            });
-        }
-        log.warn('Atenção: Atendente solicitado, mas ATTENDANT_PHONE não está configurado no .env.');
-        return JSON.stringify({ status: 'success', message: 'Solicitação registrada. Aguarde um momento.' });
     }
-    catch (error) {
-        log.error('callAttendant error:', error);
-        return JSON.stringify({ status: 'error', message: String(error) });
+    catch (dbErr) {
+        log.error('[callAttendant] Falha ao persistir no BD (BD pode estar fora):', dbErr);
     }
+    // 3. Redis e Socket — best-effort
+    try {
+        await redis_1.default.set(`attendant_requested:${phone}`, reason, 'EX', 86400);
+    }
+    catch (redisErr) {
+        log.error('[callAttendant] Falha ao gravar no Redis:', redisErr);
+    }
+    try {
+        const { notifySocketServer } = await Promise.resolve().then(() => __importStar(require('../lib/socket')));
+        await notifySocketServer('haylander-chat-updates', {
+            type: 'attendant-requested',
+            phone: phone,
+            reason: reason
+        });
+    }
+    catch (socketErr) {
+        log.warn('Erro ao notificar socket sobre request de atendente:', socketErr);
+    }
+    return JSON.stringify({
+        status: 'success',
+        message: `Atendente notificado. Atendimento agendado para as ${formattedTime}. Aguarde um momento.`,
+        evolution_log: evoLog,
+    });
 }
 // ==================== Context & Services ====================
 async function contextRetrieve(phone, limit = 30) {
@@ -675,7 +692,7 @@ async function getClientDataWithFreshness(phone) {
         const leadRes = await (0, db_2.query)(`
             SELECT
                 l.id, l.telefone, l.nome_completo, l.email, l.cpf,
-                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
+                l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal, l.regime,
                 l.tem_divida, l.tipo_divida, l.valor_divida_federal, l.valor_divida_pgfn,
                 l.situacao, l.qualificacao, l.atualizado_em,
                 lp.servico, lp.status_atendimento, lp.procuracao_ativa,
@@ -751,6 +768,7 @@ async function getClientDataWithFreshness(phone) {
                     razao_social: lead.razao_social,
                     tipo_negocio: lead.tipo_negocio,
                     faturamento_mensal: lead.faturamento_mensal,
+                    regime: lead.regime,
                     tem_divida: lead.tem_divida,
                     tipo_divida: lead.tipo_divida,
                     valor_divida_federal: lead.valor_divida_federal,
@@ -1120,7 +1138,7 @@ async function sendMessageSegment(phone, segment) {
 async function getUpdatableFields() {
     const tableMappings = {
         leads: ['nome_completo', 'email', 'cpf', 'data_nascimento', 'nome_mae', 'senha_gov', 'sexo',
-            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal',
+            'cnpj', 'razao_social', 'nome_fantasia', 'tipo_negocio', 'faturamento_mensal', 'regime',
             'endereco', 'numero', 'complemento', 'bairro', 'cidade', 'estado', 'cep',
             'situacao', 'qualificacao', 'motivo_qualificacao', 'interesse_ajuda',
             'pos_qualificacao', 'possui_socio', 'confirmacao_qualificacao',

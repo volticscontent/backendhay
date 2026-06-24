@@ -11,6 +11,7 @@ const db_1 = __importDefault(require("../../../lib/db"));
 const redis_1 = __importDefault(require("../../../lib/redis"));
 const regularizacao_system_1 = require("../../regularizacao-system");
 const pgfn_1 = require("../../../lib/pgfn");
+const closing_audit_1 = require("./closing-audit");
 async function processMessageSegments(phone, segments, sender) {
     for (const segment of segments) {
         if (segment.delay && segment.delay > 0) {
@@ -39,7 +40,7 @@ async function resolveUserCnpjAndProcuracaoStatus(userData, callerPhone) {
         return { ok: false, message: 'CNPJ não localizado. Peça ao cliente para confirmar os dados cadastrais (use update_user com o campo cnpj).' };
     }
     if (isAdmin)
-        return { ok: true, cnpj };
+        return { ok: true, cnpj, bypass_reason: 'admin' };
     // Verifica se é empresa principal ou adicional
     const isPrincipal = !redisCnpjAtivo ||
         redisCnpjAtivo.replace(/\D/g, '') === (leadRow.cnpj || '').replace(/\D/g, '');
@@ -73,7 +74,7 @@ async function resolveUserCnpjAndProcuracaoStatus(userData, callerPhone) {
         }
         catch {
             // Serpro indisponível — não bloqueia, deixa passar
-            return { ok: true, cnpj };
+            return { ok: true, cnpj, bypass_reason: 'serpro_down' };
         }
         return {
             ok: false,
@@ -132,18 +133,22 @@ function formatServicoResult(anoConsultas) {
     const situacao = anos_com_debito.length > 0 ? 'COM_DEBITO'
         : anos_inconclusivos.length > 0 ? 'INCONCLUSIVO'
             : 'SEM_DEBITO';
+    const detalhes = anoConsultas.filter(a => a.detalhe).map(a => `${a.ano}: ${a.detalhe}`).join(' | ');
     return {
         situacao,
         anos_consultados: anoConsultas.map(r => r.ano),
         anos_com_debito,
         anos_sem_debito,
         anos_inconclusivos,
+        detalhes: detalhes || undefined,
     };
 }
 function buildResumoExecutivo(pgmei, pgfn, pgfnResumo) {
     const linhas = [];
     if (pgmei.situacao === 'COM_DEBITO') {
         linhas.push(`PGMEI (guias DAS): débitos detectados em ${pgmei.anos_com_debito.join(', ')}`);
+        if (pgmei.detalhes)
+            linhas.push(`  Detalhes PGMEI: ${pgmei.detalhes}`);
     }
     else if (pgmei.situacao === 'SEM_DEBITO') {
         linhas.push(`PGMEI (guias DAS): situação regular em todos os anos consultados`);
@@ -166,13 +171,13 @@ exports.REGULARIZACAO_RULES = `
 # Regras de Regularização e Conformidade Serpro
 ### Fluxo de Regularização (Dívidas, PGMEI, Abertura/Baixa)
 Se o cliente mencionar dívidas, pendências, boleto atrasado ou regularização:
-1. **NÃO ENVIE O FORMULÁRIO AINDA.**
+1. **NÃO existe mais formulário web.** Toda a coleta de dados é conversacional, feita por você (ver seção "FECHAMENTO E COLETA DE DADOS").
 2. Use a tool 'iniciar_fluxo_regularizacao' para introduzir o processo de forma natural.
 3. Aguarde a resposta do cliente (Opção A ou Opção B):
    - **Se Opção A (Procuração e-CAC):** Use 'enviar_processo_autonomo'. Após o cliente confirmar que concluiu, use 'verificar_serpro_pos_ecac' IMEDIATAMENTE.
      - Sucesso → chame 'marcar_procuracao_concluida' e em seguida 'consultar_pgmei_serpro'.
      - Falha → peça print do e-CAC.
-   - **Se Opção B (recusou e-CAC / prefere WhatsApp):** Use 'iniciar_coleta_situacao_whatsapp'. Em seguida, colete os dados conversacionalmente na seguinte ordem: CNPJ, Razão Social, CPF do empresário, faturamento mensal, se tem dívidas e quais. Salve cada informação obtida com update_user. Ao concluir (CNPJ + faturamento + tem_divida coletados), acione 'enviar_link_reuniao' proativamente.
+   - **Se Opção B (recusou e-CAC / prefere WhatsApp):** Use 'iniciar_coleta_situacao_whatsapp'. Em seguida, colete os dados conversacionalmente: CNPJ, Razão Social, CPF do empresário, E-mail, regime tributário, faturamento mensal, se tem dívidas e quais, e a Senha Gov.br. Salve cada informação obtida com update_user. Quando o cliente aprovar fechar o serviço, finalize com 'concluir_cadastro_fechamento' (passando opcao_b=true). **NÃO acione 'enviar_link_reuniao' neste fluxo** — o fechamento é automático.
 
 ### COLETA INTELIGENTE DE DADOS DA EMPRESA E CADASTRO (MANDATÓRIO)
 Sempre que um lead entrar no fluxo de Regularização, Contabilidade ou iniciar o processo de Procuração, VOCÊ DEVE OBRIGATORIAMENTE coletar os dados da empresa.
@@ -210,8 +215,18 @@ A resposta contém o campo 'consultas_serpro' com o histórico por serviço:
   - 'consultar_cnd_serpro' → Certidão Negativa de Débitos. Requer situação fiscal limpa.
   - 'consultar_caixa_postal_serpro' → mensagens da Receita Federal para o cliente.
 - O uso desenfreado de consultas profundas gasta recursos e expõe nossos IPs. Prefira sempre a Camada 1.
-- NUNCA use ferramentas/integrações não assinadas ou inativas na Loja Serpro (ex: DASN_SIMEI). Se o usuário pedir algo relacionado a declaração anual (DASN), informe que a integração está desabilitada temporariamente e faça manualmente.
+- NUNCA use ferramentas/integrações não assinadas ou inativas na Loja Serpro (ex: DASN_SIMEI). Se o usuário pedir algo relacionado a declaração anual (DASN) ou qualquer serviço indisponível: chame 'chamar_atendente' com resumo do caso e informe ao cliente que um especialista vai entrar em contato. **NÃO sugira agendar reunião — o atendente que vai retornar.**
+- **MUITO IMPORTANTE SOBRE VALORES:** Ao apresentar o resultado da consulta Serpro, você DEVE, OBRIGATORIAMENTE, informar ao cliente o **valor monetário exato** das dívidas (Soma pendente, R$, etc.) caso os detalhes da consulta tragam essa informação. Nunca esconda os valores. Dar essa clareza financeira é crucial para conscientizar o cliente do tamanho da dívida!
 - Explicite ao cliente: "Para consultarmos as pendências do seu MEI com segurança, o primeiro passo é a Procuração e-CAC (Opção A)."
+
+### FECHAMENTO E COLETA DE DADOS (FORMULÁRIO INVISÍVEL/CONVERSACIONAL)
+Os formulários externos foram DESCONTINUADOS. Você, Apolo, atuará como um formulário inteligente e conversacional.
+Assim que o cliente aprovar seguir com a regularização das pendências, siga este fluxo:
+1. **Lista canônica de campos obrigatórios para fechar:** **Nome/Razão Social, CNPJ, CPF e E-mail** (o Telefone já é conhecido). A **Senha GOV** só é obrigatória na Opção B (atendimento humano sem procuração e-CAC) — nesse caso, pergunte a Senha Gov.br do cliente e salve com \`update_user(senha_gov=...)\` (é sensível; não repita a senha no chat depois de salvar).
+2. **Auditoria de Dados:** Analise silenciosamente a tag \`<user_data>\` (que já inclui cpf, email, cnpj, razao_social, nome_completo). Se tiver dúvida sobre o que já existe no banco, chame \`consultar_dados_cliente\`.
+3. **Dados Existentes:** Vários desses dados (Razão Social, CNPJ, CPF) já podem ter vindo das consultas Serpro/CCMEI. Não pergunte do zero aquilo que já está preenchido; se precisar, peça apenas confirmação de forma natural.
+4. **Coleta Progressiva:** Para cada dado faltante (ex: E-mail), pergunte de forma amigável — UMA COISA POR VEZ: *"Excelente! Para formalizarmos o serviço e eu preparar a sua ata de fechamento, me confirma só o seu [DADO FALTANTE]?"*. Salve cada resposta na hora com \`update_user\` (ex: \`update_user(email='cliente@...')\`, \`update_user(cpf='...')\`).
+5. **Fechamento (Ata):** Quando achar que coletou tudo, chame \`concluir_cadastro_fechamento\` com \`servico_fechado\` (o que foi acordado) e \`opcao_b\` se aplicável. A tool audita o banco: se ainda faltar algo, ela devolve a lista — volte ao passo 4 e colete o que falta. Se estiver completo, ela marca o lead como **pronto_faturamento** e **notifica o Haylander** automaticamente. **Nunca** grave manualmente "cadastro completo" em observacoes nem envie link de reunião neste fluxo — a tool faz tudo.
 
 #### INTERPRETAÇÃO DO RESULTADO DE consultar_pgmei_serpro (CRÍTICO)
 A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Campos principais:
@@ -223,7 +238,8 @@ A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Cam
 **Regras de ouro:**
 - \`COM_DEBITO\` → HÁ DÍVIDAS. Informe ao cliente os anos listados em \`anos_com_debito\`.
 - \`SEM_DEBITO\` → situação regular em todos os anos consultados. Pode confirmar ao cliente.
-- \`INCONCLUSIVO\` → NÃO diga "sem dívidas". Diga "não consegui confirmar" e sugira verificação ou reunião.
+- \`INCONCLUSIVO\` → NÃO diga "sem dívidas". Avise que não foi possível confirmar, use 'chamar_atendente' com um resumo do caso, e informe ao cliente que um especialista vai entrar em contato em breve. **NÃO sugira agendar reunião nesses casos.**
+  - 🚫 **NUNCA INVENTE A CAUSA DA FALHA.** É TERMINANTEMENTE PROIBIDO afirmar motivos específicos que você não recebeu da tool — ex: "a PGFN só funciona das 07:05 às 22:00", "fora do horário de atendimento", "erro por causa do horário", "o sistema cai todo dia tal hora". Esses horários/regras NÃO existem e são alucinação. Diga apenas, genericamente, que "houve uma instabilidade momentânea nos sistemas da Receita e vamos reconsultar/encaminhar a um especialista". Nada além disso.
 - Use \`resumo_executivo\` como base, adaptando para linguagem simples e amigável.
 - Nunca exiba os campos brutos JSON ao cliente — traduza tudo para português claro.
 
@@ -248,14 +264,16 @@ COM_DEBITO:
 SEM_DEBITO:
 "Boa notícia! Consultei o CNPJ [cnpj] no Serpro:|||✅ *PGMEI (guias DAS):* em dia — nenhuma pendência encontrada|||✅ *PGFN (Dívida Ativa):* sem inscrições em dívida ativa|||Tudo certo! Quer que eu emita a CND (Certidão Negativa) como comprovante?"
 
-INCONCLUSIVO:
-"Consultei o CNPJ [cnpj], mas o resultado veio inconclusivo:|||⚠️ Não consegui confirmar a situação com precisão — isso pode indicar documentos pendentes ou resposta parcial da Receita|||Recomendo uma reunião rápida para analisarmos juntos. Quer agendar?"
+INCONCLUSIVO (serviço indisponível ou resposta parcial):
+"Consultei o CNPJ [cnpj], mas não consegui confirmar a situação no momento — os sistemas da Receita podem estar com instabilidade.|||Já acionei nossa equipe. Um especialista vai entrar em contato com você em breve para dar continuidade. 🙏"
+→ OBRIGATÓRIO: chame 'chamar_atendente' com resumo do caso ANTES de enviar a mensagem ao cliente. NÃO ofereça link de reunião.
 
 REGRAS DE OURO DO TEMPLATE:
 - NUNCA diga "sem dívidas" se pgmei.situacao OU pgfn.situacao for INCONCLUSIVO
 - Sempre use '|||' para separar cada bloco de informação
 - Substitua [cnpj] pelo CNPJ real — nunca exiba o campo bruto
 - Termine com trial close (pergunta ou ação concreta)
+- Se **pgfn_sem_procuracao = true**: a PGFN foi consultada sem procuração formal (API pública). Contextualize: "Encontrei uma indicação de dívida ativa de R$ X, mas para analisar os detalhes completos e as guias DAS em aberto, preciso da procuração e-CAC." Use como gancho para incentivar a procuração.
 `;
 /**
  * Tenta extrair texto de um PDF em base64 usando pdf-parse.
@@ -281,7 +299,11 @@ function detectarDebitosNoPdf(texto) {
         'DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE',
         'EM ABERTO', 'VENCIDO', 'DÍVIDA ATIVA', 'DIVIDA ATIVA',
         'GUIA EM ABERTO', 'DAS EM ABERTO', 'PARCELA EM ABERTO',
-        'VALOR DEVIDO', 'TOTAL DEVIDO', 'DEBITO'
+        'VALOR DEVIDO', 'TOTAL DEVIDO', 'DEBITO',
+        'A VENCER', 'VENCIDA', 'NAO PAGO', 'NÃO PAGO',
+        'PENDENTE DE PAGAMENTO', 'PERIODO DE APURACAO', 'PERÍODO DE APURAÇÃO',
+        'VALOR PRINCIPAL', 'VALOR ORIGINAL', 'DAS EM ATRASO', 'GUIA VENCIDA',
+        'COMPETENCIA', 'COMPETÊNCIA', 'PA EM ABERTO'
     ];
     const INDICADORES_REGULAR = [
         'SEM DÉBITO', 'SEM DEBITO', 'SEM PENDÊNCIA', 'SEM PENDENCIA',
@@ -339,20 +361,23 @@ async function parseSerproData(envelope) {
             const DEBITO_STATUS = ['ENVIADO A PFN', 'DEVEDOR', 'INADIMPLENTE', 'PENDENTE', 'IRREGULAR', 'DEBITO'];
             const REGULAR_STATUS = ['ADIMPLENTE', 'REGULAR', 'SEM_DEBITO', 'SEM DEBITO'];
             let temDebito = false, temRegular = false;
+            let somaValores = 0;
             for (const item of parsedDados) {
                 const s = String(item.situacaoDebito ?? item.situacao ?? '')
                     .toUpperCase().trim().replace(/\s+/g, ' '); // Normalize multiple spaces
                 if (DEBITO_STATUS.some(d => s.includes(d))) {
                     temDebito = true;
-                    break;
+                    if (item.valor)
+                        somaValores += Number(item.valor) || 0;
                 }
                 if (REGULAR_STATUS.some(d => s.includes(d))) {
                     temRegular = true;
                 }
             }
+            const resumo_valores = somaValores > 0 ? `Soma pendente: R$ ${somaValores.toFixed(2)}` : null;
             return {
                 tem_debitos_detectado: temDebito ? true : (temRegular ? false : null),
-                dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
+                dados: null, tem_documento_binario: false, texto_pdf: null, resumo_valores, mensagens_serpro, raw_envelope: envelope,
             };
         }
         // Array vazio → sinal definitivo vem das mensagens (ex: código 25001 = sem débitos)
@@ -425,21 +450,40 @@ async function parseSerproData(envelope) {
         const semDebito = ['NAO HA DEBITOS', 'SEM DEBITO', '25001', 'SITUACAO REGULAR', 'NADA CONSTA'].some(s => msTexto.includes(s));
         return {
             tem_debitos_detectado: comDebito ? true : (semDebito ? false : null),
-            dados: null, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope,
+            dados: null, tem_documento_binario: false, texto_pdf: msTexto, resumo_valores: null, mensagens_serpro, raw_envelope: envelope,
         };
     }
     // Detectar débitos a partir dos campos JSON conhecidos
     const situacao = String(dados.situacaoContribuinte ?? dados.situacao ?? dados.statusContribuinte ?? '').toUpperCase();
-    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? dados.guias ?? dados.das ?? dados.parcelas ?? dados.itens ?? dados.lista ?? null;
+    const guiasRaw = dados.guiasEmAberto ?? dados.debitos ?? dados.debitosPGMEI ?? dados.debitosTotal ?? dados.guias ?? dados.das ?? dados.parcelas ?? dados.itens ?? dados.lista ?? dados.periodos ?? dados.competencias ?? dados.guiaVencida ?? dados.dasGerado ?? null;
     const hasGuias = Array.isArray(guiasRaw) ? guiasRaw.length > 0
         : typeof guiasRaw === 'number' ? guiasRaw > 0
             : false;
-    const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO'];
-    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO'];
-    const tem_debitos_detectado = INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias ? true
-        : INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
+    // Campos numéricos indicando dívida (Serpro pode retornar valorPrincipal, valorOriginal, etc.)
+    const valorPrincipal = typeof dados.valorPrincipal === 'number' ? dados.valorPrincipal
+        : typeof dados.valorOriginal === 'number' ? dados.valorOriginal
+            : typeof dados.periodoApuracao === 'string' ? 1 // presença de período = há guia
+                : 0;
+    const INDICADORES_REGULAR = ['SEM_DEBITO', 'REGULAR', 'ADIMPLENTE', 'SEM DEBITO', 'SEM DÉBITO', 'EM DIA', 'NADA CONSTA'];
+    const INDICADORES_DEBITO = ['DEVEDOR', 'IRREGULAR', 'PENDENTE', 'INADIMPLENTE', 'DEBITO', 'VENCID', 'EM ABERTO', 'A VENCER', 'NAO PAGO'];
+    // Checar REGULAR primeiro — 'SEM_DEBITO' contém 'DEBITO' como substring
+    const tem_debitos_detectado = INDICADORES_REGULAR.some(i => situacao.includes(i)) ? false
+        : INDICADORES_DEBITO.some(i => situacao.includes(i)) || hasGuias || valorPrincipal > 0 ? true
             : null;
-    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, mensagens_serpro, raw_envelope: envelope };
+    let resumo_valores = null;
+    if (tem_debitos_detectado) {
+        const valores = [];
+        if (valorPrincipal > 0)
+            valores.push(`R$ ${valorPrincipal.toFixed(2)}`);
+        if (Array.isArray(guiasRaw)) {
+            const sum = guiasRaw.reduce((acc, g) => acc + (Number(g.valor) || Number(g.valorPrincipal) || 0), 0);
+            if (sum > 0)
+                valores.push(`Soma das guias R$ ${sum.toFixed(2)}`);
+        }
+        if (valores.length > 0)
+            resumo_valores = valores.join(', ');
+    }
+    return { tem_debitos_detectado, dados, tem_documento_binario: false, texto_pdf: null, resumo_valores, mensagens_serpro, raw_envelope: envelope };
 }
 const getRegularizacaoTools = (context) => [
     // ── Camada 1 ────────────────────────────────────────────────────────────────
@@ -461,11 +505,12 @@ const getRegularizacaoTools = (context) => [
                 }
                 const currentYear = new Date().getFullYear();
                 const anos = Array.from({ length: ANOS_RETROATIVOS + 1 }, (_, i) => currentYear - ANOS_RETROATIVOS + i);
-                const [pgmeiRawAll, pgfnRaw, dasnRaw] = await Promise.all([
+                // DASN-SIMEI NÃO é consultada aqui: o serviço está "em prospecção" na Serpro
+                // (ainda não liberado em produção — ICGERENCIADOR-044). Chamá-la só desperdiçaria
+                // uma requisição que sempre retorna 403. Reativar quando a Serpro publicar o serviço.
+                const [pgmeiRawAll, pgfnRaw] = await Promise.all([
                     Promise.allSettled(anos.map(ano => (0, server_tools_1.checkCnpjSerpro)(gate.cnpj, 'PGMEI', { ano: String(ano) }))),
-                    Promise.resolve((0, pgfn_1.consultarDividaAtivaPorDevedor)(gate.cnpj)).then(result => ({ status: 'fulfilled', value: result }), reason => ({ status: 'rejected', reason })),
-                    // Tenta consultar DASN_SIMEI, mas não quebra se der 403 (não assinada)
-                    Promise.resolve((0, server_tools_1.checkCnpjSerpro)(gate.cnpj, 'DASN_SIMEI', { ano: String(currentYear - 1) })).then(result => ({ status: 'fulfilled', value: result }), reason => ({ status: 'rejected', reason }))
+                    Promise.resolve((0, pgfn_1.consultarDividaAtivaPorDevedor)(gate.cnpj)).then(result => ({ status: 'fulfilled', value: result }), reason => ({ status: 'rejected', reason }))
                 ]);
                 const parseAnoResults = async (rawAll) => Promise.all(rawAll.map(async (result, i) => {
                     const ano = anos[i];
@@ -477,7 +522,7 @@ const getRegularizacaoTools = (context) => [
                         return {
                             ano,
                             tem_debitos: parsed.tem_debitos_detectado,
-                            detalhe: parsed.texto_pdf ? parsed.texto_pdf.slice(0, 200) : undefined,
+                            detalhe: parsed.resumo_valores || (parsed.texto_pdf ? parsed.texto_pdf.slice(0, 150).replace(/\\n/g, ' ') : undefined),
                         };
                     }
                     catch {
@@ -495,27 +540,9 @@ const getRegularizacaoTools = (context) => [
                 const pgmei = formatServicoResult(pgmeiPorAno);
                 const pgfn = formatServicoResult(pgfnPorAno);
                 const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
-                let dasn_result = null;
-                let dasn_info = 'Não verificado';
-                if (dasnRaw.status === 'fulfilled') {
-                    try {
-                        const dasnParsed = JSON.parse(dasnRaw.value);
-                        dasn_result = dasnParsed;
-                        if (dasnParsed.status === 'error' || dasnParsed.error) {
-                            dasn_info = 'DASN-SIMEI não assinada ou indisponível.';
-                        }
-                        else {
-                            const dasnDataParsed = await parseSerproData(dasnParsed);
-                            dasn_info = dasnDataParsed.mensagens_serpro.length > 0
-                                ? dasnDataParsed.mensagens_serpro.join(' | ')
-                                : 'DASN-SIMEI consultada com sucesso.';
-                        }
-                    }
-                    catch (e) {
-                        dasn_info = 'Erro ao parsear resultado DASN-SIMEI: ' + (e instanceof Error ? e.message : String(e));
-                        dasn_result = { status: 'error', message: String(e) };
-                    }
-                }
+                // DASN-SIMEI indisponível na Serpro (em prospecção). Não consultada — não afirmar nada sobre ela.
+                const dasn_result = null;
+                const dasn_info = 'DASN-SIMEI indisponível (serviço ainda não liberado pela Serpro).';
                 const resumo_executivo = buildResumoExecutivo(pgmei, pgfn, pgfn_detalhes);
                 const aviso = pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO'
                     ? '⚠️ Débitos encontrados. Informe ao cliente os anos com pendências e oriente a regularização.'
@@ -538,7 +565,7 @@ const getRegularizacaoTools = (context) => [
                     tipo_divida: tipo_divida || undefined,
                     valor_divida_pgfn
                 }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
-                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_sem_procuracao: !!gate.bypass_reason });
             }
             catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
@@ -673,7 +700,7 @@ const getRegularizacaoTools = (context) => [
     // ── Opção B: coleta in-chat ──────────────────────────────────────────────────
     {
         name: 'iniciar_coleta_situacao_whatsapp',
-        description: 'Inicia coleta conversacional de dados do lead pelo WhatsApp quando o cliente recusa a Opção A (e-CAC). Envia mensagem de boas-vindas e instrui o agente a coletar CNPJ, Razão Social, faturamento e dívidas via update_user. Ao concluir a coleta, acione enviar_link_reuniao.',
+        description: 'Inicia coleta conversacional de dados do lead pelo WhatsApp quando o cliente recusa a Opção A (e-CAC). Instrui o agente a coletar CNPJ, Razão Social, CPF, E-mail, faturamento e dívidas via update_user. Quando o cliente aprovar fechar o serviço, finalize com concluir_cadastro_fechamento (opcao_b=true).',
         parameters: { type: 'object', properties: {} },
         function: async () => {
             try {
@@ -690,7 +717,7 @@ const getRegularizacaoTools = (context) => [
                     await (0, server_tools_1.trackResourceDelivery)(leadId, 'situacao-form-whatsapp', 'started');
                 return JSON.stringify({
                     status: 'success',
-                    next_steps: 'Faça perguntas conversacionais para coletar: CNPJ, Razão Social, CPF empresário, faturamento_mensal, tem_divida, detalhes dívidas. Salve cada resposta com update_user. Ao concluir CNPJ + faturamento + tem_divida, acione enviar_link_reuniao.'
+                    next_steps: 'Faça perguntas conversacionais, UMA por vez, para coletar: CNPJ, Razão Social, CPF empresário, E-mail, faturamento_mensal, tem_divida, detalhes dívidas. Salve cada resposta com update_user. Quando o cliente aprovar fechar o serviço, finalize com concluir_cadastro_fechamento (opcao_b=true). NÃO use enviar_link_reuniao.'
                 });
             }
             catch (error) {
@@ -871,6 +898,72 @@ const getRegularizacaoTools = (context) => [
                 }
                 const dados = (typeof dadosRaw === 'string' ? JSON.parse(dadosRaw) : dadosRaw);
                 return JSON.stringify({ status: 'success', dados });
+            }
+            catch (error) {
+                return JSON.stringify({ status: 'error', message: String(error) });
+            }
+        }
+    },
+    // ── Fechamento: gera a ata e entrega o lead pronto para o Haylander faturar ────
+    {
+        name: 'concluir_cadastro_fechamento',
+        description: 'FECHAMENTO. Chame quando o cliente aprovou o serviço e você acredita ter coletado todos os dados obrigatórios (Nome/Razão Social, CNPJ, CPF, E-mail). A tool audita a ficha no banco: se faltar algo, retorna a lista de campos para você continuar a coleta conversacional (UMA pergunta por vez). Se estiver completa, marca o lead como pronto_faturamento e notifica o Haylander com a ata. NÃO envie link de reunião neste fluxo.',
+        parameters: {
+            type: 'object',
+            properties: {
+                servico_fechado: { type: 'string', description: 'O que foi acordado com o cliente (ex: "Regularização MEI — DAS 2021 a 2023" ou "Abertura de empresa").' },
+                opcao_b: { type: 'boolean', description: 'true se o cliente seguiu a Opção B (atendimento humano sem procuração e-CAC). Nesse caso a Senha GOV também é obrigatória.' }
+            },
+            required: ['servico_fechado']
+        },
+        function: async (args) => {
+            try {
+                const ud = await (0, server_tools_1.getUser)(context.userPhone);
+                if (!ud)
+                    return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                const lead = JSON.parse(ud);
+                if (lead.status === 'error' || lead.status === 'not_found') {
+                    return JSON.stringify({ status: 'error', message: 'Usuário não encontrado' });
+                }
+                const precisaSenhaGov = args.opcao_b === true || args.opcao_b === 'true';
+                const { completo, faltando } = (0, closing_audit_1.auditarCadastroCompleto)(lead, precisaSenhaGov);
+                if (!completo) {
+                    return JSON.stringify({
+                        status: 'incompleto',
+                        faltando,
+                        next_steps: `Ainda faltam dados para fechar: ${faltando.join(', ')}. Peça-os de forma conversacional, UMA pergunta por vez, e salve cada resposta com update_user. Depois chame concluir_cadastro_fechamento de novo. NÃO chame enviar_link_reuniao.`
+                    });
+                }
+                const servico = String(args.servico_fechado || 'Serviço de regularização');
+                const observacao = `✅ CADASTRO COMPLETO — Ata de fechamento pronta para faturamento. Serviço: ${servico}.`;
+                // Não marcamos situacao='cliente' aqui: o pagamento ainda não foi confirmado.
+                // O sinal de "pronto para faturar" é o status_atendimento — Haylander marca
+                // cliente após a cobrança.
+                await (0, server_tools_1.updateUser)({
+                    telefone: context.userPhone,
+                    servico,
+                    status_atendimento: 'pronto_faturamento',
+                    observacoes: observacao,
+                });
+                const nome = (lead.nome_completo || lead.razao_social || 'Cliente');
+                const dividaInfo = lead.tem_divida
+                    ? `Dívida: ${lead.tipo_divida || 'sim'}${lead.valor_divida_pgfn ? ` (R$ ${lead.valor_divida_pgfn})` : ''}`
+                    : 'Sem dívida registrada';
+                const ata = `💰 LEAD PRONTO PARA FATURAR\n\n` +
+                    `Cliente: ${nome}\n` +
+                    `Telefone: ${context.userPhone}\n` +
+                    `CNPJ: ${lead.cnpj}\n` +
+                    `CPF: ${lead.cpf}\n` +
+                    `E-mail: ${lead.email}\n` +
+                    `Serviço fechado: ${servico}\n` +
+                    `${dividaInfo}\n\n` +
+                    `Ação: cadastro completo e procuração/dados ok. Só falta cobrar o pagamento.`;
+                await (0, server_tools_1.callAttendant)(context.userPhone, ata);
+                return JSON.stringify({
+                    status: 'success',
+                    message: 'Cadastro fechado, lead marcado como pronto_faturamento e Haylander notificado.',
+                    next_steps: 'Avise o cliente que o cadastro está pronto e o processo foi oficialmente iniciado. Mantenha-o engajado para a etapa de pagamento. NÃO envie link de reunião.'
+                });
             }
             catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });

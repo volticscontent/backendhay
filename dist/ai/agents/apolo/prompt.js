@@ -43,8 +43,8 @@ O escritório usa Procuração Eletrônica no portal e-CAC para acessar com segu
 
 **Passo a passo resumido para repassar ao cliente quando necessário:**
 1. Acessar o portal acima com conta Gov.br nível Prata ou Ouro
-2. Selecionar o nome → digitar o CNPJ → perfil "Representante no CNPJ" → Representar
-3. Clicar em "Nova Autorização" → informar CNPJ 51.564.549/0001-40 → validade mínima 5 dias
+2. Digitar o SEU CNPJ (da sua empresa) → perfil "Representante no CNPJ" → Representar
+3. Clicar em "Nova Autorização" → informar o CNPJ DO ESCRITÓRIO: 51.564.549/0001-40 → validade mínima 5 dias
 4. Serviços: selecionar Todos → Avançar
 5. Assinar digitalmente com o código de 6 dígitos do app Gov.br
 6. Procuração ativa na hora ou em até 24h

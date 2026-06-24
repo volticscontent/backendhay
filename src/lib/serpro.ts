@@ -84,6 +84,8 @@ const pfxExtracted = extractPfxData(SERPRO_PFX_BUFFER, SERPRO_CERT_PASS);
 const FINAL_CERT = pfxExtracted.cert || SERPRO_CERT_PEM_RAW;
 const FINAL_KEY = pfxExtracted.key || SERPRO_CERT_KEY_RAW;
 
+
+
 const SERPRO_ROLE_TYPE = process.env.SERPRO_ROLE_TYPE || 'TERCEIROS';
 const SERPRO_AUTHENTICATE_URL = process.env.SERPRO_AUTHENTICATE_URL || 'https://autenticacao.sapi.serpro.gov.br/authenticate';
 
@@ -210,12 +212,18 @@ export async function getSerproTokens(forceRefresh: boolean = false): Promise<Se
         },
     }, postData);
 
-    const raw = response as { access_token?: string; jwt_token?: string };
+    const raw = response as { access_token?: string; jwt_token?: string; expires_in?: number };
     if (raw.access_token && raw.jwt_token) {
+        // Usa o expires_in REAL do Serpro (~1h) com margem de 60s, limitado à meia-noite BRT
+        // (a Serpro também invalida o token na virada do dia). Antes assumíamos só nextMidnightBRT(),
+        // o que mantinha o token "vivo" no cache por até 24h enquanto a Serpro já o havia expirado —
+        // gerando 401 garantido na 1ª chamada após ~1h e thundering herd em consultas paralelas.
+        const expiresIn = Number(raw.expires_in) || 3300;
+        const byExpiresIn = Date.now() + Math.max(expiresIn - 60, 60) * 1000;
         cachedTokens = {
             access_token: raw.access_token,
             jwt_token: raw.jwt_token,
-            expiresAt: nextMidnightBRT(),
+            expiresAt: Math.min(byExpiresIn, nextMidnightBRT()),
         };
         serproLogger.info(`Tokens Serpro renovados. Expiram em: ${new Date(cachedTokens.expiresAt).toISOString()}`);
         return cachedTokens;

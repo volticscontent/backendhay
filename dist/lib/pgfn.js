@@ -15,8 +15,8 @@ const PGFN_CLIENT_ID = process.env.PGFN_CLIENT_ID;
 const PGFN_CLIENT_SECRET = process.env.PGFN_CLIENT_SECRET;
 let cachedPgfnToken = null;
 const onlyDigits = (value) => value.replace(/\D/g, '');
-function pgfnRequest(urlStr, options, body) {
-    return new Promise((resolve, reject) => {
+function pgfnRequest(urlStr, options, body, retries = 2) {
+    const execute = () => new Promise((resolve, reject) => {
         try {
             const url = new URL(urlStr);
             const req = node_https_1.default.request({
@@ -61,6 +61,26 @@ function pgfnRequest(urlStr, options, body) {
             reject(error);
         }
     });
+    // Retry com backoff em 5xx e timeout. A API de Dívida Ativa tem instabilidade transitória;
+    // sem retry, qualquer 502/503/timeout pontual virava 'INCONCLUSIVO' no fluxo do Apolo (e o
+    // LLM inventava explicações falsas ao cliente). 401/404 NÃO são retentados aqui — são tratados
+    // em consultarPgfn (refresh de token / devedor inexistente).
+    const attempt = async (left) => {
+        try {
+            return await execute();
+        }
+        catch (error) {
+            const msg = String(error instanceof Error ? error.message : error);
+            const isRetryable = /PGFN HTTP 5\d\d/.test(msg) || msg.includes('timeout');
+            if (left > 0 && isRetryable) {
+                logger_1.serproLogger.warn(`PGFN: erro transitório, retry (${left} restante(s)): ${msg}`);
+                await new Promise(r => setTimeout(r, 1000 * (retries - left + 1)));
+                return attempt(left - 1);
+            }
+            throw error;
+        }
+    };
+    return attempt(retries);
 }
 async function getPgfnToken(forceRefresh = false) {
     const now = Date.now();
@@ -210,10 +230,20 @@ function detectarDebitoPgfn(data, resumo) {
         .normalize('NFD')
         .replace(/[̀-ͯ]/g, '')
         .toUpperCase();
-    if (['NAO HA DEBITOS', 'NADA CONSTA', 'SEM DEBITO', 'SEM DEBITOS'].some(s => texto.includes(s)))
+    const SEM_DEBITO_PATTERNS = [
+        'NAO HA DEBITOS', 'NADA CONSTA', 'SEM DEBITO', 'SEM DEBITOS',
+        'NAO FORAM ENCONTRAD', 'NENHUMA INSCRICAO', 'DEVEDOR NAO LOCALIZADO',
+        'NAO LOCALIZADO', 'SEM INSCRICAO', 'NENHUM REGISTRO',
+        'NAO EXISTE INSCRICAO', 'NAO EXISTEM INSCRICOES'
+    ];
+    if (SEM_DEBITO_PATTERNS.some(s => texto.includes(s)))
         return false;
     if (['INSCRICAO', 'DIVIDA ATIVA', 'DEVEDOR', 'DEBITO', 'AJUIZADA', 'EXIGIVEL'].some(s => texto.includes(s)))
         return true;
+    // Se não há inscrições e nenhum pattern de débito ativo foi encontrado,
+    // considerar como sem débito (evita falso 'inconclusivo')
+    if (resumo.total_inscricoes === 0)
+        return false;
     return null;
 }
 async function consultarPgfn(path, consulta, parametro, forceRefresh = false) {
@@ -244,6 +274,20 @@ async function consultarPgfn(path, consulta, parametro, forceRefresh = false) {
         const message = String(error instanceof Error ? error.message : error);
         if (!forceRefresh && message.includes('401'))
             return consultarPgfn(path, consulta, parametro, true);
+        // PGFN 404 = devedor não encontrado = sem dívida ativa inscrita
+        if (message.includes('404')) {
+            const emptyResumo = buildPgfnResumo(null, []);
+            return {
+                status: 'success',
+                origem: 'pgfn_api',
+                consulta,
+                parametro,
+                dados: null,
+                tem_debitos_detectado: false,
+                mensagens_pgfn: ['Devedor não localizado na base da PGFN (HTTP 404).'],
+                resumo: emptyResumo,
+            };
+        }
         throw error;
     }
 }

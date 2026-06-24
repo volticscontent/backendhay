@@ -24,14 +24,16 @@ function createAutonomoMessageSegments() {
 *1. Acesse o Portal de Autorizações*
 🔗 https://servicos.receitafederal.gov.br/servico/autorizacoes/minhas-autorizacoes
 🔐 Faça login com sua conta Gov.br nível Prata ou Ouro
-✅ Selecione seu nome no canto superior direito
-⌨️ Digite seu CNPJ no primeiro campo, selecione o perfil "Representante no CNPJ" e clique em *Representar*
 
-*2. Clique em "Nova Autorização"*
+*2. Selecione o SEU CNPJ (da sua empresa)*
+⌨️ Digite o *SEU CNPJ* no campo de busca
+👤 Selecione o perfil "Representante no CNPJ"
+✅ Clique em *Representar*
 
-*3. Preencha os dados:*
-Meu CNPJ: *51.564.549/0001-40*
-Validade: escolha o prazo mínimo de 5 dias
+*3. Crie a Autorização para o nosso escritório*
+🆕 Clique em "Nova Autorização"
+📝 No campo CNPJ, informe o *CNPJ do escritório:* *51.564.549/0001-40*
+📅 Validade: escolha o prazo mínimo de 5 dias
 
 *4. Serviços*
 ✅ Selecione *Todos* e clique em Avançar

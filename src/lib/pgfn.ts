@@ -59,8 +59,8 @@ let cachedPgfnToken: PgfnToken | null = null;
 
 const onlyDigits = (value: string) => value.replace(/\D/g, '');
 
-function pgfnRequest(urlStr: string, options: https.RequestOptions, body?: string): Promise<unknown> {
-    return new Promise((resolve, reject) => {
+function pgfnRequest(urlStr: string, options: https.RequestOptions, body?: string, retries = 2): Promise<unknown> {
+    const execute = (): Promise<unknown> => new Promise((resolve, reject) => {
         try {
             const url = new URL(urlStr);
             const req = https.request({
@@ -103,6 +103,27 @@ function pgfnRequest(urlStr: string, options: https.RequestOptions, body?: strin
             reject(error);
         }
     });
+
+    // Retry com backoff em 5xx e timeout. A API de Dívida Ativa tem instabilidade transitória;
+    // sem retry, qualquer 502/503/timeout pontual virava 'INCONCLUSIVO' no fluxo do Apolo (e o
+    // LLM inventava explicações falsas ao cliente). 401/404 NÃO são retentados aqui — são tratados
+    // em consultarPgfn (refresh de token / devedor inexistente).
+    const attempt = async (left: number): Promise<unknown> => {
+        try {
+            return await execute();
+        } catch (error) {
+            const msg = String(error instanceof Error ? error.message : error);
+            const isRetryable = /PGFN HTTP 5\d\d/.test(msg) || msg.includes('timeout');
+            if (left > 0 && isRetryable) {
+                serproLogger.warn(`PGFN: erro transitório, retry (${left} restante(s)): ${msg}`);
+                await new Promise(r => setTimeout(r, 1000 * (retries - left + 1)));
+                return attempt(left - 1);
+            }
+            throw error;
+        }
+    };
+
+    return attempt(retries);
 }
 
 export async function getPgfnToken(forceRefresh = false): Promise<PgfnToken> {

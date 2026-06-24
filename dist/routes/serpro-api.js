@@ -9,11 +9,12 @@ const r2_1 = require("../lib/r2");
 const router = (0, express_1.Router)();
 // POST /serpro — consult a CNPJ
 router.post('/serpro', async (req, res) => {
-    const { cnpj, service, ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf } = req.body;
+    const { cnpj, service, ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf, infoBeneficio, permitirEscrita } = req.body;
     if (!cnpj)
         return void res.status(400).json({ error: 'CNPJ é obrigatório' });
     const target = service || 'CCMEI_DADOS';
-    const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf };
+    // permitirEscrita só vem true quando o operador confirma explicitamente uma ação de escrita no painel.
+    const options = { ano, mes, numeroRecibo, codigoReceita, categoria, protocoloRelatorio, cpf, infoBeneficio, permitirEscrita: permitirEscrita === true };
     try {
         const result = target === 'PGFN_API'
             ? await (0, pgfn_1.consultarDividaAtivaPorDevedor)(cnpj)
