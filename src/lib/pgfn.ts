@@ -83,6 +83,17 @@ export function minutesUntilPgfnOpen(now: Date = new Date()): number {
     return 0;                                              // aberta agora
 }
 
+/**
+ * Descreve, em linguagem de cliente, quando a próxima janela da PGFN abre — para avisar
+ * exatamente "hoje pela manhã" (chamado antes das 07:05) ou "amanhã pela manhã" (após as 22:00).
+ */
+export function nextPgfnWindowDescription(now: Date = new Date()): string {
+    const m = saoPauloMinuteOfDay(now);
+    if (m >= PGFN_OPEN_MIN && m < PGFN_CLOSE_MIN) return `em instantes (a partir das ${PGFN_WINDOW.openLabel})`;
+    if (m < PGFN_OPEN_MIN) return `hoje pela manhã, a partir das ${PGFN_WINDOW.openLabel}`;
+    return `amanhã pela manhã, a partir das ${PGFN_WINDOW.openLabel}`;
+}
+
 /** Detecta a resposta 403 de fora-de-horário da API de Dívida Ativa. */
 function isOffHoursError(message: string): boolean {
     return /HTTP\s*403/.test(message) && /(dispon[íi]vel\s+entre|07:05)/i.test(message);

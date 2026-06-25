@@ -270,7 +270,7 @@ A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Cam
 **Regras de ouro:**
 - \`COM_DEBITO\` → HÁ DÍVIDAS. Informe ao cliente os anos listados em \`anos_com_debito\`.
 - \`SEM_DEBITO\` → situação regular em todos os anos consultados. Pode confirmar ao cliente.
-- \`pgfn_fora_de_horario = true\` → **caso especial, NÃO é erro nem inconclusivo.** A API de Dívida Ativa da PGFN só funciona em horário comercial (07:05–22:00, Brasília) — isso é REAL e esperado, não é instabilidade. O sistema **já agendou a reconsulta automática** para quando a janela abrir e vai avisar o cliente. Comunique como **procedimento padrão**, com naturalidade, e **siga normalmente com o PGMEI agora**. **NÃO** use 'chamar_atendente' por causa disso. Ex: "A consulta da Dívida Ativa (PGFN) funciona em horário comercial; assim que abrir, faço a verificação automática e te aviso. Enquanto isso, já adianto o PGMEI."
+- \`pgfn_fora_de_horario = true\` → **caso especial, NÃO é erro nem inconclusivo.** A API de Dívida Ativa da PGFN só funciona em horário comercial (07:05–22:00, Brasília) — isso é REAL e esperado, não é instabilidade. O sistema **já agendou a reconsulta automática** e **já dispara, sozinho, uma mensagem avisando o cliente com o horário exato** ("hoje/amanhã pela manhã, a partir das 07:05") e devolverá o valor devido por aqui. Portanto: comunique o resultado do PGMEI normalmente e mencione a PGFN só de passagem, SEM prometer um horário específico (o sistema já faz isso) e SEM dizer que houve erro. **Siga com o PGMEI agora.** **NÃO** use 'chamar_atendente' por causa disso. Ex: "Já adianto o PGMEI; a Dívida Ativa eu verifico automaticamente e te confirmo aqui."
 - \`INCONCLUSIVO\` (e SEM ser fora de horário) → NÃO diga "sem dívidas". Avise que não foi possível confirmar, use 'chamar_atendente' com um resumo do caso, e informe ao cliente que um especialista vai entrar em contato em breve. **NÃO sugira agendar reunião nesses casos.**
   - Quando a causa for instabilidade real (sem pgfn_fora_de_horario), diga apenas, genericamente, que "houve uma instabilidade momentânea nos sistemas da Receita e vamos reconsultar". Não invente outros motivos que a tool não retornou.
 - Use \`resumo_executivo\` como base, adaptando para linguagem simples e amigável.
@@ -298,8 +298,8 @@ SEM_DEBITO:
 "Boa notícia! Consultei o CNPJ [cnpj] no Serpro:|||✅ *PGMEI (guias DAS):* em dia — nenhuma pendência encontrada|||✅ *PGFN (Dívida Ativa):* sem inscrições em dívida ativa|||Tudo certo! Quer que eu emita a CND (Certidão Negativa) como comprovante?"
 
 PGFN FORA DE HORÁRIO (pgfn_fora_de_horario = true — procedimento padrão, NÃO é erro):
-"Consultei o CNPJ [cnpj]:|||[se PGMEI COM_DEBITO: ⚠️ *PGMEI (guias DAS):* débitos nos anos [lista] | se SEM: ✅ *PGMEI:* em dia]|||ℹ️ A consulta da *Dívida Ativa (PGFN)* funciona em horário comercial (07:05–22:00). Vou fazer essa verificação automaticamente assim que abrir e te aviso por aqui.|||Enquanto isso, podemos já adiantar [próximo passo do PGMEI]. Pode ser?"
-→ NÃO chame 'chamar_atendente'. NÃO fale em "instabilidade". A reconsulta já está agendada pelo sistema.
+"Consultei o CNPJ [cnpj]:|||[se PGMEI COM_DEBITO: ⚠️ *PGMEI (guias DAS):* débitos nos anos [lista] | se SEM: ✅ *PGMEI:* em dia]|||ℹ️ A *Dívida Ativa (PGFN)* eu verifico automaticamente e te confirmo aqui com o valor.|||Enquanto isso, podemos já adiantar [próximo passo do PGMEI]. Pode ser?"
+→ NÃO prometa um horário específico para a PGFN: o sistema já envia, sozinho, um aviso ao cliente com o horário exato (hoje/amanhã pela manhã) e devolve o resultado depois. NÃO chame 'chamar_atendente'. NÃO fale em "instabilidade". A reconsulta já está agendada pelo sistema.
 
 INCONCLUSIVO (instabilidade real — e NÃO fora de horário):
 "Consultei o CNPJ [cnpj], mas não consegui confirmar a situação no momento — os sistemas da Receita podem estar com instabilidade.|||Já acionei nossa equipe. Um especialista vai entrar em contato com você em breve para dar continuidade. 🙏"
@@ -627,7 +627,7 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                     pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO'
                         ? '⚠️ Débitos encontrados no PGMEI. Informe ao cliente os anos com pendências e oriente a regularização.'
                         : pgfn_fora_de_horario
-                        ? `ℹ️ PGFN fora do horário (funciona ${PGFN_WINDOW.openLabel}–${PGFN_WINDOW.closeLabel}). NÃO é erro nem instabilidade. Já agendei a reconsulta automática para a abertura. Comunique como procedimento padrão e siga com o PGMEI agora.`
+                        ? `ℹ️ PGFN fora do horário (funciona ${PGFN_WINDOW.openLabel}–${PGFN_WINDOW.closeLabel}). NÃO é erro nem instabilidade. Já agendei a reconsulta automática E o sistema já avisou o cliente com o horário exato. Mencione a PGFN só de passagem (sem prometer horário) e siga com o PGMEI agora.`
                         : pgmei.situacao === 'INCONCLUSIVO' || pgfn.situacao === 'INCONCLUSIVO'
                         ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
                         : undefined;

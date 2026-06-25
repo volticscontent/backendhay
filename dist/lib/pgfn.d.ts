@@ -57,6 +57,11 @@ export declare const PGFN_WINDOW: {
 export declare function isPgfnWindowOpen(now?: Date): boolean;
 /** Minutos até a próxima abertura da janela (0 se já aberta). */
 export declare function minutesUntilPgfnOpen(now?: Date): number;
+/**
+ * Descreve, em linguagem de cliente, quando a próxima janela da PGFN abre — para avisar
+ * exatamente "hoje pela manhã" (chamado antes das 07:05) ou "amanhã pela manhã" (após as 22:00).
+ */
+export declare function nextPgfnWindowDescription(now?: Date): string;
 export declare function getPgfnToken(forceRefresh?: boolean): Promise<PgfnToken>;
 export declare function consultarDividaAtivaPorDevedor(cpfOuCnpj: string): Promise<PgfnConsultaResult>;
 export declare function consultarDividaAtivaPorInscricao(numeroInscricao: string): Promise<PgfnConsultaResult>;

@@ -1,16 +1,32 @@
 import { Queue, Worker, Job } from 'bullmq';
 import { createRedisConnection } from '../lib/redis';
-import { enqueueMessages } from './message-queue';
+import { enqueueMessages, scheduleFollowUp } from './message-queue';
 import {
     consultarDividaAtivaPorDevedor,
     isPgfnWindowOpen,
     minutesUntilPgfnOpen,
+    nextPgfnWindowDescription,
     PGFN_WINDOW,
 } from '../lib/pgfn';
 import { cronLogger } from '../lib/logger';
 
 const QUEUE_NAME = 'pgfn-window-retry';
 const log = cronLogger;
+
+// Pequena folga para o aviso chegar logo DEPOIS da resposta do Apolo (que é enfileirada na hora),
+// lendo como um follow-up natural em vez de competir com a mensagem do resultado do PGMEI.
+const NOTICE_DELAY_MS = 8_000;
+
+/** Aviso determinístico ao cliente de que a Dívida Ativa será consultada na próxima janela. */
+function buildWindowNoticeMessage(): string {
+    const quando = nextPgfnWindowDescription();
+    return (
+        `📌 Só um detalhe sobre a *Dívida Ativa da União (PGFN)*: essa consulta só fica disponível ` +
+        `em horário comercial (das ${PGFN_WINDOW.openLabel} às ${PGFN_WINDOW.closeLabel}). ` +
+        `Já deixei agendado e vou fazer a verificação automaticamente ${quando} — ` +
+        `assim que tiver o resultado, te trago aqui com o valor exato. 👍`
+    );
+}
 
 export interface PgfnRetryJob {
     phone: string;
@@ -28,25 +44,43 @@ export const pgfnRetryQueue = new Queue(QUEUE_NAME, {
  * Margem de +5min após a abertura para não bater exatamente na virada.
  */
 export async function schedulePgfnRetry(payload: PgfnRetryJob): Promise<number> {
+    const jobId = `pgfn-retry-${payload.phone}`;
     const delayMinutes = minutesUntilPgfnOpen() + 5;
-    const delayMs = delayMinutes * 60_000;
-    await pgfnRetryQueue.add('retry', payload, {
-        jobId: `pgfn-retry-${payload.phone}`,
-        delay: delayMs,
-    });
-    log.info(`PGFN retry agendado para ${payload.phone} (CNPJ ${payload.cnpj}) em ~${delayMinutes}min.`);
+
+    // Se já existe retry agendado para este telefone (ex.: PGMEI e Dívida Ativa consultadas no mesmo
+    // atendimento), não reagenda nem reavisa — o cliente já foi informado uma vez.
+    const existing = await pgfnRetryQueue.getJob(jobId);
+    if (existing) {
+        log.info(`PGFN retry já agendado para ${payload.phone}; não reagenda nem reavisa.`);
+        return delayMinutes;
+    }
+
+    await pgfnRetryQueue.add('retry', payload, { jobId, delay: delayMinutes * 60_000 });
+
+    // Avisa o cliente DE FORMA DETERMINÍSTICA (não depende do LLM) que a Dívida Ativa será
+    // consultada na próxima janela e o resultado virá por aqui — com o valor devido exato.
+    await scheduleFollowUp(payload.phone, buildWindowNoticeMessage(), NOTICE_DELAY_MS, 'reminder', {
+        kind: 'pgfn-window-confirm',
+        cnpj: payload.cnpj,
+    }).catch(err => log.error(`Falha ao avisar ${payload.phone} sobre a janela da PGFN:`, err));
+
+    log.info(`PGFN retry agendado para ${payload.phone} (CNPJ ${payload.cnpj}) em ~${delayMinutes}min + aviso enviado.`);
     return delayMinutes;
 }
 
 /** Monta a mensagem do resultado da reconsulta, em linguagem de cliente. */
 function buildResultMessage(result: Awaited<ReturnType<typeof consultarDividaAtivaPorDevedor>>): string {
+    const intro = `🔔 Bom dia! Como combinei, agora que abriu o horário consultei a sua *Dívida Ativa da União (PGFN)*:`;
+
     if (result.tem_debitos_detectado === true) {
-        return `🔔 Oi! Voltei aqui — agora dentro do horário, consultei a sua *Dívida Ativa da União (PGFN)*:\n\n⚠️ ${result.resumo.resumo_texto}\n\nPosso te explicar como regularizar essas pendências?`;
+        const r = result.resumo;
+        const situacao = r.situacoes.length ? ` (${r.situacoes.join('; ')})` : '';
+        return `${intro}\n\n⚠️ Encontrei *${r.total_inscricoes}* inscrição(ões) em dívida ativa, somando *${r.valor_total_consolidado_moeda}*${situacao}.\n\nQuer que eu te explique como regularizar isso?`;
     }
     if (result.tem_debitos_detectado === false) {
-        return `🔔 Oi! Voltei aqui — agora dentro do horário, consultei a sua *Dívida Ativa da União (PGFN)*:\n\n✅ Sem inscrições em dívida ativa na União. Tudo certo por aqui!`;
+        return `${intro}\n\n✅ Sem inscrições em dívida ativa na União. Está tudo certo por aqui!`;
     }
-    return `🔔 Oi! Tentei reconsultar a sua *Dívida Ativa da União (PGFN)*, mas o sistema da Receita não respondeu agora. Vou tentar de novo e, se persistir, encaminho a um especialista.`;
+    return `🔔 Bom dia! Tentei reconsultar a sua *Dívida Ativa da União (PGFN)*, mas o sistema da Receita não respondeu agora. Vou tentar de novo e, se persistir, encaminho a um especialista.`;
 }
 
 export function startPgfnRetryWorker(): Worker {
