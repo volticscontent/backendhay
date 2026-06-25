@@ -255,6 +255,50 @@ async function runMigrations() {
     } catch (err) {
         bootLogger.warn('Não foi possível criar índice único leads(telefone) — verifique duplicados:', err);
     }
+
+    // ── Consolidação empresas (Fase 1): integra_empresas vira a fonte única ──
+    // Estende a tabela com os campos fiscais por empresa e faz backfill do CNPJ principal
+    // de cada lead. Aditivo e idempotente (validado com dry-run). A lista passa a ler daqui.
+    await pool.query(`
+        ALTER TABLE integra_empresas
+          ADD COLUMN IF NOT EXISTS tipo_vinculo           VARCHAR(20) DEFAULT 'adicional',
+          ADD COLUMN IF NOT EXISTS tipo_negocio           TEXT,
+          ADD COLUMN IF NOT EXISTS faturamento_mensal     TEXT,
+          ADD COLUMN IF NOT EXISTS procuracao             BOOLEAN,
+          ADD COLUMN IF NOT EXISTS procuracao_ativa       BOOLEAN,
+          ADD COLUMN IF NOT EXISTS procuracao_validade    DATE,
+          ADD COLUMN IF NOT EXISTS tem_divida             BOOLEAN,
+          ADD COLUMN IF NOT EXISTS valor_divida_pgfn      NUMERIC;
+    `);
+    // Backfill: o CNPJ principal de cada lead passa a existir como empresa 'principal'.
+    await pool.query(`
+        INSERT INTO integra_empresas (cnpj, razao_social, regime_tributario, ativo, servicos_habilitados, lead_id, tipo_vinculo, tipo_negocio, faturamento_mensal)
+        SELECT DISTINCT ON (regexp_replace(l.cnpj,'[^0-9]','','g'))
+          regexp_replace(l.cnpj,'[^0-9]','','g'),
+          COALESCE(NULLIF(l.razao_social,''), l.nome_completo, 'Empresa'),
+          COALESCE(l.regime,'mei'), true, '[]'::jsonb, l.id, 'principal',
+          l.tipo_negocio, l.faturamento_mensal::text
+        FROM leads l
+        WHERE l.cnpj IS NOT NULL AND length(regexp_replace(l.cnpj,'[^0-9]','','g')) = 14
+        ON CONFLICT (cnpj) DO UPDATE SET
+          lead_id      = COALESCE(integra_empresas.lead_id, EXCLUDED.lead_id),
+          tipo_vinculo = CASE WHEN integra_empresas.lead_id = EXCLUDED.lead_id THEN 'principal' ELSE integra_empresas.tipo_vinculo END,
+          tipo_negocio = COALESCE(integra_empresas.tipo_negocio, EXCLUDED.tipo_negocio),
+          faturamento_mensal = COALESCE(integra_empresas.faturamento_mensal, EXCLUDED.faturamento_mensal),
+          updated_at   = NOW();
+    `);
+    // Backfill fiscal (procuração + dívida) na empresa principal, a partir de leads_processo/leads.
+    await pool.query(`
+        UPDATE integra_empresas ie SET
+          procuracao          = COALESCE(ie.procuracao, lp.procuracao),
+          procuracao_ativa    = COALESCE(ie.procuracao_ativa, lp.procuracao_ativa),
+          procuracao_validade = COALESCE(ie.procuracao_validade, lp.procuracao_validade::date),
+          tem_divida          = COALESCE(ie.tem_divida, l.tem_divida),
+          valor_divida_pgfn   = COALESCE(ie.valor_divida_pgfn, NULLIF(l.valor_divida_pgfn::text,'')::numeric),
+          updated_at          = NOW()
+        FROM leads l LEFT JOIN leads_processo lp ON lp.lead_id = l.id
+        WHERE ie.lead_id = l.id AND ie.tipo_vinculo = 'principal';
+    `);
 }
 
 // ==================== Inicialização ====================

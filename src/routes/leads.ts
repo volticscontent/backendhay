@@ -21,12 +21,16 @@ function fullLeadSelect(keyParam: string): string {
       l.id, l.telefone, l.nome_completo, l.email, l.cpf, l.data_nascimento, l.nome_mae, l.sexo,
       l.cnpj, l.razao_social, l.nome_fantasia, l.tipo_negocio, l.faturamento_mensal,
       COALESCE((
+          -- Fonte única: empresas do cliente vêm de integra_empresas (lead_empresa foi descontinuada).
+          -- Exclui o CNPJ principal (já exibido em l.cnpj) — aqui só as adicionais para o badge "+N".
           SELECT jsonb_agg(jsonb_build_object(
-              'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
-              'razao_social', le.razao_social,
-              'procuracao_ativa', le.procuracao_ativa
-          ) ORDER BY le.created_at)
-          FROM lead_empresa le WHERE le.lead_id = l.id
+              'cnpj', ie.cnpj, 'tipo', ie.tipo_vinculo,
+              'razao_social', ie.razao_social,
+              'procuracao_ativa', ie.procuracao_ativa
+          ) ORDER BY ie.tipo_vinculo, ie.created_at)
+          FROM integra_empresas ie
+          WHERE ie.lead_id = l.id
+            AND regexp_replace(ie.cnpj,'[^0-9]','','g') <> regexp_replace(COALESCE(l.cnpj,''),'[^0-9]','','g')
       ), '[]'::jsonb) AS empresas,
       l.endereco, l.numero, l.complemento, l.bairro, l.cidade, l.estado, l.cep,
       l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
@@ -243,12 +247,15 @@ router.get('/leads/list', async (req: Request, res: Response) => {
           l.needs_attendant, l.attendant_requested_at,
           l.cnpj, l.razao_social, l.tipo_negocio, l.faturamento_mensal,
           COALESCE((
+              -- Fonte única: integra_empresas (exclui o CNPJ principal, já em l.cnpj).
               SELECT jsonb_agg(jsonb_build_object(
-                  'cnpj', le.cnpj, 'tipo', le.tipo_vinculo,
-                  'razao_social', le.razao_social,
-                  'procuracao_ativa', le.procuracao_ativa
-              ) ORDER BY le.created_at)
-              FROM lead_empresa le WHERE le.lead_id = l.id
+                  'cnpj', ie.cnpj, 'tipo', ie.tipo_vinculo,
+                  'razao_social', ie.razao_social,
+                  'procuracao_ativa', ie.procuracao_ativa
+              ) ORDER BY ie.tipo_vinculo, ie.created_at)
+              FROM integra_empresas ie
+              WHERE ie.lead_id = l.id
+                AND regexp_replace(ie.cnpj,'[^0-9]','','g') <> regexp_replace(COALESCE(l.cnpj,''),'[^0-9]','','g')
           ), '[]'::jsonb) AS empresas,
           l.situacao, l.qualificacao, l.motivo_qualificacao, l.interesse_ajuda,
           l.pos_qualificacao, l.possui_socio, l.confirmacao_qualificacao,
