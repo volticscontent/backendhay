@@ -23,6 +23,7 @@ import { startDebounceWorker } from './queues/message-debounce';
 import { startPgmeiWorker } from './queues/integra/job-pgmei';
 import { startCndWorker } from './queues/integra/job-cnd';
 import { startCaixaPostalWorker } from './queues/integra/job-caixa-postal';
+import { startPgfnRetryWorker } from './queues/pgfn-retry';
 import { registerCronJobs } from './cron';
 import { initSocketServer } from './lib/socket-server';
 import { initEvolutionWebSocket } from './lib/evolution-ws';
@@ -265,7 +266,8 @@ async function bootstrap() {
     const pgmeiWorker = startPgmeiWorker();
     const cndWorker = startCndWorker();
     const caixaPostalWorker = startCaixaPostalWorker();
-    bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce, integra-pgmei, integra-cnd, integra-caixa-postal)');
+    const pgfnRetryWorker = startPgfnRetryWorker();
+    bootLogger.info('✅ Workers iniciados (message-sending, follow-up, debounce, integra-pgmei, integra-cnd, integra-caixa-postal, pgfn-window-retry)');
 
     // 1.5 Aquecer cache de mapeamento LID → telefone
     bootLogger.info('Aquecendo cache LID...');

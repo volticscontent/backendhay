@@ -3,12 +3,43 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.PGFN_WINDOW = void 0;
+exports.isPgfnWindowOpen = isPgfnWindowOpen;
+exports.minutesUntilPgfnOpen = minutesUntilPgfnOpen;
 exports.getPgfnToken = getPgfnToken;
 exports.consultarDividaAtivaPorDevedor = consultarDividaAtivaPorDevedor;
 exports.consultarDividaAtivaPorInscricao = consultarDividaAtivaPorInscricao;
 const node_https_1 = __importDefault(require("node:https"));
 const node_querystring_1 = __importDefault(require("node:querystring"));
 const logger_1 = require("./logger");
+// Janela de funcionamento da API REST de Dívida Ativa da PGFN (horário de Brasília).
+// Confirmado ao vivo: fora dela a API devolve 403 "Serviço REST disponível entre 07:05 e 22:00 horas".
+exports.PGFN_WINDOW = { openLabel: '07:05', closeLabel: '22:00' };
+const PGFN_OPEN_MIN = 7 * 60 + 5; // 07:05
+const PGFN_CLOSE_MIN = 22 * 60; // 22:00
+/** Minuto-do-dia atual no fuso de São Paulo (robusto a qualquer timezone do servidor). */
+function saoPauloMinuteOfDay(now = new Date()) {
+    const sp = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    return sp.getHours() * 60 + sp.getMinutes();
+}
+/** True se a API da PGFN está na janela de funcionamento agora. */
+function isPgfnWindowOpen(now = new Date()) {
+    const m = saoPauloMinuteOfDay(now);
+    return m >= PGFN_OPEN_MIN && m < PGFN_CLOSE_MIN;
+}
+/** Minutos até a próxima abertura da janela (0 se já aberta). */
+function minutesUntilPgfnOpen(now = new Date()) {
+    const m = saoPauloMinuteOfDay(now);
+    if (m < PGFN_OPEN_MIN)
+        return PGFN_OPEN_MIN - m; // ainda hoje
+    if (m >= PGFN_CLOSE_MIN)
+        return (24 * 60 - m) + PGFN_OPEN_MIN; // amanhã
+    return 0; // aberta agora
+}
+/** Detecta a resposta 403 de fora-de-horário da API de Dívida Ativa. */
+function isOffHoursError(message) {
+    return /HTTP\s*403/.test(message) && /(dispon[íi]vel\s+entre|07:05)/i.test(message);
+}
 const PGFN_TOKEN_URL = process.env.PGFN_TOKEN_URL || 'https://gateway.apiserpro.serpro.gov.br/token';
 const PGFN_BASE_URL = (process.env.PGFN_BASE_URL || 'https://gateway.apiserpro.serpro.gov.br/consulta-divida-ativa-df/api').replace(/\/$/, '');
 const PGFN_CLIENT_ID = process.env.PGFN_CLIENT_ID;
@@ -274,6 +305,21 @@ async function consultarPgfn(path, consulta, parametro, forceRefresh = false) {
         const message = String(error instanceof Error ? error.message : error);
         if (!forceRefresh && message.includes('401'))
             return consultarPgfn(path, consulta, parametro, true);
+        // PGFN fora do horário (07:05–22:00) = estado esperado, NÃO erro. Devolve flag para
+        // o fluxo reagendar a consulta dentro da janela em vez de tratar como falha.
+        if (isOffHoursError(message)) {
+            return {
+                status: 'success',
+                origem: 'pgfn_api',
+                consulta,
+                parametro,
+                dados: null,
+                tem_debitos_detectado: null,
+                fora_de_horario: true,
+                mensagens_pgfn: [`Consulta à Dívida Ativa (PGFN) disponível das ${exports.PGFN_WINDOW.openLabel} às ${exports.PGFN_WINDOW.closeLabel}.`],
+                resumo: buildPgfnResumo(null, []),
+            };
+        }
         // PGFN 404 = devedor não encontrado = sem dívida ativa inscrita
         if (message.includes('404')) {
             const emptyResumo = buildPgfnResumo(null, []);

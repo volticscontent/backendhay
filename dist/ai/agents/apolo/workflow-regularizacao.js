@@ -11,6 +11,7 @@ const db_1 = __importDefault(require("../../../lib/db"));
 const redis_1 = __importDefault(require("../../../lib/redis"));
 const regularizacao_system_1 = require("../../regularizacao-system");
 const pgfn_1 = require("../../../lib/pgfn");
+const pgfn_retry_1 = require("../../../queues/pgfn-retry");
 const closing_audit_1 = require("./closing-audit");
 async function processMessageSegments(phone, segments, sender) {
     for (const segment of segments) {
@@ -238,8 +239,9 @@ A tool consulta automaticamente os **últimos 6 anos** (sem precisar pedir). Cam
 **Regras de ouro:**
 - \`COM_DEBITO\` → HÁ DÍVIDAS. Informe ao cliente os anos listados em \`anos_com_debito\`.
 - \`SEM_DEBITO\` → situação regular em todos os anos consultados. Pode confirmar ao cliente.
-- \`INCONCLUSIVO\` → NÃO diga "sem dívidas". Avise que não foi possível confirmar, use 'chamar_atendente' com um resumo do caso, e informe ao cliente que um especialista vai entrar em contato em breve. **NÃO sugira agendar reunião nesses casos.**
-  - 🚫 **NUNCA INVENTE A CAUSA DA FALHA.** É TERMINANTEMENTE PROIBIDO afirmar motivos específicos que você não recebeu da tool — ex: "a PGFN só funciona das 07:05 às 22:00", "fora do horário de atendimento", "erro por causa do horário", "o sistema cai todo dia tal hora". Esses horários/regras NÃO existem e são alucinação. Diga apenas, genericamente, que "houve uma instabilidade momentânea nos sistemas da Receita e vamos reconsultar/encaminhar a um especialista". Nada além disso.
+- \`pgfn_fora_de_horario = true\` → **caso especial, NÃO é erro nem inconclusivo.** A API de Dívida Ativa da PGFN só funciona em horário comercial (07:05–22:00, Brasília) — isso é REAL e esperado, não é instabilidade. O sistema **já agendou a reconsulta automática** para quando a janela abrir e vai avisar o cliente. Comunique como **procedimento padrão**, com naturalidade, e **siga normalmente com o PGMEI agora**. **NÃO** use 'chamar_atendente' por causa disso. Ex: "A consulta da Dívida Ativa (PGFN) funciona em horário comercial; assim que abrir, faço a verificação automática e te aviso. Enquanto isso, já adianto o PGMEI."
+- \`INCONCLUSIVO\` (e SEM ser fora de horário) → NÃO diga "sem dívidas". Avise que não foi possível confirmar, use 'chamar_atendente' com um resumo do caso, e informe ao cliente que um especialista vai entrar em contato em breve. **NÃO sugira agendar reunião nesses casos.**
+  - Quando a causa for instabilidade real (sem pgfn_fora_de_horario), diga apenas, genericamente, que "houve uma instabilidade momentânea nos sistemas da Receita e vamos reconsultar". Não invente outros motivos que a tool não retornou.
 - Use \`resumo_executivo\` como base, adaptando para linguagem simples e amigável.
 - Nunca exiba os campos brutos JSON ao cliente — traduza tudo para português claro.
 
@@ -264,7 +266,11 @@ COM_DEBITO:
 SEM_DEBITO:
 "Boa notícia! Consultei o CNPJ [cnpj] no Serpro:|||✅ *PGMEI (guias DAS):* em dia — nenhuma pendência encontrada|||✅ *PGFN (Dívida Ativa):* sem inscrições em dívida ativa|||Tudo certo! Quer que eu emita a CND (Certidão Negativa) como comprovante?"
 
-INCONCLUSIVO (serviço indisponível ou resposta parcial):
+PGFN FORA DE HORÁRIO (pgfn_fora_de_horario = true — procedimento padrão, NÃO é erro):
+"Consultei o CNPJ [cnpj]:|||[se PGMEI COM_DEBITO: ⚠️ *PGMEI (guias DAS):* débitos nos anos [lista] | se SEM: ✅ *PGMEI:* em dia]|||ℹ️ A consulta da *Dívida Ativa (PGFN)* funciona em horário comercial (07:05–22:00). Vou fazer essa verificação automaticamente assim que abrir e te aviso por aqui.|||Enquanto isso, podemos já adiantar [próximo passo do PGMEI]. Pode ser?"
+→ NÃO chame 'chamar_atendente'. NÃO fale em "instabilidade". A reconsulta já está agendada pelo sistema.
+
+INCONCLUSIVO (instabilidade real — e NÃO fora de horário):
 "Consultei o CNPJ [cnpj], mas não consegui confirmar a situação no momento — os sistemas da Receita podem estar com instabilidade.|||Já acionei nossa equipe. Um especialista vai entrar em contato com você em breve para dar continuidade. 🙏"
 → OBRIGATÓRIO: chame 'chamar_atendente' com resumo do caso ANTES de enviar a mensagem ao cliente. NÃO ofereça link de reunião.
 
@@ -540,15 +546,24 @@ const getRegularizacaoTools = (context) => [
                 const pgmei = formatServicoResult(pgmeiPorAno);
                 const pgfn = formatServicoResult(pgfnPorAno);
                 const pgfn_detalhes = pgfnRaw.status === 'fulfilled' ? pgfnRaw.value.resumo : undefined;
+                // PGFN fora do horário (07:05–22:00): estado ESPERADO, não erro. Agenda a reconsulta
+                // automática para a abertura da janela e sinaliza ao LLM para comunicar como procedimento padrão.
+                const pgfn_fora_de_horario = pgfnRaw.status === 'fulfilled' && !!pgfnRaw.value.fora_de_horario;
+                if (pgfn_fora_de_horario) {
+                    await (0, pgfn_retry_1.schedulePgfnRetry)({ phone: context.userPhone, cnpj: gate.cnpj })
+                        .catch(err => console.error('[consultar_pgmei_serpro] Erro ao agendar retry PGFN:', err));
+                }
                 // DASN-SIMEI indisponível na Serpro (em prospecção). Não consultada — não afirmar nada sobre ela.
                 const dasn_result = null;
                 const dasn_info = 'DASN-SIMEI indisponível (serviço ainda não liberado pela Serpro).';
                 const resumo_executivo = buildResumoExecutivo(pgmei, pgfn, pgfn_detalhes);
                 const aviso = pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO'
-                    ? '⚠️ Débitos encontrados. Informe ao cliente os anos com pendências e oriente a regularização.'
-                    : pgmei.situacao === 'INCONCLUSIVO' || pgfn.situacao === 'INCONCLUSIVO'
-                        ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
-                        : undefined;
+                    ? '⚠️ Débitos encontrados no PGMEI. Informe ao cliente os anos com pendências e oriente a regularização.'
+                    : pgfn_fora_de_horario
+                        ? `ℹ️ PGFN fora do horário (funciona ${pgfn_1.PGFN_WINDOW.openLabel}–${pgfn_1.PGFN_WINDOW.closeLabel}). NÃO é erro nem instabilidade. Já agendei a reconsulta automática para a abertura. Comunique como procedimento padrão e siga com o PGMEI agora.`
+                        : pgmei.situacao === 'INCONCLUSIVO' || pgfn.situacao === 'INCONCLUSIVO'
+                            ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
+                            : undefined;
                 // Atualiza a ficha do lead com os dados reais encontrados
                 const tem_divida = pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO';
                 let tipo_divida = '';
@@ -565,7 +580,7 @@ const getRegularizacaoTools = (context) => [
                     tipo_divida: tipo_divida || undefined,
                     valor_divida_pgfn
                 }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
-                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_sem_procuracao: !!gate.bypass_reason });
+                return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_fora_de_horario, pgfn_janela: `${pgfn_1.PGFN_WINDOW.openLabel}–${pgfn_1.PGFN_WINDOW.closeLabel}`, pgfn_sem_procuracao: !!gate.bypass_reason });
             }
             catch (error) {
                 return JSON.stringify({ status: 'error', message: String(error) });
@@ -775,12 +790,18 @@ const getRegularizacaoTools = (context) => [
                     return JSON.stringify({ status: 'error', error_type: 'procuracao_obrigatoria', message: gate.message });
                 }
                 const pgfn = await (0, pgfn_1.consultarDividaAtivaPorDevedor)(gate.cnpj);
+                if (pgfn.fora_de_horario) {
+                    await (0, pgfn_retry_1.schedulePgfnRetry)({ phone: context.userPhone, cnpj: gate.cnpj })
+                        .catch(err => console.error('[consultar_divida_ativa] Erro ao agendar retry PGFN:', err));
+                }
                 return JSON.stringify({
                     status: 'success',
                     origem: pgfn.origem,
                     consulta: pgfn.consulta,
                     parametro: pgfn.parametro,
                     tem_debitos_detectado: pgfn.tem_debitos_detectado,
+                    pgfn_fora_de_horario: !!pgfn.fora_de_horario,
+                    pgfn_janela: `${pgfn_1.PGFN_WINDOW.openLabel}–${pgfn_1.PGFN_WINDOW.closeLabel}`,
                     resumo: pgfn.resumo,
                     dados: pgfn.dados,
                     mensagens_pgfn: pgfn.mensagens_pgfn,

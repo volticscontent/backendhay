@@ -7,7 +7,6 @@ import { runAtendenteAgent } from '../ai/agents/atendente';
 import { AgentContext, AgentMessage } from '../ai/types';
 import { getUser, updateUser, createUser, getAgentRouting } from '../ai/server-tools';
 import { addToHistory, getChatHistory } from '../lib/chat-history';
-import { isScheduleHallucination, sanitizeHallucination } from '../lib/output-guard';
 import { enqueueMessages, scheduleFollowUp, cancelPendingFollowUps } from './message-queue';
 import { debounceLogger } from '../lib/logger';
 import { isWithinBusinessHours } from '../lib/business-hours';
@@ -228,13 +227,6 @@ async function resolveUserState(userPhone: string, pushName?: string): Promise<U
 /** Envia resposta do agente via BullMQ */
 async function sendAgentResponse(responseText: string, sender: string, userPhone: string, agentLabel: string = 'BOT'): Promise<void> {
     if (!responseText) return;
-
-    // Trava determinística: remove a alucinação de "horário da PGFN" ANTES de enviar e gravar,
-    // para nunca chegar ao cliente nem reabastecer o histórico. Regra de prompt não basta.
-    if (isScheduleHallucination(responseText)) {
-        debounceLogger.warn(`🛡️ Alucinação de horário PGFN bloqueada na resposta (${agentLabel}, ${userPhone}).`);
-        responseText = sanitizeHallucination(responseText);
-    }
 
     await addToHistory(userPhone, 'assistant', responseText);
 
