@@ -243,6 +243,18 @@ async function runMigrations() {
     await pool.query(`
         ALTER TABLE leads ADD COLUMN IF NOT EXISTS regime VARCHAR(20);
     `);
+
+    // ── Lead único por telefone (rede de segurança no banco) ──
+    // Impede um 2º perfil com o mesmo número (createUser já é idempotente em código).
+    // Índice parcial: ignora telefones nulos. Não falha se já houver duplicados (apenas loga).
+    try {
+        await pool.query(`
+            CREATE UNIQUE INDEX IF NOT EXISTS leads_telefone_uniq
+            ON leads (telefone) WHERE telefone IS NOT NULL;
+        `);
+    } catch (err) {
+        bootLogger.warn('Não foi possível criar índice único leads(telefone) — verifique duplicados:', err);
+    }
 }
 
 // ==================== Inicialização ====================

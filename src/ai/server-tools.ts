@@ -58,6 +58,13 @@ export async function createUser(data: Record<string, unknown>): Promise<string>
     try {
         const { nome_completo, telefone } = data;
         const email = data.email || null;
+        // Idempotente por telefone: NUNCA cria um 2º perfil para um número que já existe na lista.
+        // Antes, chamadas repetidas duplicavam o lead (mesma pessoa, vários perfis).
+        const existing = await query('SELECT * FROM leads WHERE telefone = $1 LIMIT 1', [telefone]);
+        if (existing.rows.length > 0) {
+            log.info(`[createUser] Lead já existe para ${telefone} (id=${existing.rows[0].id}) — reutilizando.`);
+            return JSON.stringify({ status: 'success', id: existing.rows[0].id, result: existing.rows[0], reused: true });
+        }
         const res = await query(
             `INSERT INTO leads (nome_completo, telefone, email, data_cadastro) VALUES ($1, $2, $3, NOW()) RETURNING *`,
             [nome_completo, telefone, email]
