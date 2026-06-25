@@ -139,14 +139,9 @@ export const SERVICE_CONFIG: Record<string, ServiceConfigItem> = {
         tipo: 'Consultar',
         descricao: 'Consulta Extrato PGDAS-D.',
     },
-    DASN_SIMEI: {
-        env_sistema: 'INTEGRA_DASNSIMEI_ID_SISTEMA',
-        env_servico: 'INTEGRA_DASNSIMEI_ID_SERVICO',
-        default_sistema: 'DASNSIMEI',
-        default_servico: 'CONSULTIMADECREC152',
-        tipo: 'Consultar',
-        descricao: 'Consulta Declaração Anual do MEI (DASN).',
-    },
+    // DASN_SIMEI removido do catálogo: a Serpro mantém o serviço "em prospecção" (ainda não liberado
+    // em produção — erro ICGERENCIADOR-044). Não é contratável; será reincluído quando a Serpro publicar.
+    // Mantido em sync com o frontend (src/lib/serpro-config.ts).
     DCTFWEB: {
         env_sistema: 'INTEGRA_DCTFWEB_ID_SISTEMA',
         env_servico: 'INTEGRA_DCTFWEB_ID_SERVICO',

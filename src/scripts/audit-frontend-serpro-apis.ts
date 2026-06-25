@@ -50,7 +50,7 @@ const SERVICES: ServiceTest[] = [
   { group: 'Parcelamentos', service: 'PARCELAMENTO_SN_CONSULTAR', label: 'Parcelamento SN Consultar', kind: 'integra' },
   { group: 'Parcelamentos', service: 'PARCELAMENTO_MEI_EMITIR', label: 'Parcelamento MEI Emitir', kind: 'integra', options: { ano: ANO_ATUAL, mes: MES_ATUAL } },
   { group: 'Parcelamentos', service: 'PARCELAMENTO_SN_EMITIR', label: 'Parcelamento SN Emitir', kind: 'integra', options: { ano: ANO_ATUAL, mes: MES_ATUAL } },
-  { group: 'Declarações', service: 'DASN_SIMEI', label: 'DASN SIMEI', kind: 'integra', options: { ano: ANO_ANTERIOR } },
+  // DASN_SIMEI fora do audit: serviço "em prospecção" na Serpro (ICGERENCIADOR-044, não liberado em produção).
   { group: 'Declarações', service: 'PGDASD', label: 'PGDASD', kind: 'integra', skip: 'Requer número DAS/recibo específico; frontend deixa manual.' },
   { group: 'Declarações', service: 'DCTFWEB', label: 'DCTFWeb', kind: 'integra', options: { ano: ANO_ATUAL, categoria: 'GERAL_MENSAL' } },
   { group: 'Mensagens e Processos', service: 'CAIXA_POSTAL', label: 'Caixa Postal', kind: 'integra' },

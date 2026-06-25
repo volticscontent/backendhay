@@ -171,7 +171,7 @@ async function run() {
   resultados.push(await testar('PARCELAMENTO_SN_EMITIR',  { ano: ANO_ATUAL, mes: MES_ATUAL }));
 
   // ── 6. Declarações ──────────────────────────────────────────────────────────
-  resultados.push(await testar('DASN_SIMEI', { ano: ANO_ANTERIOR }));
+  // DASN_SIMEI fora do teste: serviço "em prospecção" na Serpro (ICGERENCIADOR-044, não liberado em produção).
   resultados.push(await testar('PGDASD',
     {},
     'Requer numeroDas de uma consulta prévia — rode manualmente no painel após PGMEI',

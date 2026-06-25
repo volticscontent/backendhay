@@ -3,7 +3,7 @@ import querystring from 'node:querystring';
 import fs from 'node:fs';
 import path from 'node:path';
 import forge from 'node-forge';
-import { SERVICE_CONFIG, ServiceConfigItem } from './serpro-config';
+import { SERVICE_CONFIG } from './serpro-config';
 import { SerproTokens, SerproPayload, SerproParte, SerproOptions, TipoContribuinte } from './serpro-types';
 import { serproLogger } from './logger';
 
@@ -38,7 +38,7 @@ const extractPfxData = (pfxBuffer: Buffer | undefined, passphrase?: string) => {
     try {
         const p12Asn1 = forge.asn1.fromDer(pfxBuffer.toString('binary'));
         const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, passphrase);
-        
+
         // Extrair chave privada (pode estar em diferentes tipos de bags)
         let keyPem: string | undefined;
         const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag];
@@ -84,7 +84,20 @@ const pfxExtracted = extractPfxData(SERPRO_PFX_BUFFER, SERPRO_CERT_PASS);
 const FINAL_CERT = pfxExtracted.cert || SERPRO_CERT_PEM_RAW;
 const FINAL_KEY = pfxExtracted.key || SERPRO_CERT_KEY_RAW;
 
-
+/**
+ * Lê a data de expiração (notAfter) do certificado mTLS atualmente carregado.
+ * Usado pelo cron de alerta de vencimento — quando o cert vence, TODA chamada
+ * Serpro falha no handshake TLS de uma vez. Retorna null se não houver cert ou falhar o parse.
+ */
+export function getCertNotAfter(): Date | null {
+    if (!FINAL_CERT) return null;
+    try {
+        return forge.pki.certificateFromPem(FINAL_CERT).validity.notAfter;
+    } catch (error) {
+        serproLogger.error('Falha ao ler a validade do certificado Serpro:', error);
+        return null;
+    }
+}
 
 const SERPRO_ROLE_TYPE = process.env.SERPRO_ROLE_TYPE || 'TERCEIROS';
 const SERPRO_AUTHENTICATE_URL = process.env.SERPRO_AUTHENTICATE_URL || 'https://autenticacao.sapi.serpro.gov.br/authenticate';
@@ -144,7 +157,7 @@ export async function request(
                         } catch {
                             errorMessage += `: ${data.substring(0, 1000)}`;
                         }
-                        
+
                         // Retry on 500/502/503/504
                         if (retries > 0 && res.statusCode && res.statusCode >= 500) {
                             serproLogger.warn(`Retrying request to ${urlStr} due to ${res.statusCode}. Retries left: ${retries}. Error: ${errorMessage}`);
@@ -350,7 +363,7 @@ export async function consultarServico(nomeServico: keyof typeof SERVICE_CONFIG,
 
     if (options.numeroRecibo) dadosServico.numeroRecibo = options.numeroRecibo;
     if (options.codigoReceita) dadosServico.codigoReceita = options.codigoReceita;
-    
+
     // Parcela para emissão — formato YYYYMM obrigatório (ex: "202601")
     if (['PARCELAMENTO_SN_EMITIR', 'PARCELAMENTO_MEI_EMITIR'].includes(nomeServico)) {
         if (options.parcelaParaEmitir) {

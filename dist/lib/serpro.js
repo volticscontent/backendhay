@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SERVICE_CONFIG = void 0;
+exports.getCertNotAfter = getCertNotAfter;
 exports.request = request;
 exports.getSerproTokens = getSerproTokens;
 exports.consultarServico = consultarServico;
@@ -86,6 +87,22 @@ const SERPRO_PFX_BUFFER = (SERPRO_CERT_PFX_PATH && node_fs_1.default.existsSync(
 const pfxExtracted = extractPfxData(SERPRO_PFX_BUFFER, SERPRO_CERT_PASS);
 const FINAL_CERT = pfxExtracted.cert || SERPRO_CERT_PEM_RAW;
 const FINAL_KEY = pfxExtracted.key || SERPRO_CERT_KEY_RAW;
+/**
+ * Lê a data de expiração (notAfter) do certificado mTLS atualmente carregado.
+ * Usado pelo cron de alerta de vencimento — quando o cert vence, TODA chamada
+ * Serpro falha no handshake TLS de uma vez. Retorna null se não houver cert ou falhar o parse.
+ */
+function getCertNotAfter() {
+    if (!FINAL_CERT)
+        return null;
+    try {
+        return node_forge_1.default.pki.certificateFromPem(FINAL_CERT).validity.notAfter;
+    }
+    catch (error) {
+        logger_1.serproLogger.error('Falha ao ler a validade do certificado Serpro:', error);
+        return null;
+    }
+}
 const SERPRO_ROLE_TYPE = process.env.SERPRO_ROLE_TYPE || 'TERCEIROS';
 const SERPRO_AUTHENTICATE_URL = process.env.SERPRO_AUTHENTICATE_URL || 'https://autenticacao.sapi.serpro.gov.br/authenticate';
 const INTEGRA_BASE_URLS = {

@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { AgentContext } from './types';
 import { agentLogger } from '../lib/logger';
 import { getChatHistory } from '../lib/chat-history';
+import { sanitizeHallucination } from '../lib/output-guard';
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'dummy-key',
@@ -78,7 +79,10 @@ export async function runAgent(
             if (h.role === 'user' && h.content === currentMsgText && h === history[history.length - 1]) {
                 continue;
             }
-            messages.push({ role: h.role as 'user' | 'assistant' | 'system', content: h.content });
+            // Limpa alucinações antigas (ex: "PGFN só funciona das 07:05 às 22:00") antes de
+            // realimentar o LLM — senão o modelo imita a própria mentira passada.
+            const content = h.role === 'assistant' ? sanitizeHallucination(h.content) : h.content;
+            messages.push({ role: h.role as 'user' | 'assistant' | 'system', content });
         }
 
         // 3. Adicionar a mensagem atual — multimodal (imagem) passa como ContentPart[], texto como string

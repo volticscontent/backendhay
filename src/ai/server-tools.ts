@@ -408,12 +408,20 @@ export async function callAttendant(phone: string, reason: string = 'Solicitaç�
         const leadRes = await query(`SELECT id FROM leads WHERE telefone = $1`, [phone]);
         if (leadRes.rows.length > 0) {
             const leadId = leadRes.rows[0].id;
+            // Um lead já marcado como 'pronto_faturamento' (fechamento concluído via
+            // concluir_cadastro_fechamento) NÃO pode ser rebaixado para 'atendimento'
+            // nem ganhar uma reunião fantasma — a notificação aqui é só um aviso ao
+            // Haylander de que há um lead pronto para cobrar.
             await query(`
                 INSERT INTO leads_processo (lead_id, data_reuniao, status_atendimento)
                 VALUES ($1, $2, 'atendimento')
                 ON CONFLICT (lead_id) DO UPDATE SET
-                    data_reuniao       = EXCLUDED.data_reuniao,
-                    status_atendimento = 'atendimento',
+                    data_reuniao       = CASE WHEN leads_processo.status_atendimento = 'pronto_faturamento'
+                                              THEN leads_processo.data_reuniao
+                                              ELSE EXCLUDED.data_reuniao END,
+                    status_atendimento = CASE WHEN leads_processo.status_atendimento = 'pronto_faturamento'
+                                              THEN 'pronto_faturamento'
+                                              ELSE 'atendimento' END,
                     updated_at         = NOW()
             `, [leadId, scheduledDate]);
         }
@@ -637,7 +645,6 @@ const FRESHNESS_DAYS: Record<string, number> = {
     SIT_FISCAL_RELATORIO:      90,
     CND:                      180,
     CAIXA_POSTAL:               1,  // mensagens chegam diariamente
-    DASN_SIMEI:               365,  // declaração anual
     DCTFWEB:                   30,
     PGDASD:                    30,
     PARCELAMENTO_MEI_CONSULTAR: 7,

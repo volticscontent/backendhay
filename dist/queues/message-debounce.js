@@ -47,6 +47,7 @@ const vendedor_1 = require("../ai/agents/vendedor");
 const atendente_1 = require("../ai/agents/atendente");
 const server_tools_1 = require("../ai/server-tools");
 const chat_history_1 = require("../lib/chat-history");
+const output_guard_1 = require("../lib/output-guard");
 const message_queue_1 = require("./message-queue");
 const logger_1 = require("../lib/logger");
 const business_hours_1 = require("../lib/business-hours");
@@ -233,6 +234,12 @@ async function resolveUserState(userPhone, pushName) {
 async function sendAgentResponse(responseText, sender, userPhone, agentLabel = 'BOT') {
     if (!responseText)
         return;
+    // Trava determinística: remove a alucinação de "horário da PGFN" ANTES de enviar e gravar,
+    // para nunca chegar ao cliente nem reabastecer o histórico. Regra de prompt não basta.
+    if ((0, output_guard_1.isScheduleHallucination)(responseText)) {
+        logger_1.debounceLogger.warn(`🛡️ Alucinação de horário PGFN bloqueada na resposta (${agentLabel}, ${userPhone}).`);
+        responseText = (0, output_guard_1.sanitizeHallucination)(responseText);
+    }
     await (0, chat_history_1.addToHistory)(userPhone, 'assistant', responseText);
     const messages = responseText.split('|||').map(m => m.trim()).filter(m => m.length > 0);
     if (messages.length === 0)

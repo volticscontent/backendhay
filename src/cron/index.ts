@@ -9,6 +9,7 @@ import { evolutionGetConnectionState, evolutionConnectInstance } from '../lib/ev
 import { enqueueRoboPgmei } from '../queues/integra/job-pgmei';
 import { enqueueRoboCnd } from '../queues/integra/job-cnd';
 import { enqueueRoboCaixaPostal } from '../queues/integra/job-caixa-postal';
+import { getCertNotAfter } from '../lib/serpro';
 
 const INTEGRA_ENQUEUE: Record<string, (id: number) => Promise<void>> = {
     pgmei:        enqueueRoboPgmei,
@@ -479,6 +480,64 @@ export function registerCronJobs(): void {
             log.error('Erro no cron red-flag 24h:', err);
         } finally {
             client.release();
+        }
+    });
+
+    // ============================
+    // N. Alerta de vencimento do certificado Serpro — Diário às 09h e 18h
+    //    Quando o certificado mTLS vence, TODA chamada Serpro (PGMEI, PGFN, CND,
+    //    Caixa Postal) falha de uma vez no handshake TLS. Avisa os ADMIN_PHONES
+    //    em marcos (30/15/7/3/1 dias) e diariamente quando já vencido.
+    // ============================
+    cron.schedule('0 9,18 * * *', async () => {
+        const log = cronLogger.withTrace(`cron-cert-${Date.now().toString(36)}`);
+        try {
+            const notAfter = getCertNotAfter();
+            if (!notAfter) {
+                log.warn('Certificado Serpro: não foi possível ler a validade (cert ausente ou inválido).');
+                return;
+            }
+
+            const daysLeft = Math.floor((notAfter.getTime() - Date.now()) / 86_400_000);
+            const venc = notAfter.toLocaleDateString('pt-BR');
+            log.info(`Certificado Serpro válido por mais ${daysLeft} dia(s) (vence ${venc}).`);
+
+            // Janela de alerta: últimos 30 dias. Throttle via Redis para não spammar:
+            // semana crítica (<=7 dias ou vencido) = 2x/dia (09h e 18h); entre 8–30 dias = semanal.
+            // Baseado em faixa + TTL (não em marcos exatos), então não perde o alerta
+            // se o servidor estiver reiniciando num dia específico.
+            if (daysLeft > 30) return;
+            const dedupKey = 'cron:cert-alert';
+            if (await redis.get(dedupKey)) return;
+
+            const critical = daysLeft <= 7;
+            const texto = daysLeft <= 0
+                ? `🔴 *CERTIFICADO SERPRO VENCIDO* (${venc})\n\nTODAS as consultas Serpro (PGMEI, PGFN, CND, Caixa Postal) estão fora do ar até a renovação. Renove o certificado A1 da Haylander Martins Contabilidade com URGÊNCIA.`
+                : `⚠️ *Certificado Serpro vence em ${daysLeft} dia(s)* (${venc})\n\nQuando vencer, todas as consultas Serpro param de uma vez. Providencie a renovação do certificado A1 da Haylander Martins Contabilidade.`;
+
+            const admins = (process.env.ADMIN_PHONES ?? '')
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+
+            if (admins.length === 0) {
+                log.warn('Alerta de certificado não enviado: ADMIN_PHONES vazio.');
+                return;
+            }
+
+            for (const phone of admins) {
+                await enqueueMessages({
+                    phone: normalizePhone(phone),
+                    messages: [{ content: texto, type: 'text', delay: 0 }],
+                    context: 'cron-cert-expiry',
+                });
+            }
+            // 2x/dia na semana crítica (TTL 8h: o run das 09h expira antes do das 18h, e vice-versa);
+            // senão, semanal.
+            await redis.set(dedupKey, String(daysLeft), 'EX', critical ? 60 * 60 * 8 : 60 * 60 * 24 * 7);
+            log.warn(`Alerta de vencimento de certificado enviado a ${admins.length} admin(s). Dias restantes: ${daysLeft}.`);
+        } catch (err) {
+            log.error('Erro no cron de validade do certificado Serpro:', err);
         }
     });
 
