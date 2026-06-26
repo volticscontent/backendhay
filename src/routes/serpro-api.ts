@@ -184,6 +184,75 @@ router.get('/serpro/history', async (req: Request, res: Response) => {
   }
 });
 
+// GET /serpro/cliente-empresas?cnpj=... — resolve o cliente (lead) pelo CNPJ e devolve
+// todas as empresas cadastradas dele (integra_empresas) + status de procuração do lead.
+// Usado pelo navbar do popup de histórico para navegar por empresa.
+router.get('/serpro/cliente-empresas', async (req: Request, res: Response) => {
+  const cnpjRaw = req.query.cnpj as string;
+  if (!cnpjRaw) return void res.status(400).json({ error: 'CNPJ is required' });
+  const cleanCnpj = cnpjRaw.replace(/\D/g, '');
+
+  try {
+    // 1. Resolve o lead a partir do CNPJ (cnpj principal, vínculo lead_empresa ou cadastro integra_empresas).
+    const leadResult = await query(
+      `SELECT l.id AS lead_id, l.nome_completo AS lead_nome,
+              COALESCE(lp.procuracao_ativa, lp.procuracao, false) AS procuracao_ativa,
+              lp.procuracao_validade
+       FROM leads l
+       LEFT JOIN leads_processo lp ON lp.lead_id = l.id
+       WHERE REGEXP_REPLACE(COALESCE(l.cnpj, ''), '[^0-9]', '', 'g') = $1
+          OR l.id IN (SELECT lead_id FROM lead_empresa WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1)
+          OR l.id IN (SELECT lead_id FROM integra_empresas WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $1)
+       LIMIT 1`,
+      [cleanCnpj],
+    );
+
+    const lead = leadResult.rows[0] ?? null;
+    const procuracaoAtiva = lead ? Boolean(lead.procuracao_ativa) : false;
+    const procuracaoValidade = lead ? (lead.procuracao_validade as string | null) : null;
+
+    // 2. Empresas cadastradas do lead (fonte canônica: integra_empresas).
+    let empresas: Array<Record<string, unknown>> = [];
+    if (lead) {
+      const empResult = await query(
+        `SELECT id, REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') AS cnpj, razao_social,
+                regime_tributario, ativo, servicos_habilitados, certificado_validade,
+                procuracao_ativa, procuracao_validade, tem_divida, valor_divida_pgfn
+         FROM integra_empresas
+         WHERE lead_id = $1
+         ORDER BY tipo_vinculo = 'principal' DESC, ativo DESC, razao_social ASC`,
+        [lead.lead_id],
+      );
+      empresas = empResult.rows.map((r) => ({ ...r, fonte: 'cadastro' }));
+    }
+
+    // 3. Fallback: garante que o CNPJ do card sempre apareça, mesmo sem cadastro formal,
+    //    para o popup nunca abrir vazio.
+    if (!empresas.some((e) => e.cnpj === cleanCnpj)) {
+      empresas.unshift({
+        id: null,
+        cnpj: cleanCnpj,
+        razao_social: lead?.lead_nome ?? null,
+        regime_tributario: null,
+        ativo: true,
+        servicos_habilitados: [],
+        certificado_validade: null,
+        fonte: 'fallback',
+      });
+    }
+
+    res.json({
+      lead: lead ? { id: lead.lead_id, nome: lead.lead_nome } : null,
+      procuracao_ativa: procuracaoAtiva,
+      procuracao_validade: procuracaoValidade,
+      empresas,
+    });
+  } catch (err) {
+    console.error('serpro/cliente-empresas error:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 // GET /serpro/carteira — portfolio view: leads with CNPJ + document status per service
 router.get('/serpro/carteira', async (req: Request, res: Response) => {
   const servicos = ['SIT_FISCAL_RELATORIO', 'CND', 'PGMEI_EXTRATO'];
