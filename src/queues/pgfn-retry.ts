@@ -105,15 +105,29 @@ export function startPgfnRetryWorker(): Worker {
             // histórico/Resumo da empresa — antes este caminho consultava sem persistir nada.
             await saveConsultation(cnpj, 'PGFN_API', result, 200, 'loop').catch(() => {});
 
-            // Persiste o valor real da dívida no cadastro do lead (campo que ficou zerado quando
-            // a primeira chamada ocorreu fora do horário e o valor era desconhecido).
+            // Persiste o valor real da dívida (ficou desconhecido quando a chamada original
+            // ocorreu fora do horário). Atualiza nos dois lugares:
+            //   1. integra_empresas — valor por empresa (fonte canônica do painel)
+            //   2. leads            — valor do lead (usado pelo bot no contexto do atendimento)
             if (result.tem_debitos_detectado === true && (result.resumo?.valor_total_consolidado ?? 0) > 0) {
-                await pool.query(
-                    `UPDATE leads SET valor_divida_pgfn = $1
-                     WHERE REGEXP_REPLACE(telefone, '[^0-9]', '', 'g') = $2`,
-                    [result.resumo!.valor_total_consolidado, phone.replace(/\D/g, '')]
-                ).catch(err => log.error(`PGFN retry: erro ao persistir valor_divida_pgfn para ${phone}:`, err));
-                log.info(`PGFN: valor_divida_pgfn=${result.resumo!.valor_total_consolidado} salvo para ${phone}.`);
+                const valor = result.resumo!.valor_total_consolidado;
+                const cnpjDigits = cnpj.replace(/\D/g, '');
+                const phoneDigits = phone.replace(/\D/g, '');
+
+                await Promise.all([
+                    pool.query(
+                        `UPDATE integra_empresas SET valor_divida_pgfn = $1
+                         WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $2`,
+                        [valor, cnpjDigits]
+                    ),
+                    pool.query(
+                        `UPDATE leads SET valor_divida_pgfn = $1
+                         WHERE REGEXP_REPLACE(telefone, '[^0-9]', '', 'g') = $2`,
+                        [valor, phoneDigits]
+                    ),
+                ]).catch(err => log.error(`PGFN retry: erro ao persistir valor_divida_pgfn (CNPJ ${cnpj}, phone ${phone}):`, err));
+
+                log.info(`PGFN: valor_divida_pgfn=${valor} salvo para CNPJ ${cnpj} (${phone}).`);
             }
 
             // Se a própria reconsulta caiu fora do horário (borda da janela), reagenda.

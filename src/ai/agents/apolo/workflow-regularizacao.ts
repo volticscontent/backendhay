@@ -632,26 +632,53 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                         ? '⚠️ Resultado inconclusivo em alguns anos. Não afirme "sem dívidas" sem verificação adicional.'
                         : undefined;
 
-                // Atualiza a ficha do lead com os dados reais encontrados
-                const tem_divida = pgmei.situacao === 'COM_DEBITO' || pgfn.situacao === 'COM_DEBITO';
-                let tipo_divida = '';
-                if (pgmei.situacao === 'COM_DEBITO' && pgfn.situacao === 'COM_DEBITO') tipo_divida = 'Federal e DAS';
-                else if (pgfn.situacao === 'COM_DEBITO') tipo_divida = 'Federal';
-                else if (pgmei.situacao === 'COM_DEBITO') tipo_divida = 'DAS';
+                // Atualiza a ficha do lead com os dados reais encontrados.
+                // Quando PGFN está fora do horário, o resultado da PGFN é desconhecido:
+                //   - tem_divida só é marcado false se PGMEI também estiver SEM_DEBITO E o resultado
+                //     da PGFN for conhecido (não fora_de_horario) — evita falso-negativo.
+                //   - valor_divida_pgfn e tem_divida da PGFN chegam via worker (pgfn-retry).
+                const pgmeiComDebito = pgmei.situacao === 'COM_DEBITO';
+                const pgfnComDebito  = !pgfn_fora_de_horario && pgfn.situacao === 'COM_DEBITO';
+                const tem_divida = pgmeiComDebito || pgfnComDebito;
 
-                // Não persiste 0 quando PGFN está fora do horário — o valor real chega via worker.
-                // Também omite quando valor_total_consolidado=0 (inscriptions sem valor parseado).
+                let tipo_divida = '';
+                if (pgmeiComDebito && pgfnComDebito) tipo_divida = 'Federal e DAS';
+                else if (pgfnComDebito)               tipo_divida = 'Federal';
+                else if (pgmeiComDebito)              tipo_divida = 'DAS';
+
                 const valorPgfn = pgfn_detalhes?.valor_total_consolidado ?? 0;
+
+                // Só salva tem_divida=false quando temos certeza (PGFN resultado disponível).
+                // Quando fora_de_horario, omite o campo — não sobrescreve estado anterior.
                 const updatePayload: Record<string, unknown> = {
                     telefone: context.userPhone,
-                    tem_divida,
                     tipo_divida: tipo_divida || undefined,
                 };
+                if (pgmeiComDebito || !pgfn_fora_de_horario) {
+                    updatePayload.tem_divida = tem_divida;
+                }
                 if (!pgfn_fora_de_horario && valorPgfn > 0) {
                     updatePayload.valor_divida_pgfn = valorPgfn;
                 }
 
                 updateUser(updatePayload).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
+
+                // Sincroniza também integra_empresas para o CNPJ consultado (fonte canônica do painel).
+                if (!pgfn_fora_de_horario) {
+                    const cnpjDigits = gate.cnpj!.replace(/\D/g, '');
+                    const ieQuery = valorPgfn > 0
+                        ? pool.query(
+                            `UPDATE integra_empresas SET tem_divida = $1, valor_divida_pgfn = $2, updated_at = NOW()
+                             WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $3`,
+                            [tem_divida, valorPgfn, cnpjDigits]
+                          )
+                        : pool.query(
+                            `UPDATE integra_empresas SET tem_divida = $1, updated_at = NOW()
+                             WHERE REGEXP_REPLACE(cnpj, '[^0-9]', '', 'g') = $2`,
+                            [tem_divida, cnpjDigits]
+                          );
+                    ieQuery.catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar integra_empresas:', err));
+                }
 
                 return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_fora_de_horario, pgfn_janela: `${PGFN_WINDOW.openLabel}–${PGFN_WINDOW.closeLabel}`, pgfn_sem_procuracao: !!gate.bypass_reason });
             } catch (error) {
