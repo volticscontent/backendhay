@@ -639,14 +639,19 @@ export const getRegularizacaoTools = (context: AgentContext): ToolDefinition[] =
                 else if (pgfn.situacao === 'COM_DEBITO') tipo_divida = 'Federal';
                 else if (pgmei.situacao === 'COM_DEBITO') tipo_divida = 'DAS';
 
-                const valor_divida_pgfn = pgfn_detalhes?.valor_total_consolidado || 0;
-
-                updateUser({
+                // Não persiste 0 quando PGFN está fora do horário — o valor real chega via worker.
+                // Também omite quando valor_total_consolidado=0 (inscriptions sem valor parseado).
+                const valorPgfn = pgfn_detalhes?.valor_total_consolidado ?? 0;
+                const updatePayload: Record<string, unknown> = {
                     telefone: context.userPhone,
                     tem_divida,
                     tipo_divida: tipo_divida || undefined,
-                    valor_divida_pgfn
-                }).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
+                };
+                if (!pgfn_fora_de_horario && valorPgfn > 0) {
+                    updatePayload.valor_divida_pgfn = valorPgfn;
+                }
+
+                updateUser(updatePayload).catch(err => console.error('[consultar_pgmei_serpro] Erro ao atualizar lead:', err));
 
                 return JSON.stringify({ status: 'success', resumo_executivo, pgmei, pgfn, pgfn_detalhes, dasn_info, dasn_result, aviso, pgfn_fora_de_horario, pgfn_janela: `${PGFN_WINDOW.openLabel}–${PGFN_WINDOW.closeLabel}`, pgfn_sem_procuracao: !!gate.bypass_reason });
             } catch (error) {

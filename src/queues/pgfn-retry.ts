@@ -9,6 +9,8 @@ import {
     PGFN_WINDOW,
 } from '../lib/pgfn';
 import { cronLogger } from '../lib/logger';
+import { saveConsultation } from '../lib/serpro-db';
+import pool from '../lib/db';
 
 const QUEUE_NAME = 'pgfn-window-retry';
 const log = cronLogger;
@@ -98,6 +100,21 @@ export function startPgfnRetryWorker(): Worker {
             }
 
             const result = await consultarDividaAtivaPorDevedor(cnpj);
+
+            // Registra na auditoria (source 'loop') para a consulta da janela aparecer no
+            // histórico/Resumo da empresa — antes este caminho consultava sem persistir nada.
+            await saveConsultation(cnpj, 'PGFN_API', result, 200, 'loop').catch(() => {});
+
+            // Persiste o valor real da dívida no cadastro do lead (campo que ficou zerado quando
+            // a primeira chamada ocorreu fora do horário e o valor era desconhecido).
+            if (result.tem_debitos_detectado === true && (result.resumo?.valor_total_consolidado ?? 0) > 0) {
+                await pool.query(
+                    `UPDATE leads SET valor_divida_pgfn = $1
+                     WHERE REGEXP_REPLACE(telefone, '[^0-9]', '', 'g') = $2`,
+                    [result.resumo!.valor_total_consolidado, phone.replace(/\D/g, '')]
+                ).catch(err => log.error(`PGFN retry: erro ao persistir valor_divida_pgfn para ${phone}:`, err));
+                log.info(`PGFN: valor_divida_pgfn=${result.resumo!.valor_total_consolidado} salvo para ${phone}.`);
+            }
 
             // Se a própria reconsulta caiu fora do horário (borda da janela), reagenda.
             if (result.fora_de_horario) {
